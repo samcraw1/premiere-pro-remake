@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/mempickup/obvious-edit/ui">
+    <file alias="obvious-edit.css" compressed="true">obvious-edit.css</file>
+  </gresource>
+</gresources>
