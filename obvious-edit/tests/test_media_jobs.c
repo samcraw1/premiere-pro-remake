@@ -15,14 +15,72 @@
  *                                UNSUPPORTED.
  *   /jobs/cancel-check           an always-cancel check stops the job
  *                                with CANCELLED.
+ *   /jobs/cancel-check           an always-cancel check stops the job
+ *                                with CANCELLED.
+ *   /jobs/cache-round-trip       miss → store → hit with byte-identical
+ *                                payload, and a corrupt entry reads as
+ *                                a miss (no error).
  */
 
-#include <math.h>
+#include <string.h>
 
 #include <glib.h>
 
+#include <math.h>
+#include "../src/app/oe_media_cache.h"
 #include "../src/media/oe_media_jobs.h"
 #include "fixture_media.h"
+
+static void
+test_cache_round_trip (gconstpointer user_data)
+{
+  const OeFixtures *fx = user_data;
+  GError *error = NULL;
+
+  /* Fresh cache location for this test binary. */
+  gchar *cache_dir = g_dir_make_tmp ("oe-media-cache-XXXXXX", &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (cache_dir);
+  g_setenv ("OE_MEDIA_CACHE_DIR", cache_dir, TRUE);
+
+  gchar *key = oe_media_cache_key_for_file (fx->avi_path, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (key);
+
+  /* Miss on an empty cache. */
+  guchar *data = NULL;
+  gsize len = 0;
+
+  g_assert_false (oe_media_cache_lookup (key, &data, &len));
+  g_assert_null (data);
+
+  /* Store → hit with byte-identical payload. */
+  const guchar payload[] = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x42 };
+
+  g_assert_true (oe_media_cache_store (key, payload, sizeof (payload), &error));
+  g_assert_no_error (error);
+  g_assert_true (oe_media_cache_lookup (key, &data, &len));
+  g_assert_cmpuint (len, ==, sizeof (payload));
+  g_assert_cmpint (memcmp (data, payload, sizeof (payload)), ==, 0);
+  g_free (data);
+
+  /* A corrupt entry reads as a miss, not an error. */
+  gchar *entry_path = oe_media_cache_path_for_key (key);
+
+  g_assert_true (g_file_set_contents (entry_path, "junk", 4, &error));
+  g_assert_no_error (error);
+  g_assert_false (oe_media_cache_lookup (key, &data, &len));
+  g_assert_null (data);
+
+  /* Deleting the whole cache directory is safe by design. */
+  g_assert_true (g_file_test (oe_media_cache_path_for_key (key), G_FILE_TEST_EXISTS));
+
+  g_free (entry_path);
+  g_free (key);
+  g_free (cache_dir);
+}
 
 static gboolean
 cancel_always (gpointer user_data G_GNUC_UNUSED)
@@ -182,6 +240,7 @@ main (int argc, char **argv)
   g_test_add_data_func ("/jobs/waveform-peaks", &fx, test_waveform_peaks);
   g_test_add_data_func ("/jobs/waveform-wrong-kind", &fx, test_waveform_wrong_kind);
   g_test_add_data_func ("/jobs/cancel-check", &fx, test_cancel_check);
+  g_test_add_data_func ("/jobs/cache-round-trip", &fx, test_cache_round_trip);
 
   int result = g_test_run ();
 

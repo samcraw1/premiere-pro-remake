@@ -43,6 +43,23 @@ oe_probe_info_init (OeProbeInfo *info)
 }
 
 void
+oe_probe_info_copy (OeProbeInfo *dst, const OeProbeInfo *src)
+{
+  oe_probe_info_clear (dst);
+  dst->kind = src->kind;
+  dst->duration_us = src->duration_us;
+  dst->width = src->width;
+  dst->height = src->height;
+  dst->frame_rate_num = src->frame_rate_num;
+  dst->frame_rate_den = src->frame_rate_den;
+  dst->sample_rate = src->sample_rate;
+  dst->channels = src->channels;
+  dst->container_name = g_strdup (src->container_name);
+  dst->video_codec = g_strdup (src->video_codec);
+  dst->audio_codec = g_strdup (src->audio_codec);
+}
+
+void
 oe_probe_info_clear (OeProbeInfo *info)
 {
   g_clear_pointer (&info->container_name, g_free);

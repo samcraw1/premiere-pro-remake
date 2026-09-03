@@ -23,6 +23,7 @@ gtk4_dep = dependency('gtk4', version: '>= 4.10')
 glib_dep = dependency('glib-2.0', version: '>= 2.74')
 gobject_dep = dependency('gobject-2.0', version: '>= 2.74')
 json_glib_dep = dependency('json-glib-1.0', version: '>= 1.6')
+gio_dep = dependency('gio-2.0', version: '>= 2.74')
 avformat_dep = dependency('libavformat', version: '>= 60')
 avcodec_dep = dependency('libavcodec', version: '>= 60')
 avutil_dep = dependency('libavutil', version: '>= 58')
@@ -58,6 +59,9 @@ executable('obvious-edit',
     'src/app/oe_application.c',
     'src/app/oe_command.c',
     'src/app/oe_log.c',
+    'src/app/oe_media_cache.c',
+    'src/app/oe_media_library.c',
+    'src/app/oe_import_worker.c',
     'src/media/oe_ffmpeg.c',
     'src/media/oe_probe.c',
     'src/media/oe_media_jobs.c',
@@ -74,6 +78,7 @@ executable('obvious-edit',
 # The smoke tests exercise the adapters without linking GTK.
 test_deps = [
   glib_dep,
+  gio_dep,
   gobject_dep,
   avformat_dep,
   avcodec_dep,
@@ -140,7 +145,8 @@ test_probe = executable('test_probe',
 
 test('probe', test_probe)
 
-# Decode jobs (thumbnail, waveform) run GTK-free with cancellation.
+# Decode jobs (thumbnail, waveform) run GTK-free with cancellation; the
+# cache round-trip test links the app-layer cache module (glib-only).
 test_media_jobs = executable('test_media_jobs',
   [
     'tests/test_media_jobs.c',
@@ -148,9 +154,44 @@ test_media_jobs = executable('test_media_jobs',
     'src/media/oe_probe.c',
     'src/media/oe_media_jobs.c',
     'src/app/oe_log.c',
+    'src/app/oe_media_cache.c',
   ],
   c_args: oe_log_cargs,
   dependencies: test_deps,
 )
 
 test('media-jobs', test_media_jobs)
+
+# Session asset records: statuses, observers, and a real GFileMonitor
+# round trip, all GTK-free.
+test_media_library = executable('test_media_library',
+  [
+    'tests/test_media_library.c',
+    'src/app/oe_log.c',
+    'src/app/oe_media_library.c',
+    'src/media/oe_probe.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps,
+)
+
+test('media-library', test_media_library)
+
+# Import worker: one decode thread with main-context completion; uses
+# the media layer for probing and the cache for hit/miss behavior.
+test_import_worker = executable('test_import_worker',
+  [
+    'tests/test_import_worker.c',
+    'tests/fixture_media.c',
+    'src/media/oe_ffmpeg.c',
+    'src/media/oe_probe.c',
+    'src/media/oe_media_jobs.c',
+    'src/app/oe_log.c',
+    'src/app/oe_media_cache.c',
+    'src/app/oe_import_worker.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps,
+)
+
+test('import-worker', test_import_worker)

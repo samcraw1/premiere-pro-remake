@@ -78,6 +78,16 @@ void oe_probe_info_init (OeProbeInfo *info);
  * Frees owned strings and zeroes the record. Safe on a zeroed record.
  */
 void oe_probe_info_clear (OeProbeInfo *info);
+/**
+ * oe_probe_info_copy:
+ * @dst: destination record (cleared first)
+ * @src: source record
+ *
+ * Deep-copies owned strings so records can move between layers
+ * (worker → library → UI) without sharing ownership.
+ */
+void oe_probe_info_copy (OeProbeInfo *dst, const OeProbeInfo *src);
+
 
 /**
  * OE_PROBE_ERROR: error domain for probing failures.
