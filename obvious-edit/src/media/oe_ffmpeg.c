@@ -10,10 +10,21 @@
 #include <libswscale/swscale.h>
 
 /*
- * Phase 0 runs the lifecycle on the main thread only, so a plain static flag
- * is deliberate. When a second thread arrives, this becomes a g_once-guarded
- * section without touching callers.
+ * Phase 2 brings a second thread (the import worker), so the one-time
+ * libavformat setup runs under g_once: concurrent first use initialises
+ * exactly once and every caller sees the same result. Shutdown re-arms
+ * the guard under the state lock so a later lifecycle cycle (tests re-init;
+ * the app itself shuts down once) can initialise again. That reset is safe
+ * because teardown order joins the worker before shutdown runs.
  */
+typedef struct
+{
+  int rv;
+} FfmpegInitResult;
+
+static GOnce ffmpeg_init_once = G_ONCE_INIT;
+static FfmpegInitResult ffmpeg_init_result;
+static GMutex ffmpeg_state_lock;
 static gboolean ffmpeg_initialized = FALSE;
 
 GQuark
@@ -45,46 +56,72 @@ oe_ffmpeg_log_versions (void)
           AV_VERSION_MICRO (swresample));
 }
 
+static gpointer
+ffmpeg_init_run (gpointer data G_GNUC_UNUSED)
+{
+  ffmpeg_init_result.rv = avformat_network_init ();
+  return &ffmpeg_init_result;
+}
+
 gboolean
 oe_ffmpeg_init (GError **error)
 {
-  int rv;
-
   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
-  if (ffmpeg_initialized)
-    {
-      oe_log (OE_LOG_LEVEL_DEBUG, "ffmpeg adapter already initialised");
-      return TRUE;
-    }
+  FfmpegInitResult *r = g_once (&ffmpeg_init_once, ffmpeg_init_run, NULL);
 
-  rv = avformat_network_init ();
-  if (rv != 0)
+  if (r->rv != 0)
     {
+      /* A hard libavformat failure stays terminal: the once guard keeps
+       * reporting the same result instead of re-running the setup. */
       g_set_error (error, OE_FFMPEG_ERROR, OE_FFMPEG_ERROR_INIT_FAILED,
-                   "avformat_network_init failed with code %d", rv);
+                   "avformat_network_init failed with code %d", r->rv);
       return FALSE;
     }
 
+  g_mutex_lock (&ffmpeg_state_lock);
+  gboolean first = !ffmpeg_initialized;
   ffmpeg_initialized = TRUE;
-  oe_ffmpeg_log_versions ();
-  oe_log (OE_LOG_LEVEL_DEBUG, "ffmpeg adapter initialised");
+  g_mutex_unlock (&ffmpeg_state_lock);
+
+  if (first)
+    {
+      oe_ffmpeg_log_versions ();
+      oe_log (OE_LOG_LEVEL_DEBUG, "ffmpeg adapter initialised");
+    }
+  else
+    {
+      oe_log (OE_LOG_LEVEL_DEBUG, "ffmpeg adapter already initialised");
+    }
+
   return TRUE;
 }
 
 void
 oe_ffmpeg_shutdown (void)
 {
+  g_mutex_lock (&ffmpeg_state_lock);
+
   if (!ffmpeg_initialized)
-    return;
+    {
+      g_mutex_unlock (&ffmpeg_state_lock);
+      return;
+    }
 
   avformat_network_deinit ();
   ffmpeg_initialized = FALSE;
+  ffmpeg_init_once = (GOnce) G_ONCE_INIT;
+  g_mutex_unlock (&ffmpeg_state_lock);
+
   oe_log (OE_LOG_LEVEL_DEBUG, "ffmpeg adapter shut down");
 }
 
 gboolean
 oe_ffmpeg_is_initialized (void)
 {
-  return ffmpeg_initialized;
+  g_mutex_lock (&ffmpeg_state_lock);
+  gboolean initialized = ffmpeg_initialized;
+  g_mutex_unlock (&ffmpeg_state_lock);
+
+  return initialized;
 }

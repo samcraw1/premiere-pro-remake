@@ -34,6 +34,9 @@ sdl3_dep = dependency('sdl3', version: '>= 3.2')
 # One structured-logging domain for the whole project.
 oe_log_cargs = ['-DG_LOG_DOMAIN="oe"']
 
+# The fixture generator synthesises sine tones: libm for sin/cos.
+math_dep = meson.get_compiler('c').find_library('m')
+
 oe_deps = [
   gtk4_dep,
   glib_dep,
@@ -56,6 +59,8 @@ executable('obvious-edit',
     'src/app/oe_command.c',
     'src/app/oe_log.c',
     'src/media/oe_ffmpeg.c',
+    'src/media/oe_probe.c',
+    'src/media/oe_media_jobs.c',
     'src/playback/oe_audio_output.c',
     'src/ui/oe_main_window.c',
     'src/ui/oe_shell_layout.c',
@@ -77,6 +82,7 @@ test_deps = [
   swscale_dep,
   swresample_dep,
   sdl3_dep,
+  math_dep,
 ]
 
 test_lifecycle = executable('test_lifecycle',
@@ -119,3 +125,32 @@ test_shell_layout = executable('test_shell_layout',
 )
 
 test('shell-layout', test_shell_layout)
+
+# Probe tests are the contract for the media metadata layer (GTK-free).
+test_probe = executable('test_probe',
+  [
+    'tests/test_probe.c',
+    'tests/fixture_media.c',
+    'src/media/oe_probe.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps,
+)
+
+test('probe', test_probe)
+
+# Decode jobs (thumbnail, waveform) run GTK-free with cancellation.
+test_media_jobs = executable('test_media_jobs',
+  [
+    'tests/test_media_jobs.c',
+    'tests/fixture_media.c',
+    'src/media/oe_probe.c',
+    'src/media/oe_media_jobs.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps,
+)
+
+test('media-jobs', test_media_jobs)
