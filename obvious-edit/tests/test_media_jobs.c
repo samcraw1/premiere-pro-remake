@@ -26,10 +26,10 @@
 
 #include <glib.h>
 
-#include <math.h>
 #include "../src/app/oe_media_cache.h"
 #include "../src/media/oe_media_jobs.h"
 #include "fixture_media.h"
+#include <math.h>
 
 static void
 test_cache_round_trip (gconstpointer user_data)
@@ -75,7 +75,10 @@ test_cache_round_trip (gconstpointer user_data)
   g_assert_null (data);
 
   /* Deleting the whole cache directory is safe by design. */
-  g_assert_true (g_file_test (oe_media_cache_path_for_key (key), G_FILE_TEST_EXISTS));
+  gchar *check_path = oe_media_cache_path_for_key (key);
+
+  g_assert_true (g_file_test (check_path, G_FILE_TEST_EXISTS));
+  g_free (check_path);
 
   g_free (entry_path);
   g_free (key);
