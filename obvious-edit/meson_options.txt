@@ -1,0 +1,5 @@
+# Phase 0 defines no build options yet.
+#
+# Candidates for later phases (e.g. -Dtests=false for release packaging, or a
+# -Ddevel-docs toggle) are declared here once a real need appears. Keeping the
+# file present makes that a one-line change instead of a meson.build rework.
