@@ -1,0 +1,7 @@
+# Build directories (created by meson setup)
+build/
+build-san/
+
+# Compiler/test debris
+*.o
+meson-logs/

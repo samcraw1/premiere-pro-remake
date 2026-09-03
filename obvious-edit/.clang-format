@@ -1,0 +1,11 @@
+---
+# Obvious Edit C style: GLib-flavoured. All project sources and tests are
+# formatted with clang-format -i using this file; CI runs
+# `clang-format --dry-run --Werror` over src/ and fails on any diff.
+Language: Cpp
+BasedOnStyle: GNU
+ColumnLimit: 100
+IndentWidth: 2
+UseTab: Never
+SpaceAfterCStyleCast: true
+AlignTrailingComments: true
