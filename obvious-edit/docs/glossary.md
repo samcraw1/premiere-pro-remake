@@ -37,6 +37,33 @@ code has a live library under it.
 
 **Decode** — turning compressed media into raw frames/samples.
 
+**Probe** (Phase 2, as implemented) — `src/media/oe_probe.c` opens a file
+with libavformat, classifies it (video / audio / still image), and fills
+an `OeProbeInfo` with metadata: integer-microsecond duration, dimensions,
+rational frame rate, sample rate, channels, container, and codec names.
+Missing files give `OE_PROBE_ERROR_OPEN_FAILED`; files with no decodable
+audio or video stream give `OE_PROBE_ERROR_UNSUPPORTED`.
+
+**Thumbnail** — a small raw-RGBA preview decoded from an asset (seek to
+10% of the duration capped at 3 s, first frame as fallback), scaled to
+fit a 96×96 box preserving aspect. Stored as owned bytes in the asset
+record and cached; the bin turns them into `GdkMemoryTexture`s.
+
+**Waveform** — the compressed loudness profile of an asset's first audio
+channel: a fixed number of min/max peak pairs, one pair per bucket,
+produced through swresample + FFmpeg decoding and cached with the
+thumbnail. Rendered by later phases; computed and stored now.
+
+**Relink** — re-pointing an asset record at a new file path after its
+original disappeared. The record returns to IMPORTING and is re-probed
+like a fresh import; a relink that lands on another unsupported file
+leaves the row in place as UNSUPPORTED so it can be tried again.
+
+**Asset missing** — the status of an asset whose file existed at import
+but was deleted or moved externally. The bin keeps the row (with a
+Relink button) because the user may want to restore it; the record
+holds the last known metadata.
+
 **Resample** — converting audio between sample rates or channel layouts.
 
 **Proxy media** — lighter-weight stand-in files used during editing,
@@ -71,17 +98,23 @@ visible on screen. The --self-check quits on the window's first map.
 
 ## Shell terms (Phase 1)
 
-**Media bin** — the panel that will list imported media (Phase 2).
-Until then it shows its labeled empty state.
+**Media bin** — the panel listing the session's imported assets: one row
+per asset with its thumbnail, name, kind+duration line, and status
+badge. Rows for MISSING or UNSUPPORTED assets carry a Relink button;
+dropping files onto the panel imports them.
 
 **Source monitor** — the panel that will play the clip being examined
-from the media bin, before it is edited into the timeline (Phase 2).
+from the media bin, before it is edited into the timeline. In Phase 2
+it still shows its labeled empty state — source playback is a later
+phase.
 
 **Program monitor** — the panel that will play the sequence itself —
 what the timeline produces (Phase 3).
 
-**Inspector** — the panel that will show properties of the current
-selection (opacity, volume, speed, …) for direct editing.
+**Inspector** — the panel showing properties of the current selection.
+In Phase 2 a bin selection fills it with the full probed record
+(metadata, codecs, path); direct editing of clip properties (opacity,
+volume, speed, …) arrives with the editing phases.
 
 **Transport controls** — the play/stop/shuttle/mark buttons bound to
 the transport commands; they live in the toolbar and the timeline area.

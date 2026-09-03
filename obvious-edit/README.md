@@ -87,6 +87,8 @@ hermetic (no host audio device, no third-party audio-library noise).
 - `docs/code-map.md` — what lives in which file
 - `docs/glossary.md` — NLE vocabulary used in this codebase
 - `docs/learning/phase-0.md` — the Phase 0 walkthrough for new contributors
+- `docs/learning/phase-1.md` — the Phase 1 walkthrough (shell, commands, layout)
+- `docs/learning/phase-2.md` — the Phase 2 walkthrough (media import, bin, inspector)
 
 ## License
 

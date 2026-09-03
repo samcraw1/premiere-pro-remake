@@ -35,7 +35,9 @@ typedef enum
  * Initialises the FFmpeg libraries the project links (currently network
  * support in libavformat) and logs each linked library version through the
  * OE logging domain. Idempotent: calling it again after success is a no-op
- * that still returns TRUE.
+ * that still returns TRUE. Thread-safe since Phase 2: the setup work runs
+ * under g_once, so concurrent callers (main thread, import worker) all see
+ * the same result. After oe_ffmpeg_shutdown() a fresh init cycle works.
  *
  * Returns: TRUE on success; on failure FALSE with @error set (caller frees).
  */

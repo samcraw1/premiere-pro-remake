@@ -182,8 +182,12 @@ test_table_integrity (void)
   assert_entry (OE_CMD_UNDO, "edit.undo", "<Control>z");
   assert_entry (OE_CMD_REDO, "edit.redo", "<Control><Shift>z");
 
+  /* Phase 2 deliberately moves media.import out of the menu-only set:
+   * import is the spine of the editing workflow, so it gets the
+   * conventional Ctrl+I (deliberate pin change, noted in the PR body). */
+  assert_entry (OE_CMD_IMPORT_MEDIA, "media.import", "<Control>i");
+
   /* Menu-only commands carry no accelerator by contract. */
-  g_assert_null (oe_command_entry (OE_CMD_IMPORT_MEDIA)->accelerator);
   g_assert_null (oe_command_entry (OE_CMD_NEW_PROJECT)->accelerator);
   g_assert_null (oe_command_entry (OE_CMD_OPEN_PROJECT)->accelerator);
   g_assert_null (oe_command_entry (OE_CMD_SAVE_PROJECT)->accelerator);

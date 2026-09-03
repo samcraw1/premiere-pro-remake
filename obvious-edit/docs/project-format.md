@@ -17,6 +17,17 @@ plumbing that sneaks in early.
   must be trivially replaceable (no `double` seconds in APIs that would
   leak into serialized state).
 
+## Phase 2 note: imported-asset records are session-transient
+
+Phase 2 added asset records (paths, probe metadata, thumbnails,
+waveforms) and a derived-media cache — none of it persists into any
+project file. The asset library lives and dies with the process; the
+`$XDG_CACHE_HOME` cache is a performance artifact, regenerable at any
+time and never treated as document state. No persistence hardening
+happens here: when the project phase defines save/load it will define
+which of this (if any) becomes document state, and the current
+session-transient behavior deliberately does not constrain that choice.
+
 ## What the format must support (from the product goals)
 
 - Multi-track sequence definitions with per-clip trims and positions.
