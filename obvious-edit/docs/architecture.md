@@ -1,18 +1,18 @@
-# Architecture (Phase 1)
+# Architecture (Phases 1 + 2)
 
 ## The shape of the system
 
 Phase 0 built the load-bearing frame; Phase 1 hung the editor shell on
-it. The current shape:
+it; Phase 2 fed it media. The current shape:
 
 ```
 obvious-edit (binary)
  └── OeApplication (app/oe_application.[ch])
       ├── startup vfunc, in order:   shutdown vfunc, reverse order:
-      │    oe_ffmpeg_init()             oe_audio_output_shutdown()
+      │    oe_ffmpeg_init() [g_once]    oe_audio_output_shutdown()
       │    oe_audio_output_init()       oe_ffmpeg_shutdown()
-      │    oe_theme_init()
-      │    install command actions
+      │    oe_theme_init()              (worker joins in window dispose,
+      │    install command actions       BEFORE oe_ffmpeg_shutdown)
       │
       └── activate vfunc
            └── OeMainWindow (ui/oe_main_window.[ch])
@@ -22,6 +22,16 @@ obvious-edit (binary)
                     ├─ inspector_paned (H): monitors | inspector
                     └─ timeline area + transport
                 status bar ← command reporter
+                │
+                │ owns (GTK-free, app/):
+                ├── OeMediaLibrary — session assets, statuses, observers,
+                │       GFileMonitor per OK asset, relink
+                └── OeImportWorker — one GThread + GAsyncQueue,
+                        results via g_main_context_invoke
+                        ↕ (plain buffers, no GTK types)
+                     media/ (FFmpeg only): oe_probe, oe_media_jobs
+                        ↕ raw-binary, keyed path+size+mtime
+                     app/oe_media_cache ($XDG_CACHE_HOME)
 ```
 
 ## Layers and their rules
@@ -111,10 +121,53 @@ The shell composition itself uses only GtkPaned and GtkBox with shrink
 disabled — no GtkFixed, no absolute pixel geometry — so panels resize
 proportionally and empty states name the phase that will fill them.
 
+## The media import pipeline (Phase 2)
+
+Phase 2 adds the first layers that learn what a media file is. The
+rule that shapes all of it: **the app layer orchestrates decode without
+decoding** — it decides *whether* and *in what order*, while only
+`src/media/` ever touches an FFmpeg API, and only `src/ui/` ever builds
+a widget.
+
+**Import paths converge.** The Ctrl+I chooser (`GtkFileDialog`
+`open_multiple`, extension filters that only narrow the picker — the
+probe is the accept/reject authority) and the bin's file-list drop
+(`GtkDropTarget` + `GDK_TYPE_FILE_LIST`, copy action) both call one
+`import_paths()` in the window. There is exactly one import entry
+point; the gestures are adapters.
+
+**Threading model.** One decode thread, created with the window. Jobs
+are immutable and refcounted, queued through a `GAsyncQueue`. The
+worker checks the cache first, runs probe → thumbnail → waveform with
+an atomic cancellation check between steps, and delivers each result
+with `g_main_context_invoke`, so the window's callback always runs on
+the main thread. Shutdown frees the worker (drain + join) before the
+application's `oe_ffmpeg_shutdown` — a thread must outlive nothing it
+calls into.
+
+**State lives in the library.** `oe_media_library` is the single owner
+of asset records: opaque ids, IMPORTING / OK / MISSING / UNSUPPORTED,
+deep-copied probe metadata, owned raw-RGBA thumbnails, and a GTK-free
+observer. A `GFileMonitor` per OK asset flips records to MISSING when
+files disappear; `relink()` re-points a record and returns it to
+IMPORTING. The bin is a projection — it rebuilds its rows from the
+library on every change and keeps no state of its own.
+
+**Derived media is cached.** Thumbnail and waveform bytes are cached
+under `$XDG_CACHE_HOME/obvious-edit/media/` keyed by canonical path +
+size + mtime (no content hashing — the cache exists to avoid reading
+every byte). Entries are magic-framed raw binary; corrupt entries are
+misses; there is no eviction policy and deleting the directory is a
+cold cache.
+
+**Time and metadata floors.** Durations are integer microseconds,
+frame rates are num/den rationals, no floats in metadata — the
+project-format time-model floor is enforced from the first probe.
+
 ## What comes later
 
 Editing engine, project model, playback clock, and persistence layers
 arrive in later phases; the adapter seams in `src/media/` and
 `src/playback/` are where they will plug in. See
-`docs/learning/phase-0.md` and `phase-1.md` for guided walkthroughs of
+`docs/learning/phase-0.md`, `phase-1.md`, and `phase-2.md` for guided walkthroughs of
 each phase.
