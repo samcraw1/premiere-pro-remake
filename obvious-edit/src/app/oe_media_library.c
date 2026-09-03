@@ -361,7 +361,9 @@ oe_media_library_get (OeMediaLibrary *library, guint id, OeAssetInfo *out)
                                                                   * asset->thumbnail.height * 4);
     }
 
-  oe_asset_info_clear (out);
+  /* @out receives a freshly initialized record: never clear it here.
+   * Clearing would free whatever the caller's uninitialized stack
+   * struct happens to contain (the bin refresh passes raw storage). */
   *out = info;
   return TRUE;
 }

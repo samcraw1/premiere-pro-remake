@@ -145,7 +145,8 @@ gboolean oe_media_library_relink (OeMediaLibrary *library, guint id, const gchar
 
 /**
  * oe_media_library_get:
- * @out: receives a copy of the record; clear with oe_asset_info_clear.
+ * @out: receives a freshly initialized copy of the record; the caller
+ * owns it and must clear it with oe_asset_info_clear when done.
  *
  * Returns: TRUE if @id is known.
  */
