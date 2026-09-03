@@ -26,7 +26,7 @@ static OeCommandEntry command_table[OE_CMD_COUNT] = {
   { OE_CMD_DELETE_SELECTION, "selection.delete", "Delete", TRUE },
   { OE_CMD_UNDO, "edit.undo", "<Control>z", TRUE },
   { OE_CMD_REDO, "edit.redo", "<Control><Shift>z", TRUE },
-  { OE_CMD_IMPORT_MEDIA, "media.import", NULL, TRUE },
+  { OE_CMD_IMPORT_MEDIA, "media.import", "<Control>i", TRUE },
   { OE_CMD_NEW_PROJECT, "project.new", NULL, TRUE },
   { OE_CMD_OPEN_PROJECT, "project.open", NULL, TRUE },
   { OE_CMD_SAVE_PROJECT, "project.save", NULL, TRUE },

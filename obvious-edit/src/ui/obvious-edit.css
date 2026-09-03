@@ -81,3 +81,63 @@ window:focus {
   outline: 2px solid #7fc7ff;
   outline-offset: -2px;
 }
+
+/* Media bin (Phase 2): rows, thumbnails, badges, drop feedback */
+.media-bin-row {
+  border-bottom: 1px solid #3a3f47;
+}
+
+.media-bin-row:selected {
+  background-color: #35485e;
+}
+
+.media-row-name {
+  color: #e8eaed;
+  font-weight: bold;
+}
+
+.media-row-meta {
+  color: #9aa0a6;
+  font-size: 90%;
+}
+
+.media-thumb {
+  border-radius: 4px;
+}
+
+.media-thumb-placeholder {
+  color: #6b7280;
+}
+
+.status-badge {
+  border-radius: 8px;
+  padding: 1px 8px;
+  font-size: 85%;
+}
+
+.badge-importing {
+  background-color: #4a4331;
+  color: #e2c880;
+}
+
+.badge-ok {
+  background-color: #2e4436;
+  color: #8fd3a4;
+}
+
+.badge-missing {
+  background-color: #4d3333;
+  color: #e0918f;
+}
+
+.badge-unsupported {
+  background-color: #4a3a2b;
+  color: #d9a066;
+}
+
+/* Drag-over feedback on the bin panel */
+.drop-active {
+  outline: 2px dashed #7fc7ff;
+  outline-offset: -4px;
+}
+

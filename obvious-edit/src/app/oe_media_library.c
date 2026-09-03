@@ -20,6 +20,7 @@ typedef struct
   gchar *name;
   OeAssetStatus status;
   OeProbeInfo info;
+  OeThumbnail thumbnail;
   GFileMonitor *monitor;
   gulong monitor_handler;
 } Asset;
@@ -42,6 +43,7 @@ asset_free (Asset *asset)
       g_object_unref (asset->monitor);
     }
   oe_probe_info_clear (&asset->info);
+  g_clear_pointer (&asset->thumbnail.rgba, g_free);
   g_free (asset->name);
   g_free (asset->path);
   g_free (asset);
@@ -70,10 +72,8 @@ notify (OeMediaLibrary *library, guint id)
 /* Monitors fire on the main context; a deletion moves the asset to
  * MISSING and stops watching (nothing left to watch). */
 static void
-on_monitor_changed (GFileMonitor *monitor G_GNUC_UNUSED,
-                    GFile *file G_GNUC_UNUSED,
-                    GFile *other_file G_GNUC_UNUSED,
-                    GFileMonitorEvent event_type,
+on_monitor_changed (GFileMonitor *monitor G_GNUC_UNUSED, GFile *file G_GNUC_UNUSED,
+                    GFile *other_file G_GNUC_UNUSED, GFileMonitorEvent event_type,
                     gpointer user_data)
 {
   Asset *asset = user_data;
@@ -148,6 +148,7 @@ oe_asset_info_clear (OeAssetInfo *info)
   g_clear_pointer (&info->path, g_free);
   g_clear_pointer (&info->name, g_free);
   oe_probe_info_clear (&info->info);
+  g_clear_pointer (&info->thumbnail.rgba, g_free);
   memset (info, 0, sizeof (*info));
 }
 
@@ -160,6 +161,14 @@ oe_asset_info_copy (OeAssetInfo *dst, const OeAssetInfo *src)
   dst->name = g_strdup (src->name);
   dst->status = src->status;
   oe_probe_info_copy (&dst->info, &src->info);
+
+  if (src->thumbnail.rgba != NULL)
+    {
+      dst->thumbnail.width = src->thumbnail.width;
+      dst->thumbnail.height = src->thumbnail.height;
+      dst->thumbnail.rgba = g_memdup2 (src->thumbnail.rgba,
+                                       (gsize) src->thumbnail.width * src->thumbnail.height * 4);
+    }
 }
 
 guint
@@ -204,8 +213,8 @@ start_monitor (Asset *asset)
     }
 
   asset->monitor = monitor;
-  asset->monitor_handler = g_signal_connect (monitor, "changed", G_CALLBACK (on_monitor_changed),
-                                             asset);
+  asset->monitor_handler
+      = g_signal_connect (monitor, "changed", G_CALLBACK (on_monitor_changed), asset);
   g_object_unref (file);
 }
 
@@ -314,6 +323,9 @@ oe_media_library_relink (OeMediaLibrary *library, guint id, const gchar *path)
   g_free (asset->name);
   asset->name = g_path_get_basename (path);
   oe_probe_info_clear (&asset->info);
+  g_clear_pointer (&asset->thumbnail.rgba, g_free);
+  asset->thumbnail.width = 0;
+  asset->thumbnail.height = 0;
   asset->status = OE_ASSET_STATUS_IMPORTING;
   notify (library, id);
 
@@ -332,13 +344,48 @@ oe_media_library_get (OeMediaLibrary *library, guint id, OeAssetInfo *out)
   if (asset == NULL)
     return FALSE;
 
-  OeAssetInfo info = { asset->id, g_strdup (asset->path), g_strdup (asset->name), asset->status,
-                       { 0 } };
+  OeAssetInfo info;
 
+  oe_asset_info_init (&info);
+  info.id = asset->id;
+  info.path = g_strdup (asset->path);
+  info.name = g_strdup (asset->name);
+  info.status = asset->status;
   oe_probe_info_copy (&info.info, &asset->info);
+
+  if (asset->thumbnail.rgba != NULL)
+    {
+      info.thumbnail.width = asset->thumbnail.width;
+      info.thumbnail.height = asset->thumbnail.height;
+      info.thumbnail.rgba = g_memdup2 (asset->thumbnail.rgba, (gsize) asset->thumbnail.width
+                                                                  * asset->thumbnail.height * 4);
+    }
+
   oe_asset_info_clear (out);
   *out = info;
   return TRUE;
+}
+
+void
+oe_media_library_set_thumbnail (OeMediaLibrary *library, guint id, const OeThumbnail *thumb)
+{
+  g_return_if_fail (library != NULL);
+
+  Asset *asset = find_asset (library, id);
+
+  if (asset == NULL)
+    return;
+
+  g_clear_pointer (&asset->thumbnail.rgba, g_free);
+  asset->thumbnail.width = 0;
+  asset->thumbnail.height = 0;
+
+  if (thumb != NULL && thumb->rgba != NULL && thumb->width > 0 && thumb->height > 0)
+    {
+      asset->thumbnail.width = thumb->width;
+      asset->thumbnail.height = thumb->height;
+      asset->thumbnail.rgba = g_memdup2 (thumb->rgba, (gsize) thumb->width * thumb->height * 4);
+    }
 }
 
 guint

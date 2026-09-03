@@ -21,6 +21,7 @@
 
 #include <glib.h>
 
+#include "../media/oe_media_jobs.h"
 #include "../media/oe_probe.h"
 
 G_BEGIN_DECLS
@@ -49,6 +50,8 @@ const gchar *oe_asset_status_get_name (OeAssetStatus status);
  * @name: display name, the path basename.
  * @status: current status.
  * @info: probed metadata; meaningful only when @status is OK.
+ * @thumbnail: raw RGBA preview (owned); zeroed until the import worker
+ *     delivers one.
  */
 typedef struct
 {
@@ -57,6 +60,7 @@ typedef struct
   gchar *name;
   OeAssetStatus status;
   OeProbeInfo info;
+  OeThumbnail thumbnail;
 } OeAssetInfo;
 
 void oe_asset_info_init (OeAssetInfo *info);
@@ -86,6 +90,15 @@ void oe_media_library_set_observer (OeMediaLibrary *library, OeLibraryChangedFun
  * Returns: the new opaque asset id.
  */
 guint oe_media_library_add (OeMediaLibrary *library, const gchar *path);
+
+/**
+ * oe_media_library_set_thumbnail:
+ * @thumb: raw RGBA preview to copy, or NULL to clear.
+ *
+ * Stores the decoded preview bytes on the record (GTK-free raw data;
+ * the UI turns them into a GdkMemoryTexture). Unknown ids are ignored.
+ */
+void oe_media_library_set_thumbnail (OeMediaLibrary *library, guint id, const OeThumbnail *thumb);
 
 /**
  * oe_media_library_mark_ok:
