@@ -8,6 +8,15 @@ project('obvious-edit', 'c',
     'werror=true',
   ])
 
+gnome = import('gnome')
+
+# The theme stylesheet is compiled into the binary, so the shell can never
+# come up unstyled from a mis-installed data file.
+oe_resources = gnome.compile_resources('oe_resources',
+  'src/ui/obvious-edit.gresource.xml',
+  source_dir: 'src/ui',
+)
+
 # Dependency floors are policy: configure fails on anything older, so a
 # developer never chases a build break that is really a stale toolchain.
 gtk4_dep = dependency('gtk4', version: '>= 4.10')
@@ -41,12 +50,16 @@ oe_deps = [
 
 executable('obvious-edit',
   [
+    oe_resources,
     'src/main.c',
     'src/app/oe_application.c',
+    'src/app/oe_command.c',
     'src/app/oe_log.c',
     'src/media/oe_ffmpeg.c',
     'src/playback/oe_audio_output.c',
     'src/ui/oe_main_window.c',
+    'src/ui/oe_shell_layout.c',
+    'src/ui/oe_theme.c',
   ],
   c_args: oe_log_cargs,
   dependencies: oe_deps,
@@ -80,4 +93,29 @@ test_lifecycle = executable('test_lifecycle',
 test('lifecycle', test_lifecycle,
   env: ['SDL_AUDIODRIVER=dummy'])
 
+# Command registry: GTK-free by design, so the table and dispatch paths are
+# tested without a display (same executable() + test() pattern as above).
+test_commands = executable('test_commands',
+  [
+    'tests/test_commands.c',
+    'src/app/oe_command.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [glib_dep, gobject_dep],
+)
 
+test('commands', test_commands)
+
+# Shell layout persistence: GLib/GKeyFile only, no GTK.
+test_shell_layout = executable('test_shell_layout',
+  [
+    'tests/test_shell_layout.c',
+    'src/ui/oe_shell_layout.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [glib_dep, gobject_dep],
+)
+
+test('shell-layout', test_shell_layout)

@@ -1,10 +1,12 @@
 #include "oe_application.h"
 
+#include "oe_command.h"
 #include "oe_log.h"
 
 #include "../media/oe_ffmpeg.h"
 #include "../playback/oe_audio_output.h"
 #include "../ui/oe_main_window.h"
+#include "../ui/oe_theme.h"
 
 struct _OeApplication
 {
@@ -16,6 +18,41 @@ struct _OeApplication
 };
 
 G_DEFINE_TYPE (OeApplication, oe_application, GTK_TYPE_APPLICATION)
+
+/* Every registry command is exposed as an app.<dotted-name> action; the
+ * action layer is pure plumbing — all policy lives in the registry. */
+static void
+on_command_action (GSimpleAction *action G_GNUC_UNUSED, GVariant *parameter G_GNUC_UNUSED,
+                   gpointer user_data)
+{
+  oe_command_dispatch ((OeCommandId) GPOINTER_TO_INT (user_data), NULL);
+}
+
+static void
+oe_application_install_commands (OeApplication *self)
+{
+  const OeCommandEntry *table = oe_command_table ();
+
+  for (int i = 0; i < OE_CMD_COUNT; i++)
+    {
+      GSimpleAction *action = g_simple_action_new (table[i].name, NULL);
+
+      g_signal_connect (action, "activate", G_CALLBACK (on_command_action),
+                        GINT_TO_POINTER (table[i].id));
+      g_action_map_add_action (G_ACTION_MAP (self), G_ACTION (action));
+      g_object_unref (action);
+
+      if (table[i].accelerator != NULL)
+        {
+          g_autofree gchar *detailed = g_strdup_printf ("app.%s", table[i].name);
+          const gchar *accels[] = { table[i].accelerator, NULL };
+
+          gtk_application_set_accels_for_action (GTK_APPLICATION (self), detailed, accels);
+        }
+    }
+
+  oe_log (OE_LOG_LEVEL_INFO, "installed %d commands", (int) OE_CMD_COUNT);
+}
 
 /* Runs once, on the window's first map; the self-check unwinds from here. */
 static void
@@ -77,7 +114,13 @@ oe_application_startup (GApplication *application)
     {
       oe_log (OE_LOG_LEVEL_ERROR, "audio output init failed: %s", error->message);
       g_clear_error (&error);
+      return;
     }
+
+  /* Shell prerequisites, in order: theme before the first window, then the
+   * command actions so menu, toolbar, and accelerators all have targets. */
+  oe_theme_init ();
+  oe_application_install_commands (self);
 }
 
 static void

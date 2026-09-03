@@ -1,7 +1,13 @@
-/* oe_main_window.h — the Phase 0 application window.
+/* oe_main_window.h — the Phase 1 editor shell window.
  *
- * A titled, empty GtkApplicationWindow shell. Timeline and preview content
- * arrive in later phases; the title is the headless acceptance marker.
+ * The shell composes the whole workspace from GtkPaned/GtkGrid containers:
+ * a menu bar, a toolbar, the media bin, source and program monitors, the
+ * inspector, the timeline area with transport controls, and a status bar.
+ * Every panel shows a labeled empty state — the shell is never blank.
+ *
+ * The window owns the command reporter (status-bar feedback) and the
+ * layout lifecycle: sizes and splitter positions load at construction and
+ * save on close via oe_shell_layout.
  */
 
 #pragma once
