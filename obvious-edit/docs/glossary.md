@@ -69,6 +69,62 @@ visible on screen. The --self-check quits on the window's first map.
 **Main loop** — GLib's event loop. GTK applications run one inside
 `g_application_run()`.
 
+## Shell terms (Phase 1)
+
+**Media bin** — the panel that will list imported media (Phase 2).
+Until then it shows its labeled empty state.
+
+**Source monitor** — the panel that will play the clip being examined
+from the media bin, before it is edited into the timeline (Phase 2).
+
+**Program monitor** — the panel that will play the sequence itself —
+what the timeline produces (Phase 3).
+
+**Inspector** — the panel that will show properties of the current
+selection (opacity, volume, speed, …) for direct editing.
+
+**Transport controls** — the play/stop/shuttle/mark buttons bound to
+the transport commands; they live in the toolbar and the timeline area.
+
+**Status bar** — the strip at the bottom of the shell where command
+dispatch feedback appears ("'x' not implemented yet").
+
+**Empty state** — the labeled placeholder a panel shows instead of a
+blank canvas, naming what belongs there and when it arrives.
+
+## Command terms (Phase 1)
+
+**Command** — one named user action of the shell (play, undo, import).
+Commands are registered in the GTK-free registry, not in widget code.
+
+**Command ID (OeCommandId)** — the stable enum value identifying a
+command across phases. Permanent API: dispatch and registration use
+IDs; only presentation uses names.
+
+**Dotted name** — the permanent string name of a command
+(`transport.play-pause`), used in the action namespace (`app.<name>`),
+logs, and reports. Renaming later is a breaking change.
+
+**Accelerator** — the default keybinding for a command (Space, J/K/L,
+I/O, V, C, Delete; Ctrl+Z / Ctrl+Shift+Z are reserved for Undo/Redo),
+stored in the registry and mapped to `app.<name>` actions by the
+application layer.
+
+**Dispatch** — running a command through the registry: enablement
+check, then handler or not-implemented path, then reporter + log.
+Dispatch is total; no path crashes or hangs.
+
+**Reporter** — the registry's output seam: a function pointer the
+registry calls with user-facing dispatch feedback. The status bar
+subscribes as the reporter; the registry never knows GTK exists.
+
+**Enablement** — the per-command on/off state checked before the
+handler runs; disabled commands report and log instead of executing.
+
+**GTK-free test** — a unit test that links no GTK and needs no display.
+Command-table integrity, dispatch paths, and layout persistence are
+all covered this way so CI can run them headlessly.
+
 ## Build terms
 
 **Meson / Ninja** — the build configuration system and the low-level

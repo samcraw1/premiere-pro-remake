@@ -7,6 +7,8 @@ structured logging, smoke tests, and a headless window verification.
 ## Requirements
 
 Debian 13 (trixie) with the following toolchain. The single install line:
+    sudo apt-get update
+
 
     sudo apt-get install -y build-essential meson ninja-build clang-format valgrind xvfb dbus x11-utils libgtk-4-dev libglib2.0-dev libjson-glib-dev libavformat-dev libavcodec-dev libavutil-dev libavfilter-dev libswscale-dev libswresample-dev libsdl3-dev pkg-config
 
