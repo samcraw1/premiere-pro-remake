@@ -1,0 +1,83 @@
+/* obvious-edit.css — the Phase 1 shell theme (original work).
+ *
+ * An original dark palette chosen for this project: neutral deep greys,
+ * light-on-dark text, a single amber accent, and a hard-visible focus
+ * outline. No libadwaita; nothing derived from any commercial NLE.
+ */
+
+/* Window + panel chrome */
+window,
+.window {
+  background-color: #23262b;
+  color: #e8eaed;
+}
+
+.panel {
+  background-color: #2a2e34;
+  border: 1px solid #3a3f47;
+  border-radius: 6px;
+  margin: 4px;
+}
+
+.panel-title {
+  background-color: #1e2126;
+  color: #e8eaed;
+  font-weight: bold;
+  border-bottom: 1px solid #3a3f47;
+  padding: 6px 10px;
+}
+
+.empty-state {
+  color: #9aa0a6;
+  font-style: italic;
+  padding: 12px;
+}
+
+/* Menu bar, toolbar, status bar */
+.menubar {
+  background-color: #1e2126;
+  color: #e8eaed;
+}
+
+.toolbar {
+  background-color: #202329;
+  border-bottom: 1px solid #3a3f47;
+  padding: 4px;
+}
+
+.toolbar button {
+  background-color: #2a2e34;
+  color: #e8eaed;
+  border: 1px solid #3a3f47;
+  border-radius: 4px;
+  padding: 4px 10px;
+}
+
+.toolbar button:hover {
+  background-color: #343941;
+}
+
+.statusbar {
+  background-color: #1e2126;
+  color: #c6cbd2;
+  border-top: 1px solid #3a3f47;
+  padding: 2px 8px;
+}
+
+/* Accent for transport controls */
+.transport button {
+  background-color: #2f343b;
+}
+
+.transport button:hover {
+  background-color: #3d434c;
+}
+
+/* Keyboard visibility: focus is always plainly outlined. */
+button:focus,
+label:focus,
+widget:focus,
+window:focus {
+  outline: 2px solid #7fc7ff;
+  outline-offset: -2px;
+}
