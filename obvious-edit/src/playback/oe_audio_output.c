@@ -163,7 +163,9 @@ oe_audio_output_flush (OeAudioStream *stream)
   if (stream == NULL)
     return;
 
-  if (!SDL_ClearAudioStream (stream->sdl_stream))
+  if (SDL_ClearAudioStream (stream->sdl_stream))
+    oe_log (OE_LOG_LEVEL_DEBUG, "audio stream flushed (seek)");
+  else
     oe_log (OE_LOG_LEVEL_WARNING, "audio stream flush failed: %s", SDL_GetError ());
 }
 
