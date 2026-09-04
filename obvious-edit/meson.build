@@ -66,12 +66,15 @@ executable('obvious-edit',
     'src/app/oe_media_cache.c',
     'src/app/oe_media_library.c',
     'src/app/oe_import_worker.c',
+    'src/app/oe_playback_session.c',
     'src/media/oe_ffmpeg.c',
     'src/media/oe_probe.c',
     'src/media/oe_media_jobs.c',
+    'src/media/oe_media_playback.c',
     'src/playback/oe_audio_output.c',
     'src/ui/oe_main_window.c',
     'src/ui/oe_media_bin.c',
+    'src/ui/oe_program_monitor.c',
     'src/ui/oe_timeline_layout.c',
     'src/ui/oe_timeline.c',
     'src/ui/oe_shell_layout.c',
@@ -261,3 +264,41 @@ test_timeline_layout = executable('test_timeline_layout',
 )
 
 test('timeline-layout', test_timeline_layout)
+
+# Playback clock: the GTK-free session over the project model — deadline
+# math, clip→source mapping, transitions, pause/resume drift accounting,
+# seek, and events, all headless. Runs on SDL's dummy driver so the
+# audio adapter opens without hardware; decode is exercised only
+# through its failure path (missing files) to stay deterministic.
+test_playback_clock = executable('test_playback_clock',
+  [
+    'tests/test_playback_clock.c',
+    'src/app/oe_playback_session.c',
+    'src/media/oe_media_playback.c',
+    'src/playback/oe_audio_output.c',
+    'src/core/oe_project.c',
+    'src/core/oe_time.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps,
+)
+
+test('playback-clock', test_playback_clock,
+  env: ['SDL_AUDIODRIVER=dummy'])
+
+# Audio output adapter: the SDL3 push-model stream contract on the
+# dummy driver — open, is_dummy reporting, queue-depth accounting,
+# flush, device pause/resume, and teardown symmetry.
+test_audio_output = executable('test_audio_output',
+  [
+    'tests/test_audio_output.c',
+    'src/playback/oe_audio_output.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [glib_dep, gobject_dep, sdl3_dep],
+)
+
+test('audio-output', test_audio_output,
+  env: ['SDL_AUDIODRIVER=dummy'])

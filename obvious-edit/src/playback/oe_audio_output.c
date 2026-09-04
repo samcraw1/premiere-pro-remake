@@ -122,8 +122,8 @@ oe_audio_output_open_stream (OeAudioDeviceInfo *info, GError **error)
   info->channels = stream->channels;
   info->is_dummy = stream->is_dummy;
 
-  oe_log (OE_LOG_LEVEL_INFO, "audio device open: %d Hz, %d ch, driver '%s'%s",
-          stream->sample_rate, stream->channels, SDL_GetCurrentAudioDriver (),
+  oe_log (OE_LOG_LEVEL_INFO, "audio device open: %d Hz, %d ch, driver '%s'%s", stream->sample_rate,
+          stream->channels, SDL_GetCurrentAudioDriver (),
           stream->is_dummy ? " (dummy — no audible output)" : "");
   return stream;
 }

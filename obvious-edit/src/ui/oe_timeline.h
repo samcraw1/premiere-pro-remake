@@ -86,6 +86,20 @@ typedef void (*OeTimelineReportFunc) (const gchar *message, gpointer user_data);
 void oe_timeline_set_report_func (OeTimeline *timeline, OeTimelineReportFunc func,
                                   gpointer user_data);
 
+/**
+ * OeTimelinePlayheadFunc:
+ * @playhead_us: the playhead in microseconds
+ * @user_data: context supplied at connect time
+ *
+ * Notified when the user moves the playhead by hand (ruler click or
+ * drag) so the playback session can seek. Positions pushed down from
+ * the session clock do not loop back through this callback.
+ */
+typedef void (*OeTimelinePlayheadFunc) (gint64 playhead_us, gpointer user_data);
+
+void oe_timeline_set_playhead_func (OeTimeline *timeline, OeTimelinePlayheadFunc func,
+                                    gpointer user_data);
+
 /** Selected clip indices; FALSE when the selection is empty. */
 gboolean oe_timeline_get_selection (OeTimeline *timeline, guint *track_index, guint *clip_index);
 

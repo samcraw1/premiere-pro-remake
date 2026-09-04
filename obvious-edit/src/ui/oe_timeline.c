@@ -81,6 +81,8 @@ struct _OeTimeline
   gpointer resolve_data;
   OeTimelineReportFunc report_func;
   gpointer report_data;
+  OeTimelinePlayheadFunc playhead_func;
+  gpointer playhead_data;
 };
 
 G_DEFINE_TYPE (OeTimeline, oe_timeline, GTK_TYPE_DRAWING_AREA)
@@ -284,6 +286,21 @@ oe_timeline_set_report_func (OeTimeline *self, OeTimelineReportFunc func, gpoint
   g_return_if_fail (OE_IS_TIMELINE (self));
   self->report_func = func;
   self->report_data = user_data;
+}
+
+void
+oe_timeline_set_playhead_func (OeTimeline *self, OeTimelinePlayheadFunc func, gpointer user_data)
+{
+  g_return_if_fail (OE_IS_TIMELINE (self));
+  self->playhead_func = func;
+  self->playhead_data = user_data;
+}
+
+static void
+fire_playhead_func (OeTimeline *self)
+{
+  if (self->playhead_func != NULL)
+    self->playhead_func (self->playhead_us, self->playhead_data);
 }
 
 static void
@@ -669,6 +686,7 @@ arm_drag (OeTimeline *self, gdouble x, gdouble y)
     case OE_TIMELINE_HIT_RULER:
       self->drag.kind = DRAG_PLAYHEAD;
       self->playhead_us = oe_timeline_us_for_x (&self->geometry, x);
+      fire_playhead_func (self);
       break;
 
     case OE_TIMELINE_HIT_MOVE:
@@ -733,6 +751,7 @@ update_drag (OeTimeline *self, gdouble x)
     case DRAG_PLAYHEAD:
       self->playhead_us = oe_timeline_us_for_x (&self->geometry, x);
       gtk_widget_queue_draw (GTK_WIDGET (self));
+      fire_playhead_func (self);
       break;
 
     case DRAG_MOVE:
