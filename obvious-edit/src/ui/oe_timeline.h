@@ -128,6 +128,13 @@ gdouble oe_timeline_get_zoom (OeTimeline *timeline);
 void oe_timeline_zoom_in (OeTimeline *timeline);
 void oe_timeline_zoom_out (OeTimeline *timeline);
 
+/** Session snapping toggle (Phase 7, default ON). Gates the preview
+ * path only: when off, move and trim drags hand the raw pointer
+ * candidate to the legality clamp — no magnetism. Session-only; never
+ * persisted. */
+void oe_timeline_set_snapping (OeTimeline *timeline, gboolean enabled);
+gboolean oe_timeline_get_snapping (OeTimeline *timeline);
+
 /** Session playhead in microseconds (ruler click / insert advance;
  * never persisted — Phase 5 owns the clock). */
 gint64 oe_timeline_get_playhead (OeTimeline *timeline);
