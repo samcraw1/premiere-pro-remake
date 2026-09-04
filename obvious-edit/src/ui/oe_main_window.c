@@ -84,6 +84,10 @@ struct _OeMainWindow
    * message, so it is suppressed until the batch drains. */
   gboolean import_batch_open;
 
+  /* --insert-media dogfood batch: every OK import verdict is inserted
+   * on the timeline automatically (headless runs cannot click the bin). */
+  gboolean insert_all_pending;
+
   GtkWidget *inspector_stack; /* "empty" | "media" */
   GtkWidget *inspector_media; /* grid rebuilt per selection */
 
@@ -147,6 +151,16 @@ oe_main_window_import_files (OeMainWindow *window, const gchar *const *paths)
   import_paths (window, paths);
 }
 
+void
+oe_main_window_import_and_insert_files (OeMainWindow *window, const gchar *const *paths)
+{
+  g_return_if_fail (OE_IS_MAIN_WINDOW (window));
+  g_return_if_fail (paths != NULL && paths[0] != NULL);
+
+  window->insert_all_pending = TRUE;
+  import_paths (window, paths);
+}
+
 /* ------------------------------------------------------------------ */
 /* Import pipeline: one entry point for the chooser and drag-and-drop. */
 /* ------------------------------------------------------------------ */
@@ -172,6 +186,7 @@ import_paths (OeMainWindow *self, const gchar *const *paths)
  * the import verdict and project-open flows run earlier in the file. */
 static void register_media_asset_pair (OeMainWindow *self, guint media_ref, guint asset_id);
 static guint lookup_media_ref_for_asset (OeMainWindow *self, guint asset_id);
+static void insert_ready_asset (OeMainWindow *self, guint asset_id);
 
 static void
 on_import_done (const OeImportJobResult *result, gpointer user_data)
@@ -202,6 +217,12 @@ on_import_done (const OeImportJobResult *result, gpointer user_data)
       }
 
       self->import_ok++;
+
+      /* --insert-media dogfood batch: every OK verdict goes straight
+       * to the timeline so a headless run reaches playback without a
+       * bin click. */
+      if (self->insert_all_pending)
+        insert_ready_asset (self, result->asset_id);
       break;
 
     case OE_IMPORT_RESULT_MISSING:
@@ -1145,25 +1166,14 @@ selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_da
   set_status_message (self, "Deleted selected clip");
 }
 
-/* Insert from Bin: the selected asset's file joins the project model
- * (one stable media ref per unique path) and a clip lands at the
- * playhead on the first kind-matching track. */
+/* Shared insertion core for the Insert-from-Bin command and the
+ * --insert-media dogfood batch: one ready asset's file joins the
+ * project model (one stable media ref per unique path) and a clip
+ * lands at the playhead on the first kind-matching track. Every
+ * refusal reports through the status seam. */
 static void
-media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
-                                       gpointer user_data G_GNUC_UNUSED)
+insert_ready_asset (OeMainWindow *self, guint asset_id)
 {
-  if (command_owner == NULL)
-    return;
-
-  OeMainWindow *self = command_owner;
-  const guint asset_id = oe_media_bin_get_selected (OE_MEDIA_BIN (self->media_bin));
-
-  if (asset_id == 0)
-    {
-      set_status_message (self, "Insert from Bin: select an asset in the bin first");
-      return;
-    }
-
   OeAssetInfo asset;
 
   oe_asset_info_init (&asset);
@@ -1267,6 +1277,27 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
 
   set_status_message (self, msg);
   oe_asset_info_clear (&asset);
+}
+
+/* Insert from Bin: the selected asset goes through the shared
+ * insertion core above. */
+static void
+media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
+                                       gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  const guint asset_id = oe_media_bin_get_selected (OE_MEDIA_BIN (self->media_bin));
+
+  if (asset_id == 0)
+    {
+      set_status_message (self, "Insert from Bin: select an asset in the bin first");
+      return;
+    }
+
+  insert_ready_asset (self, asset_id);
 }
 
 /* ------------------------------------------------------------------ */
