@@ -1,43 +1,112 @@
 # Project format
 
-**Status: reserved.** Phase 0 does not read or write project files.
+Obvious Edit project files are JSON documents, version 1, written and
+read by `src/core/oe_project_format.[ch]` (Phase 3). The file extension
+is `.oe`. The format carries the document — name, frame rate, media
+references, tracks, clips — and deliberately nothing else: asset probe
+metadata, thumbnails, and waveforms remain session state (regenerable,
+never document state).
 
-This document reserves the design space for the Obvious Edit project
-format so early structural decisions are not made implicitly by file
-plumbing that sneaks in early.
+## Version 1 schema
 
-## Phase 0 decisions that already constrain the format
+The document root has exactly one member. Its value is the project:
 
-- **Serialization library:** json-glib is a hard build dependency as of
-  Phase 0. The project format will be JSON. There is no parser and no
-  schema yet — the dependency is locked so later phases do not fork the
-  dependency list.
-- **Time model floor:** later phases specify integer timestamps with a
-  rational time base. Any temporary time bookkeeping added before then
-  must be trivially replaceable (no `double` seconds in APIs that would
-  leak into serialized state).
+```json
+{
+  "obvious-edit-project": {
+    "format-version": 1,
+    "name": "My Edit",
+    "frame-rate": { "num": 30000, "den": 1001 },
+    "media": [
+      { "ref": 1, "path": "/media/interview.mp4" },
+      { "ref": 2, "path": "/media/theme.png" }
+    ],
+    "tracks": [
+      {
+        "kind": "video",
+        "clips": [
+          {
+            "media-ref": 1,
+            "position-us": 2002000,
+            "source-in-us": 0,
+            "source-out-us": 5000000
+          }
+        ]
+      },
+      { "kind": "audio", "clips": [] }
+    ]
+  }
+}
+```
 
-## Phase 2 note: imported-asset records are session-transient
+Member-by-member:
 
-Phase 2 added asset records (paths, probe metadata, thumbnails,
-waveforms) and a derived-media cache — none of it persists into any
-project file. The asset library lives and dies with the process; the
-`$XDG_CACHE_HOME` cache is a performance artifact, regenerable at any
-time and never treated as document state. No persistence hardening
-happens here: when the project phase defines save/load it will define
-which of this (if any) becomes document state, and the current
-session-transient behavior deliberately does not constrain that choice.
+| Member | Type | Rules |
+|---|---|---|
+| `obvious-edit-project` | object | the only root member |
+| `format-version` | integer | first member; must be exactly `1` (see versions) |
+| `name` | string | project name, may be empty |
+| `frame-rate` | object | `num` and `den` integers, reduced, `den > 0`, `num > 0` |
+| `media` | array | `ref` (unique positive integer), `path` (string); document order is load order |
+| `tracks` | array | `kind` is `"video"` or `"audio"`; array order is compositing order for video, mixing order for audio |
+| `clips` | array | `media-ref` names a `media.ref`; positions integer microseconds; `source-out-us` must exceed `source-in-us`; clips are stored sorted by `position-us` |
 
-## What the format must support (from the product goals)
+A clip's timeline duration is always `source-out-us − source-in-us`,
+including still images: a still's "source range" encodes its screen
+duration (the model inserts stills at 5 s by default). Gaps are the
+absence of clips, never placeholder elements.
 
-- Multi-track sequence definitions with per-clip trims and positions.
-- Non-destructive references to source media (never embedded copies).
-- Undo/redo history or an operation log sufficient to rebuild it.
-- A version field with explicit migration semantics.
+## Strictness: no silent partial loads
 
-## Planned evolution
+Loading is strict and closed-schema. Any defect fails the whole load
+with a typed error from `OE_PROJECT_FORMAT_ERROR` naming what is wrong:
 
-The format document gains its actual schema, versioning rules, and
-migration policy in the phase that introduces save/load. Until then this
-file is the contract that Phase 0 does NOT define one — preventing
-accidental ad-hoc persistence from hardening into the format.
+- **`SYNTAX`** — the file is not JSON at all (corrupt, truncated).
+- **`MISSING`** — a required member is absent, at any depth.
+- **`UNKNOWN_MEMBER`** — a member outside the v1 schema, at any depth.
+  Unknown members are never tolerated: a reader that skips them would
+  silently drop the data on the next save.
+- **`TYPE`** — a member has the wrong JSON type (including float
+  tokens where integers are required: `"position-us": 1.5` is an error).
+- **`VALUE`** — an integer/string is out of domain (zero denominator,
+  unknown `kind`, non-positive rate, empty source range, unknown
+  `media-ref`).
+- **`VERSION`** — `format-version` is not `1` (see below).
+- **`IO`** — the file cannot be read or written.
+
+Integer-only serialization: every number in a saved file is an integer
+token — rates travel as `num`/`den` pairs exactly, never as floats
+(NTSC 30000/1001 is never 29.97). This and the strict member checking
+keep `save → load → save` byte-identical for an unchanged project.
+
+## Versions and migration
+
+The version field exists so it can be checked. v1 readers reject any
+`format-version` other than `1` with a typed error — including future
+versions (2 and up) and anything older. There is no migration yet: the
+first versioned change to this schema will define one. What will not
+change: reading a newer file is always an explicit, reported failure,
+never a guessed best-effort import.
+
+## Atomic saves
+
+Saving writes a temporary file in the target file's directory, fsyncs
+it, and renames it over the target only after the full write succeeded.
+A failed save leaves any pre-existing file byte-identical (the same
+contract as the versioned GKeyFile layout persistence). No partial
+project file can ever exist at the target path.
+
+## Constraints inherited from earlier phases
+
+- **Serialization library:** json-glib is a hard build dependency
+  (locked since Phase 0). The format is JSON.
+- **Time model floor:** integer microseconds and num/den rational
+  rates only — no `double` anywhere in the model or in serialized
+  state (architecture.md time-model floor).
+- **Media is referenced, never embedded.** Project files store paths;
+  probe metadata, thumbnails, and waveforms are session state and are
+  re-derived after Open by re-importing each referenced path through
+  the import worker (probe results re-mark assets OK / MISSING /
+  UNSUPPORTED).
+- **Undo/redo history** is not serialized in v1. If a later phase adds
+  an operation log, it becomes a new schema version.

@@ -1,9 +1,11 @@
-# Architecture (Phases 1 + 2)
+# Architecture (Phases 1–3)
 
 ## The shape of the system
 
 Phase 0 built the load-bearing frame; Phase 1 hung the editor shell on
-it; Phase 2 fed it media. The current shape:
+it; Phase 2 fed it media; Phase 3 gave it a document — the project &
+timeline data model in `src/core/`, GTK-free and headlessly tested. The
+current shape:
 
 ```
 obvious-edit (binary)
@@ -39,18 +41,26 @@ obvious-edit (binary)
 | Layer | Directory | Talks to | May not |
 |---|---|---|---|
 | Entry point | `src/main.c` | OeApplication, oe_log | touch GTK widgets |
-| Application shell | `src/app/` | all adapters, UI | decode media |
+| Core model | `src/core/` | GLib/GObject/json-glib only | touch GTK, FFmpeg, or SDL |
+| Application shell | `src/app/` | all adapters, UI, core model | decode media |
 | Media adapters | `src/media/` | FFmpeg only | touch GTK or SDL |
 | Playback adapters | `src/playback/` | SDL3 only | touch GTK or FFmpeg |
 | UI | `src/ui/` | GTK only | touch FFmpeg/SDL directly |
 
-Two rules follow from this table and are enforced by review, not tooling:
+Three rules follow from this table and are enforced by review, not
+tooling:
 
 1. **UI never calls FFmpeg or SDL.** Everything the window learns about
-   media arrives through the application layer.
+   media — and the project document itself — arrives through the
+   application layer.
 2. **Adapters are symmetric.** Every `*_init` has a paired `*_shutdown`,
    both idempotent, both safe to call in any state. Startup runs them in
    a fixed order; shutdown runs the exact reverse.
+3. **The core layer knows no I/O libraries and no widgets.**
+   `src/core/` is plain GLib/GObject plus json-glib for the format
+   module. It never includes gtk.h, FFmpeg, or SDL headers, so the
+   whole document model is unit-tested headlessly and could outlive the
+   front-end unchanged.
 
 ## Why the lifecycle adapters exist
 
@@ -166,8 +176,10 @@ project-format time-model floor is enforced from the first probe.
 
 ## What comes later
 
-Editing engine, project model, playback clock, and persistence layers
-arrive in later phases; the adapter seams in `src/media/` and
-`src/playback/` are where they will plug in. See
-`docs/learning/phase-0.md`, `phase-1.md`, and `phase-2.md` for guided walkthroughs of
-each phase.
+The timeline widget (Phase 4), the playback clock with audio output
+wiring (Phase 5), undo/redo (after the playback clock), snapping,
+ripple edits, and export arrive in later phases; `src/core/` is the
+foundation they all build on, and the adapter seams in `src/media/`
+and `src/playback/` are where media and audio plug in. See
+`docs/learning/phase-0.md` through `phase-3.md` for guided walkthroughs
+of each phase.
