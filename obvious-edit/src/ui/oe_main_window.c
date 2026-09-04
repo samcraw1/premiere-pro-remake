@@ -145,7 +145,6 @@ import_paths (OeMainWindow *self, const gchar *const *paths)
     }
 }
 
-
 /* Phase 4 session map helpers (defined with the timeline seams below);
  * the import verdict and project-open flows run earlier in the file. */
 static void register_media_asset_pair (OeMainWindow *self, guint media_ref, guint asset_id);
@@ -773,7 +772,6 @@ project_new_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_
   set_status_message (command_owner, "New project started");
 }
 
-
 /* ------------------------------------------------------------------ */
 /* Phase 4: timeline commands and the widget's resolve/report seams.   */
 /* ------------------------------------------------------------------ */
@@ -795,7 +793,8 @@ lookup_asset_for_media_ref (OeMainWindow *self, guint media_ref)
 {
   gpointer value = NULL;
 
-  if (!g_hash_table_lookup_extended (self->media_ref_to_asset, GUINT_TO_POINTER (media_ref), NULL, &value))
+  if (!g_hash_table_lookup_extended (self->media_ref_to_asset, GUINT_TO_POINTER (media_ref), NULL,
+                                     &value))
     return 0;
 
   return GPOINTER_TO_UINT (value);
@@ -806,7 +805,8 @@ lookup_media_ref_for_asset (OeMainWindow *self, guint asset_id)
 {
   gpointer value = NULL;
 
-  if (!g_hash_table_lookup_extended (self->asset_to_media_ref, GUINT_TO_POINTER (asset_id), NULL, &value))
+  if (!g_hash_table_lookup_extended (self->asset_to_media_ref, GUINT_TO_POINTER (asset_id), NULL,
+                                     &value))
     return 0;
 
   return GPOINTER_TO_UINT (value);
@@ -856,8 +856,8 @@ timeline_resolve_media (guint media_ref, OeTimelineMediaInfo *info, gpointer use
     return;
 
   oe_asset_info_init (&asset);
-  if (!oe_media_library_get (self->media_library,
-                             lookup_asset_for_media_ref (self, media_ref), &asset))
+  if (!oe_media_library_get (self->media_library, lookup_asset_for_media_ref (self, media_ref),
+                             &asset))
     return;
 
   if (asset.status == OE_ASSET_STATUS_OK)
@@ -932,7 +932,8 @@ selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_da
  * (one stable media ref per unique path) and a clip lands at the
  * playhead on the first kind-matching track. */
 static void
-media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
+                                       gpointer user_data G_GNUC_UNUSED)
 {
   if (command_owner == NULL)
     return;
@@ -954,8 +955,8 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer us
 
   if (asset.status != OE_ASSET_STATUS_OK)
     {
-      g_autofree gchar *msg = g_strdup_printf ("Insert from Bin: '%s' is not ready (%s)", asset.name,
-                                               oe_asset_status_get_name (asset.status));
+      g_autofree gchar *msg = g_strdup_printf ("Insert from Bin: '%s' is not ready (%s)",
+                                               asset.name, oe_asset_status_get_name (asset.status));
 
       set_status_message (self, msg);
       oe_asset_info_clear (&asset);
@@ -970,7 +971,8 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer us
 
   if (duration_us <= 0)
     {
-      g_autofree gchar *msg = g_strdup_printf ("Insert from Bin: '%s' has no usable duration", asset.name);
+      g_autofree gchar *msg
+          = g_strdup_printf ("Insert from Bin: '%s' has no usable duration", asset.name);
 
       set_status_message (self, msg);
       oe_asset_info_clear (&asset);
@@ -1010,8 +1012,9 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer us
 
   if (track_index == G_MAXUINT)
     {
-      set_status_message (self, want == OE_TRACK_AUDIO ? "Insert from Bin: no audio track in the sequence"
-                                                       : "Insert from Bin: no video track in the sequence");
+      set_status_message (self, want == OE_TRACK_AUDIO
+                                    ? "Insert from Bin: no audio track in the sequence"
+                                    : "Insert from Bin: no video track in the sequence");
       oe_asset_info_clear (&asset);
       return;
     }
@@ -1019,7 +1022,8 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer us
   const gint64 playhead_us = oe_timeline_get_playhead (OE_TIMELINE (self->timeline));
   GError *error = NULL;
 
-  if (!oe_project_insert_clip (self->project, track_index, media_ref, playhead_us, 0, duration_us, &error))
+  if (!oe_project_insert_clip (self->project, track_index, media_ref, playhead_us, 0, duration_us,
+                               &error))
     {
       g_autofree gchar *msg = g_strdup_printf ("Insert rejected: %s", error->message);
 
@@ -1033,8 +1037,8 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer us
    * inserts stack; session-only state (Phase 5 owns the clock). */
   oe_timeline_set_playhead (OE_TIMELINE (self->timeline), playhead_us + duration_us);
 
-  g_autofree gchar *msg = g_strdup_printf ("Inserted '%s' on track %u at the playhead", asset.name,
-                                           track_index);
+  g_autofree gchar *msg
+      = g_strdup_printf ("Inserted '%s' on track %u at the playhead", asset.name, track_index);
 
   set_status_message (self, msg);
   oe_asset_info_clear (&asset);

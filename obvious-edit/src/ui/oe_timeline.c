@@ -66,14 +66,14 @@ struct _OeTimeline
 {
   GtkDrawingArea parent_instance;
 
-  OeProject *project;         /* weak — the window owns it */
-  OeSequence sequence;        /* deep copy, refreshed per notify */
+  OeProject *project;  /* weak — the window owns it */
+  OeSequence sequence; /* deep copy, refreshed per notify */
   gboolean sequence_valid;
 
   OeTimelineGeometry geometry;
   OeTimelineDrag drag;
 
-  gint selected_track;  /* -1 = no selection */
+  gint selected_track; /* -1 = no selection */
   gint selected_clip;
   gint64 playhead_us;
 
@@ -218,9 +218,10 @@ refresh_snapshot (OeTimeline *self)
   /* The selection names indices: validate against the fresh copy. */
   if (self->selected_track >= 0)
     {
-      OeTrack *track = self->sequence_valid && (guint) self->selected_track < self->sequence.tracks->len
-                           ? g_ptr_array_index (self->sequence.tracks, (guint) self->selected_track)
-                           : NULL;
+      OeTrack *track
+          = self->sequence_valid && (guint) self->selected_track < self->sequence.tracks->len
+                ? g_ptr_array_index (self->sequence.tracks, (guint) self->selected_track)
+                : NULL;
 
       if (track == NULL || (guint) self->selected_clip >= track->clips->len)
         {
@@ -339,7 +340,8 @@ apply_zoom (OeTimeline *self, gdouble new_zoom, gdouble anchor_x)
   gint64 anchor_us = oe_timeline_us_for_x (&self->geometry, anchor_x);
 
   self->geometry.px_per_us = CLAMP (new_zoom, OE_TIMELINE_ZOOM_MIN, OE_TIMELINE_ZOOM_MAX);
-  self->geometry.origin_x = MAX (OE_TIMELINE_LEFT_MARGIN, anchor_x - (gdouble) anchor_us * self->geometry.px_per_us);
+  self->geometry.origin_x
+      = MAX (OE_TIMELINE_LEFT_MARGIN, anchor_x - (gdouble) anchor_us * self->geometry.px_per_us);
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
@@ -432,7 +434,8 @@ paint_ruler (cairo_t *cr, OeTimeline *self, gdouble width)
   set_source (cr, &COLOR_TICK);
   cairo_set_line_width (cr, 1.0);
 
-  for (gint64 us = 0, x = first_x; x <= width; us += minor, x = oe_timeline_x_for_us (&self->geometry, us))
+  for (gint64 us = 0, x = first_x; x <= width;
+       us += minor, x = oe_timeline_x_for_us (&self->geometry, us))
     {
       cairo_move_to (cr, x + 0.5, OE_TIMELINE_RULER_HEIGHT - 5);
       cairo_line_to (cr, x + 0.5, OE_TIMELINE_RULER_HEIGHT);
@@ -441,7 +444,8 @@ paint_ruler (cairo_t *cr, OeTimeline *self, gdouble width)
   cairo_stroke (cr);
 
   /* Major ticks + labels. */
-  for (gint64 us = 0, x = first_x; x <= width; us += step, x = oe_timeline_x_for_us (&self->geometry, us))
+  for (gint64 us = 0, x = first_x; x <= width;
+       us += step, x = oe_timeline_x_for_us (&self->geometry, us))
     {
       set_source (cr, &COLOR_TICK);
       cairo_set_line_width (cr, 1.0);
@@ -466,7 +470,8 @@ paint_lanes (cairo_t *cr, OeTimeline *self, gdouble width, gdouble height)
       if (y >= height)
         break;
 
-      fill_rect (cr, i % 2 == 0 ? &COLOR_LANE_A : &COLOR_LANE_B, 0, y, width, OE_TIMELINE_TRACK_HEIGHT);
+      fill_rect (cr, i % 2 == 0 ? &COLOR_LANE_A : &COLOR_LANE_B, 0, y, width,
+                 OE_TIMELINE_TRACK_HEIGHT);
       stroke_rect (cr, &COLOR_LANE_BORDER, 0, y + 0.5, width, OE_TIMELINE_TRACK_HEIGHT - 1);
     }
 }
@@ -481,7 +486,8 @@ paint_clip (cairo_t *cr, OeTimeline *self, guint track_index, guint clip_index, 
   gint64 source_in = clip->source_in_us;
   gint64 source_out = clip->source_out_us;
   gboolean previewing = self->drag.preview_valid && self->drag.kind != DRAG_PLAYHEAD
-                        && self->drag.track_index == track_index && self->drag.clip_index == clip_index;
+                        && self->drag.track_index == track_index
+                        && self->drag.clip_index == clip_index;
 
   if (previewing)
     {
@@ -516,8 +522,8 @@ paint_clip (cairo_t *cr, OeTimeline *self, guint track_index, guint clip_index, 
   if (!media.missing)
     {
       fill_rect (cr, &COLOR_EDGE_BAND, x, y, OE_TIMELINE_EDGE_BAND_PX, OE_TIMELINE_TRACK_HEIGHT);
-      fill_rect (cr, &COLOR_EDGE_BAND, x + w - OE_TIMELINE_EDGE_BAND_PX, y, OE_TIMELINE_EDGE_BAND_PX,
-                 OE_TIMELINE_TRACK_HEIGHT);
+      fill_rect (cr, &COLOR_EDGE_BAND, x + w - OE_TIMELINE_EDGE_BAND_PX, y,
+                 OE_TIMELINE_EDGE_BAND_PX, OE_TIMELINE_TRACK_HEIGHT);
     }
 
   stroke_rect (cr, &COLOR_CLIP_BORDER, x + 0.5, y + 0.5, w - 1.0, OE_TIMELINE_TRACK_HEIGHT - 1.0);
@@ -527,7 +533,8 @@ paint_clip (cairo_t *cr, OeTimeline *self, guint track_index, guint clip_index, 
     stroke_rect (cr, &COLOR_SELECTION, x + 1.0, y + 1.0, w - 2.0, OE_TIMELINE_TRACK_HEIGHT - 2.0);
 
   /* Label: basename of the media path, drawn inside the body. */
-  gchar *path = self->project != NULL ? oe_project_dup_media_path (self->project, clip->media_ref) : NULL;
+  gchar *path
+      = self->project != NULL ? oe_project_dup_media_path (self->project, clip->media_ref) : NULL;
 
   if (path != NULL)
     {
@@ -596,7 +603,8 @@ paint_empty_state (cairo_t *cr, OeTimeline *self, gdouble width, gdouble height)
 }
 
 static void
-draw_frame (GtkDrawingArea *area G_GNUC_UNUSED, cairo_t *cr, int width, int height, gpointer user_data)
+draw_frame (GtkDrawingArea *area G_GNUC_UNUSED, cairo_t *cr, int width, int height,
+            gpointer user_data)
 {
   OeTimeline *self = OE_TIMELINE (user_data);
 
@@ -688,7 +696,8 @@ arm_drag (OeTimeline *self, gdouble x, gdouble y)
         if (hit.kind == OE_TIMELINE_HIT_MOVE)
           {
             self->drag.kind = DRAG_MOVE;
-            self->drag.grab_offset_us = oe_timeline_us_for_x (&self->geometry, x) - clip.position_us;
+            self->drag.grab_offset_us
+                = oe_timeline_us_for_x (&self->geometry, x) - clip.position_us;
           }
         else if (hit.kind == OE_TIMELINE_HIT_TRIM_IN)
           {
@@ -735,9 +744,8 @@ update_drag (OeTimeline *self, gdouble x)
 
         gint64 wanted = oe_timeline_us_for_x (&self->geometry, x) - self->drag.grab_offset_us;
 
-        self->drag.preview_position_us
-            = oe_timeline_clamp_move_position (&self->sequence, self->drag.track_index,
-                                               self->drag.clip_index, wanted);
+        self->drag.preview_position_us = oe_timeline_clamp_move_position (
+            &self->sequence, self->drag.track_index, self->drag.clip_index, wanted);
         self->drag.preview_valid = TRUE;
         gtk_widget_queue_draw (GTK_WIDGET (self));
       }
@@ -823,11 +831,13 @@ commit_drag (OeTimeline *self, gdouble total_dx, gdouble total_dy)
         if (!find_clip_bounds (self, self->drag.track_index, self->drag.clip_index, &clip))
           break;
 
-        gint64 new_in = self->drag.kind == DRAG_TRIM_IN ? self->drag.preview_source_in_us : clip.source_in_us;
-        gint64 new_out = self->drag.kind == DRAG_TRIM_OUT ? self->drag.preview_source_out_us : clip.source_out_us;
+        gint64 new_in
+            = self->drag.kind == DRAG_TRIM_IN ? self->drag.preview_source_in_us : clip.source_in_us;
+        gint64 new_out = self->drag.kind == DRAG_TRIM_OUT ? self->drag.preview_source_out_us
+                                                          : clip.source_out_us;
 
-        if (!oe_project_trim_clip (self->project, self->drag.track_index, self->drag.clip_index, new_in, new_out,
-                                   &error))
+        if (!oe_project_trim_clip (self->project, self->drag.track_index, self->drag.clip_index,
+                                   new_in, new_out, &error))
           {
             g_autofree gchar *msg = g_strdup_printf ("Trim rejected: %s", error->message);
 
@@ -851,7 +861,8 @@ commit_drag (OeTimeline *self, gdouble total_dx, gdouble total_dy)
 }
 
 static void
-on_drag_begin (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble start_x, gdouble start_y, gpointer user_data)
+on_drag_begin (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble start_x, gdouble start_y,
+               gpointer user_data)
 {
   OeTimeline *self = OE_TIMELINE (user_data);
 
@@ -864,7 +875,8 @@ on_drag_begin (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble start_x, gdouble s
 }
 
 static void
-on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble offset_x, gdouble offset_y G_GNUC_UNUSED, gpointer user_data)
+on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble offset_x,
+                gdouble offset_y G_GNUC_UNUSED, gpointer user_data)
 {
   OeTimeline *self = OE_TIMELINE (user_data);
 
@@ -875,7 +887,8 @@ on_drag_update (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble offset_x, gdouble
 }
 
 static void
-on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble offset_x, gdouble offset_y, gpointer user_data)
+on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble offset_x, gdouble offset_y,
+             gpointer user_data)
 {
   OeTimeline *self = OE_TIMELINE (user_data);
 
@@ -886,7 +899,8 @@ static gboolean
 on_scroll (GtkEventControllerScroll *controller, gdouble dx, gdouble dy, gpointer user_data)
 {
   OeTimeline *self = OE_TIMELINE (user_data);
-  GdkModifierType state = gtk_event_controller_get_current_event_state (GTK_EVENT_CONTROLLER (controller));
+  GdkModifierType state
+      = gtk_event_controller_get_current_event_state (GTK_EVENT_CONTROLLER (controller));
 
   if ((state & GDK_CONTROL_MASK) != 0)
     {
@@ -963,8 +977,8 @@ oe_timeline_init (OeTimeline *self)
   g_signal_connect (drag, "drag-end", G_CALLBACK (on_drag_end), self);
   gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (drag));
 
-  GtkEventControllerScroll *scroll
-      = GTK_EVENT_CONTROLLER_SCROLL (gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES));
+  GtkEventControllerScroll *scroll = GTK_EVENT_CONTROLLER_SCROLL (
+      gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES));
 
   g_signal_connect (scroll, "scroll", G_CALLBACK (on_scroll), self);
   gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (scroll));

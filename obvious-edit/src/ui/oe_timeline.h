@@ -70,9 +70,11 @@ typedef struct
  * @info: fills the fields; unknown refs answer missing = TRUE
  * @user_data: context supplied at connect time
  */
-typedef void (*OeTimelineResolveFunc) (guint media_ref, OeTimelineMediaInfo *info, gpointer user_data);
+typedef void (*OeTimelineResolveFunc) (guint media_ref, OeTimelineMediaInfo *info,
+                                       gpointer user_data);
 
-void oe_timeline_set_resolve_func (OeTimeline *timeline, OeTimelineResolveFunc func, gpointer user_data);
+void oe_timeline_set_resolve_func (OeTimeline *timeline, OeTimelineResolveFunc func,
+                                   gpointer user_data);
 
 /**
  * OeTimelineReportFunc:
@@ -81,7 +83,8 @@ void oe_timeline_set_resolve_func (OeTimeline *timeline, OeTimelineResolveFunc f
  */
 typedef void (*OeTimelineReportFunc) (const gchar *message, gpointer user_data);
 
-void oe_timeline_set_report_func (OeTimeline *timeline, OeTimelineReportFunc func, gpointer user_data);
+void oe_timeline_set_report_func (OeTimeline *timeline, OeTimelineReportFunc func,
+                                  gpointer user_data);
 
 /** Selected clip indices; FALSE when the selection is empty. */
 gboolean oe_timeline_get_selection (OeTimeline *timeline, guint *track_index, guint *clip_index);
