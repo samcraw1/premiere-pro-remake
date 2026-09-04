@@ -331,6 +331,36 @@ copy plus each shifted neighbour's pre/post positions and indices
 recorded); undo and redo replay it through the ordinary typed
 mutators. One action, one undo step, one depth unit in the stack.
 
+## Export terms (Phase 8)
+
+**Render seam** — the GTK-free frame-at-time path (`src/media/oe_render`)
+shared by the program monitor and the export loop: map a position to
+the topmost covering video clip, decode with one sequential decoder per
+source path, composite into an owned opaque BGRA canvas. One path means
+preview and export cannot disagree.
+
+**Frame grid** — the export sampling rule: total frames is
+`ceil(sequence_end_us / frame_interval_us)`, and frame *f* is sampled
+at `oe_time_frame_to_us(f, rate)`. Durations come out within one frame
+of the grid by construction, and probe checks can hold the export to
+that bound.
+
+**Mixdown** — the export audio render: every audio track decoded in
+array order to 48 kHz stereo interleaved float, summed additively (no
+per-clip gain exists in the model), hard-clamped to ±1.0. Gaps in a
+track contribute silence.
+
+**Atomic finalize** — the export twin of atomic project saves: the
+muxer writes to a `g_mkstemp` temp in the destination's directory,
+fsyncs it, and renames it over the destination only on full success.
+Cancellation and every failure mode unlink the temp; a pre-existing
+destination file stays byte-identical.
+
+**Quality preset** — the named CRF mapping exposed by the chooser:
+draft → CRF 28, good → CRF 23, quality → CRF 18, all at x264 preset
+`veryfast`. CRF lower is better-looking and bigger; the preset hides
+the knobs without hiding the trade.
+
 ## Project-specific terms
 
 **Adapter** — a thin module wrapping one external library's global

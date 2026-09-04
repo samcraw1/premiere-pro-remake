@@ -28,10 +28,12 @@ premiere-pro-remake/
     │   │   ├── oe_media_library.[ch]# session assets: statuses, monitors
     │   │   └── oe_playback_session.[ch] # GTK-free playback clock/state machine
     │   ├── media/
+    │   │   ├── oe_export.[ch]     # GTK-free MP4 export: x264/aac, atomic
     │   │   ├── oe_ffmpeg.[ch]     # FFmpeg lifecycle adapter (GError, g_once)
     │   │   ├── oe_media_jobs.[ch] # GTK-free thumbnail + waveform decode jobs
     │   │   ├── oe_media_playback.[ch] # playback decode: audio worker + video
-    │   │   └── oe_probe.[ch]      # FFmpeg metadata probe (GError domain)
+    │   │   ├── oe_probe.[ch]      # FFmpeg metadata probe (GError domain)
+    │   │   └── oe_render.[ch]     # GTK-free frame-at-time render seam
     │   ├── playback/
     │   │   └── oe_audio_output.[ch] # SDL3 audio adapter + push-model stream
     │   └── ui/
@@ -47,6 +49,7 @@ premiere-pro-remake/
     ├── tests/
     │   ├── test_lifecycle.c       # 3 GLib smoke tests
     │   ├── test_commands.c        # registry integrity + dispatch paths
+    │   ├── test_export.c          # export: grid, parity, container, mixdown, atomicity
     │   ├── test_shell_layout.c    # layout round-trip + failure modes
     │   ├── test_probe.c           # probe metadata + error contract
     │   ├── test_media_jobs.c      # thumbnail box-fit, peaks, cache hit/miss
@@ -89,6 +92,8 @@ premiere-pro-remake/
 | `src/media/oe_ffmpeg.c` | avformat network init/teardown (thread-safe via g_once) | `oe_ffmpeg_init`, `oe_ffmpeg_shutdown` |
 | `src/media/oe_probe.c` | File classification + metadata extraction | `oe_probe_file`, `oe_probe_info_clear/copy` |
 | `src/media/oe_media_jobs.c` | Thumbnail + waveform decode jobs | `oe_media_job_thumbnail`, `oe_media_job_waveform` |
+| `src/media/oe_render.c` | GTK-free frame-at-time render seam: topmost-covering-clip mapping, per-source sequential decoder cache, centered even box-fit BGRA compositing | `oe_render_source_new`, `oe_render_session_new`, `oe_render_session_frame_at`, `oe_render_frame_at` |
+| `src/media/oe_export.c` | Synchronous GTK-free MP4 export: integer frame grid over the render seam, x264/AAC encode, additive 48 kHz stereo mixdown, custom-AVIO temp + fsync + rename atomicity, per-frame cancellation | `oe_export_frame_count`, `oe_export_frame_to_us`, `oe_export_run` |
 | `src/app/oe_media_cache.c` | Derived-media cache: keys, lookup, atomic store | `oe_media_cache_lookup`, `oe_media_cache_store` |
 | `src/app/oe_media_library.c` | Session asset records, statuses, monitors | `oe_media_library_add`, `oe_media_library_relink`, `…_set_observer` |
 | `src/core/oe_time.c` | Reduced rationals, frame↔µs conversions (nearest, halves away) | `oe_time_rate`, `oe_time_rate_reduce`, `oe_time_frame_to_us`, `oe_time_us_to_frame` |
@@ -121,6 +126,7 @@ premiere-pro-remake/
 | `tests/test_undo_stack.c` | Per-op inverses, typed rejection at record/apply time, depth eviction, redo clearing, JSON round trips, auto-pause | `/undo/*` |
 | `tests/test_snap_ripple.c` | Pure snap decision (targets, band boundaries, tie-break, zoom scaling, disabled pass-through, snap-then-clamp) + composite ripple records (first/middle/last deletes, typed rejection, JSON round trips, depth, redo clearing, auto-pause) | `/snap-ripple/*` |
 | `tests/test_audio_output.c` | Adapter contract on SDL's dummy driver: init, open, queue depth, pause/resume | `/audio-output/*` |
+| `tests/test_export.c` | Frame-grid math, straight-cut render parity vs the preview seam, MP4 container truth via probe, decoded video/audio round trip (color/amplitude classes), additive two-track mixdown, cancellation cleanup, atomic-failure byte identity | `/export/*` |
 | `tests/fixture_media.c` | Runtime WAV/AVI/PNG/text fixture generator | `oe_fixture_media_create`, `oe_fixture_media_free` |
 
 ## Conventions

@@ -339,10 +339,57 @@ Record-time ripple while PLAYING leaves the session alone (move/
 trim semantics); history application pauses first, exactly like
 undo/redo.
 
+## Export and the render seam (Phase 8)
+
+Export closes the gap between what the monitor shows and what lands in
+a file. The rule that shapes it: **preview and export share one render
+path** — the same GTK-free seam that repaints the program monitor is
+what samples the exported file, frame by frame, so a straight cut that
+looks right on screen cannot silently render differently in the MP4.
+
+The seam lives in `src/media/oe_render.[ch]`. A render source is a
+pair of GTK-free callbacks (a media-ref → owned-path resolver plus a
+`OeMediaCache *`) bound to a sequence; the render session caches one
+sequential decoder per source path (locked decision D2), so the export
+loop never seeks backwards per frame — the cost that makes a naive
+per-frame seam unusable. `oe_render_frame_at`
+maps a position to the topmost covering video clip (highest-index
+track wins, `source_in + (position − clip_start)`, half-open clamped
+to `[0, duration)`) and composites it into a freshly owned, opaque
+BGRA canvas, aspect-preserving box-fit with even-dimension
+letterboxing when the clip is smaller than the sequence.
+
+The export job lives in `src/media/oe_export.[ch]` — synchronous,
+GTK-free, the same calling convention as the media jobs (a
+`GAsyncReadyCallback`-free run function with a hard cancel flag and a
+`(done, total)` progress callback). Video: total frames is
+`ceil(sequence_end_us / frame_interval_us)`, frame *f* sampled at
+`oe_time_frame_to_us(f, rate)`, encoded H.264 via libx264 (by-name,
+with `avcodec_find_encoder(AV_CODEC_ID_H264)` fallback), yuv420p,
+CRF 18/23/28 from the draft/good/quality presets at x264 preset
+`veryfast`. Audio: one additive mixdown across ALL audio tracks in
+array order, decoded to interleaved float at 48 kHz stereo, summed,
+hard-clamped to ±1.0 — gaps contribute silence.
+
+Finalization copies the project-save pattern: a `g_mkstemp` temp in
+the TARGET directory, custom AVIO over its fd, header → frame pump
+(with a cancel check per frame) → trailer → fsync → `g_rename` over
+the destination only on full success. Every other exit — encoder
+failure, mux failure, cancellation — unlinks the temp and reports a
+typed `OeExportError`; the destination file is created or left
+byte-identical, never truncated.
+
+The thread boundary is the import worker's, inverted: the window
+serializes the state the job needs (a deep-copied sequence snapshot
+plus the media-ref → path map), owns a dedicated worker thread, and
+marshals progress/completion back through `g_main_context_invoke`.
+A session-epoch tag discards stale completions after a project
+switch; the atomic cancel flag is consulted between frames, so a
+cancel press ends the job within one frame of encode.
+
 ## What comes later
 
-Export arrives in later phases; `src/core/` is the foundation
-they all build on, and the adapter seams in `src/media/` and
-`src/playback/` are where media and audio plug in. See
-`docs/learning/phase-0.md` through `phase-7.md` for guided
-walkthroughs of each phase.
+`src/core/` is the foundation later phases build on, and the
+adapter seams in `src/media/` and `src/playback/` are where media
+and audio plug in. See `docs/learning/phase-0.md` through
+`phase-8.md` for guided walkthroughs of each phase.
