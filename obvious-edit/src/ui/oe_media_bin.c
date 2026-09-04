@@ -9,8 +9,6 @@
 
 #include "oe_media_bin.h"
 
-#include "../app/oe_log.h"
-
 enum
 {
   SIGNAL_SELECTION_CHANGED,
@@ -363,6 +361,12 @@ static void
 oe_media_bin_init (OeMediaBin *self)
 {
   self->selected_id = 0;
+
+  /* A bare GtkWidget subclass allocates its child only through a layout
+   * manager; without one the panel never receives a size and the whole
+   * bin paints nothing. Found in Phase 4 headless dogfooding — the bin
+   * has been invisible (yet functional) since Phase 2. */
+  gtk_widget_set_layout_manager (GTK_WIDGET (self), gtk_bin_layout_new ());
 
   /* Panel chrome: titled frame like every other pane. */
   GtkWidget *panel = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);

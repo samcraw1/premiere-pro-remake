@@ -32,3 +32,17 @@
    obj:*/libgobject-2.0.so*
    ...
 }
+
+
+# GLib's GTask worker thread spawns once per process; its TLS block
+# (dl-tls under pthread_create) is reported as "possibly lost" because
+# no exported pointer reaches it. GLib-internal one-time allocation —
+{
+   glib-gtask-worker-thread-tls
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:pthread_create*
+   obj:*/libglib-2.0.so*
+}

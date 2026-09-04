@@ -3,7 +3,7 @@
  * The time-model floor from project-format.md, made type-level: integer
  * microseconds everywhere, frame rates as reduced num/den rationals, and
  * no `double` in any signature that could leak into serialized state
- * (architecture.md:163-165).
+ * — the "Time and metadata floors" section of architecture.md.
  *
  * Rounding contract (every conversion in this module): round to nearest,
  * halves away from zero — exactly once, at the final step. Intermediates

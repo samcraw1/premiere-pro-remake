@@ -1,7 +1,9 @@
 /* test_shell_layout.c — GTK-free tests for shell layout persistence (Phase 1).
  *
- * Seven GLib test cases, all display-free:
+ * Eight GLib test cases, all display-free:
  *   /shell-layout/defaults      the documented default layout.
+ *   /shell-layout/default-path  a save with no explicit path lands at
+ *                               the documented XDG location.
  *   /shell-layout/round-trip    save then load reproduces every field,
  *                               including a versioned file on disk.
  *   /shell-layout/missing       a missing file falls back to defaults and

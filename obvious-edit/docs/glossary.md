@@ -191,6 +191,27 @@ another on load. v1 defines no migration; when a future version needs
 one, it will be an explicit, reported transformation — silently
 dropping or guessing members is forbidden by the strict-reader rule.
 
+## Timeline terms (Phase 4)
+
+**Playhead** — the widget-session cursor marking the timeline position
+where playback or insertion happens. Session state only: it lives in
+the timeline widget, never in the project model, and is never
+serialized. The Phase 5 playback clock owns what the playhead means;
+until then it is a view artifact set by ruler clicks and advanced by
+insert-from-bin.
+
+**Selection** — the widget-session designation of one clip as the
+target of commands (Delete, zoom-independent highlight painting).
+The timeline paints it; the project model has no field for it. The
+Delete command commits through the model's remove mutator and then
+clears the selection, so the model always stays authoritative.
+
+**Zoom** — the widget-session pixels-per-microsecond scale relating
+sequence time to screen space, with no model representation. Zooming
+anchors on a fixed time point (the pointer for Ctrl+wheel, the widget
+center for the zoom commands) so the time under the anchor stays put
+on screen. Session-only: nothing in a project file records zoom.
+
 ## Build terms
 
 **Meson / Ninja** — the build configuration system and the low-level

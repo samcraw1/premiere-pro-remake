@@ -254,6 +254,37 @@ gboolean oe_project_remove_clip (OeProject *project, guint track_index, guint cl
                                  GError **error);
 
 /**
+ * oe_project_trim_clip:
+ * @track_index: track holding the clip
+ * @clip_index: clip within the track
+ * @new_source_in: replacement source-in, µs from source start
+ * @new_source_out: replacement source-out, exclusive
+ * @error: failure domain #OE_PROJECT_ERROR
+ *
+ * Re-trims the clip's source range in place. Sequence position is
+ * untouched: trimming never shifts neighbouring clips. Requires
+ * 0 <= @new_source_in < @new_source_out (else
+ * #OE_PROJECT_ERROR_BAD_RANGE). For AV media the range must lie inside
+ * the probed source duration annotated with
+ * oe_project_set_media_source_duration() (else
+ * #OE_PROJECT_ERROR_BAD_RANGE); stills may extend freely — a still's
+ * source range encodes screen duration (the uniform-duration rule).
+ *
+ * The timeline duration is the source range for every media kind, so a
+ * trim changes the clip's footprint like any duration edit: a trim
+ * that would grow across a neighbour is rejected with
+ * #OE_PROJECT_ERROR_OVERLAP, exactly as a move or insert is. The
+ * widget's drag preview clamps to source bounds, so interactive trims
+ * stay clear of this check; the model remains the authority.
+ *
+ * Fires the observer exactly once on success, on the calling thread.
+ *
+ * Returns: TRUE on success, FALSE with @error set on rejection.
+ */
+gboolean oe_project_trim_clip (OeProject *project, guint track_index, guint clip_index,
+                               gint64 new_source_in, gint64 new_source_out, GError **error);
+
+/**
  * oe_project_add_media:
  * @path: file path to reference (copied).
  *
@@ -299,5 +330,35 @@ gboolean oe_project_get_media (OeProject *project, guint index, guint *ref, gcha
  * when @ref is unknown.
  */
 gchar *oe_project_dup_media_path (OeProject *project, guint ref);
+
+/**
+ * oe_project_set_media_source_duration:
+ * @ref: a media reference in the project (unknown refs are ignored)
+ * @source_duration_us: probed duration of the referenced file in µs;
+ *     0 marks a still — or any source whose range may extend freely
+ *
+ * Session-state annotation backing trim validation. Probe metadata is
+ * regenerable and never serializes (project-format.md), so the app
+ * layer calls this as probe results arrive, again after every project
+ * Open re-import. A positive duration bounds AV trims; 0 means
+ * unbounded, because a still's source range encodes screen duration
+ * instead. Media never annotated (no probe verdict yet) is treated as
+ * unbounded too: the model never invents a bound it was not told.
+ *
+ * Annotation is session state, not a document mutation: it never fires
+ * the observer and never serializes.
+ */
+void oe_project_set_media_source_duration (OeProject *project, guint ref,
+                                           gint64 source_duration_us);
+
+/**
+ * oe_project_get_media_source_duration:
+ * @source_duration_us: receives the annotated duration (0 for stills
+ *     and unannotated media), or NULL to ignore
+ *
+ * Returns: TRUE when @ref is known.
+ */
+gboolean oe_project_get_media_source_duration (OeProject *project, guint ref,
+                                               gint64 *source_duration_us);
 
 G_END_DECLS

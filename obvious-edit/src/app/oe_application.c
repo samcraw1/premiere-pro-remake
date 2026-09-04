@@ -15,6 +15,7 @@ struct _OeApplication
   gboolean self_check;
   gboolean startup_attempted;
   gboolean startup_succeeded;
+  gchar **import_media_paths; /* owned; consumed on first activate */
 };
 
 G_DEFINE_TYPE (OeApplication, oe_application, GTK_TYPE_APPLICATION)
@@ -88,6 +89,19 @@ oe_application_activate (GApplication *application)
     g_signal_connect (window, "map", G_CALLBACK (on_window_map), gtk_application);
 
   gtk_window_present (GTK_WINDOW (window));
+
+  /* Headless import: feed the paths through the same pipeline the chooser
+   * uses. A bare Xvfb session cannot drive a modal file chooser, so the
+   * smoke/dogfood harness passes --import-media instead. */
+  if (self->import_media_paths != NULL)
+    {
+      oe_log (OE_LOG_LEVEL_INFO, "import seam: firing %u path(s)",
+              g_strv_length (self->import_media_paths));
+      oe_main_window_import_files (OE_MAIN_WINDOW (window),
+                                   (const gchar *const *) self->import_media_paths);
+      g_strfreev (self->import_media_paths);
+      self->import_media_paths = NULL;
+    }
 }
 
 static void
@@ -141,6 +155,22 @@ oe_application_handle_local_options (GApplication *application, GVariantDict *op
   if (g_variant_dict_contains (options, "self-check"))
     self->self_check = TRUE;
 
+  {
+    g_autoptr (GVariant) import
+        = g_variant_dict_lookup_value (options, "import-media", G_VARIANT_TYPE_STRING_ARRAY);
+    if (import != NULL)
+      {
+        g_strfreev (self->import_media_paths);
+        self->import_media_paths = g_new0 (gchar *, g_variant_n_children (import) + 1);
+        for (gsize i = 0; i < g_variant_n_children (import); i++)
+          {
+            g_autoptr (GVariant) child = g_variant_get_child_value (import, i);
+
+            self->import_media_paths[i] = g_variant_dup_string (child, NULL);
+          }
+      }
+  }
+
   /* -1 continues into the local application instance. */
   return -1;
 }
@@ -162,6 +192,7 @@ oe_application_init (OeApplication *self)
   self->self_check = FALSE;
   self->startup_attempted = FALSE;
   self->startup_succeeded = FALSE;
+  self->import_media_paths = NULL;
 }
 
 OeApplication *
@@ -176,6 +207,11 @@ oe_application_new (void)
   g_application_add_main_option (G_APPLICATION (self), "self-check", '\0', G_OPTION_FLAG_NONE,
                                  G_OPTION_ARG_NONE,
                                  "Open the window, quit after the first map, exit 0", NULL);
+  g_application_add_main_option (G_APPLICATION (self), "import-media", 'I', G_OPTION_FLAG_NONE,
+                                 G_OPTION_ARG_STRING_ARRAY,
+                                 "Import paths through the normal pipeline after the window "
+                                 "maps (headless smoke and dogfood seam)",
+                                 NULL);
 
   return self;
 }

@@ -19,6 +19,10 @@ typedef struct
 {
   guint ref;
   gchar *path;
+  /* Session-state trim bound (oe_project_set_media_source_duration):
+   * probed AV duration, 0 for a still or not-yet-probed media. Never
+   * serialized — probe metadata is regenerable (project-format.md). */
+  gint64 source_duration_us;
 } MediaRef;
 
 struct _OeProject
@@ -568,6 +572,98 @@ oe_project_remove_clip (OeProject *self, guint track_index, guint clip_index, GE
 }
 
 /* ------------------------------------------------------------------ */
+/* Mutations: clips (cont.) — trims.                                   */
+/* ------------------------------------------------------------------ */
+
+gboolean
+oe_project_trim_clip (OeProject *self, guint track_index, guint clip_index, gint64 new_source_in,
+                      gint64 new_source_out, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track %u does not exist (the project has %u)", track_index,
+                   self->sequence.tracks->len);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip %u does not exist on track %u (it has %u)", clip_index, track_index,
+                   track->clips->len);
+      return FALSE;
+    }
+
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+
+  if (new_source_in < 0 || new_source_out <= new_source_in)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE,
+                   "invalid trim: source range [%lld, %lld) — source-in must be >= 0 and "
+                   "source-out must exceed source-in",
+                   (long long) new_source_in, (long long) new_source_out);
+      return FALSE;
+    }
+
+  MediaRef *media = find_media_by_ref (self, clip->media_ref);
+
+  if (media == NULL)
+    {
+      /* Unreachable through the public API (insert validates the ref),
+       * but a clip naming unknown media must not trim as if unbounded. */
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_UNKNOWN_MEDIA,
+                   "media reference %u is not in the project", clip->media_ref);
+      return FALSE;
+    }
+
+  /* AV media is bounded by its probed source duration; stills (duration
+   * 0 / never annotated) extend freely — their source range encodes
+   * screen duration, not a probe result (uniform-duration rule). */
+  if (media->source_duration_us > 0 && new_source_out > media->source_duration_us)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE,
+                   "trim to source range [%lld, %lld) exceeds the probed media duration %lld",
+                   (long long) new_source_in, (long long) new_source_out,
+                   (long long) media->source_duration_us);
+      return FALSE;
+    }
+
+  gint64 duration = new_source_out - new_source_in;
+
+  if (clip->position_us > G_MAXINT64 - duration)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE,
+                   "trim to duration %lld at position %lld overflows the timeline",
+                   (long long) duration, (long long) clip->position_us);
+      return FALSE;
+    }
+
+  /* Position is untouched, but the duration change can grow the
+   * footprint across a neighbour: the trimmed clip's own footprint is
+   * not an overlap target, other clips are (same rule as a move).
+   * Positions stay distinct and ordered — no re-sort needed. */
+  if (placement_overlaps (track, clip->position_us, duration, clip))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_OVERLAP,
+                   "trim to [%lld, %lld) overlaps an existing clip on %s track %u",
+                   (long long) clip->position_us, (long long) (clip->position_us + duration),
+                   oe_track_kind_get_name (track->kind), track_index);
+      return FALSE;
+    }
+
+  clip->source_in_us = new_source_in;
+  clip->source_out_us = new_source_out;
+  notify (self);
+
+  return TRUE;
+}
+
+/* ------------------------------------------------------------------ */
 /* Mutations: media references.                                        */
 /* ------------------------------------------------------------------ */
 
@@ -648,4 +744,35 @@ oe_project_dup_media_path (OeProject *self, guint ref)
   MediaRef *media = find_media_by_ref (self, ref);
 
   return media != NULL ? g_strdup (media->path) : NULL;
+}
+
+void
+oe_project_set_media_source_duration (OeProject *self, guint ref, gint64 source_duration_us)
+{
+  g_return_if_fail (OE_IS_PROJECT (self));
+
+  /* Session-state annotation, not a document mutation: it never fires
+   * the observer (unknown refs are silently ignored, like the media
+   * library's set_thumbnail). */
+  MediaRef *media = find_media_by_ref (self, ref);
+
+  if (media == NULL)
+    return;
+
+  media->source_duration_us = source_duration_us;
+}
+
+gboolean
+oe_project_get_media_source_duration (OeProject *self, guint ref, gint64 *source_duration_us)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  MediaRef *media = find_media_by_ref (self, ref);
+
+  if (media == NULL)
+    return FALSE;
+
+  if (source_duration_us != NULL)
+    *source_duration_us = media->source_duration_us;
+  return TRUE;
 }

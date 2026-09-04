@@ -36,6 +36,12 @@ G_BEGIN_DECLS
  * @OE_CMD_NEW_PROJECT: project lifecycle (wired in Phase 3).
  * @OE_CMD_OPEN_PROJECT: project lifecycle (wired in Phase 3).
  * @OE_CMD_SAVE_PROJECT: project lifecycle (wired in Phase 3).
+ * @OE_CMD_IMPORT_FROM_BIN: insert the selected bin asset at the
+ *     playhead on the first kind-matching track (wired in Phase 4).
+ * @OE_CMD_ZOOM_IN: timeline zoom in, around the widget center (wired
+ *     in Phase 4; zoom is view session state).
+ * @OE_CMD_ZOOM_OUT: timeline zoom out, around the widget center
+ *     (wired in Phase 4; zoom is view session state).
  * @OE_CMD_SHOW_ABOUT: menu-only; about surface.
  * @OE_CMD_COUNT: sentinel — number of commands, not a valid ID.
  *
@@ -59,6 +65,9 @@ typedef enum
   OE_CMD_NEW_PROJECT,
   OE_CMD_OPEN_PROJECT,
   OE_CMD_SAVE_PROJECT,
+  OE_CMD_IMPORT_FROM_BIN,
+  OE_CMD_ZOOM_IN,
+  OE_CMD_ZOOM_OUT,
   OE_CMD_SHOW_ABOUT,
   OE_CMD_COUNT
 } OeCommandId;
