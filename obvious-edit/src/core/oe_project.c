@@ -187,8 +187,8 @@ oe_track_copy (OeTrack *dst, const OeTrack *src)
   for (guint i = 0; i < src->clips->len; i++)
     {
       const OeClip *clip = g_ptr_array_index (src->clips, i);
-      OeClip *copy = clip_new (clip->position_us, clip->source_in_us, clip->source_out_us,
-                               clip->media_ref);
+      OeClip *copy
+          = clip_new (clip->position_us, clip->source_in_us, clip->source_out_us, clip->media_ref);
 
       /* Deep-copy the owned visual too: track copies must never alias
        * clip state (sequence snapshots hand these to the renderer). */

@@ -97,6 +97,15 @@ guint8 *oe_render_frame_at (const OeRenderSource *source, gint64 t_us, int out_w
                             GError **error);
 
 /**
+ * oe_render_blend_channel: the compositor's pure channel blend —
+ * straight (non-premultiplied) integer src-over. @src_c over @dst_c
+ * weighted by @src_a (0-255 source alpha, already opacity-scaled);
+ * result rounded via +127 bias. Deterministic across builds and
+ * platforms: integer arithmetic only, no FP.
+ */
+guint8 oe_render_blend_channel (guint8 dst_c, guint8 src_c, guint8 src_a);
+
+/**
  * oe_render_session_new:
  * @source: render source (sequence snapshot + resolver)
  *

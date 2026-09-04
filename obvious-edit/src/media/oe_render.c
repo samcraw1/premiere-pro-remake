@@ -16,6 +16,7 @@
 
 #include "oe_render.h"
 
+#include <math.h>
 #include <string.h>
 
 #include <libavcodec/avcodec.h>
@@ -368,6 +369,148 @@ make_opaque (guint8 *canvas, gsize pixel_count)
     canvas[i] = 0xFF;
 }
 
+guint8
+oe_render_blend_channel (guint8 dst_c, guint8 src_c, guint8 src_a)
+{
+  /* Straight src-over on integers with a rounding bias: out =
+   * (src*a + dst*(255-a) + 127) / 255. No FP anywhere (spec D2). */
+  return (guint8) ((src_c * src_a + dst_c * (255 - src_a) + 127) / 255);
+}
+
+/* Blends a BGRA @layer over the opaque @canvas at (@dst_x, @dst_y)
+ * with a global @opacity multiplier. The layer's own alpha times
+ * @opacity drives the blend; fully transparent pixels (and clipped
+ * regions) leave the canvas untouched. */
+static void
+blend_layer (guint8 *canvas, int canvas_w, int canvas_h, const guint8 *layer, int layer_w,
+             int layer_h, int dst_x, int dst_y, guint8 opacity)
+{
+  const gint x0 = CLAMP (dst_x, 0, canvas_w);
+  const gint x1 = CLAMP (dst_x + layer_w, 0, canvas_w);
+  const gint y0 = CLAMP (dst_y, 0, canvas_h);
+  const gint y1 = CLAMP (dst_y + layer_h, 0, canvas_h);
+
+  for (gint y = y0; y < y1; y++)
+    {
+      const guint8 *src = layer + (gsize) (y - dst_y) * layer_w * 4 + (gsize) (x0 - dst_x) * 4;
+      guint8 *dst = canvas + (gsize) y * canvas_w * 4 + (gsize) x0 * 4;
+
+      for (gint x = x0; x < x1; x++)
+        {
+          const guint a = src[3] * opacity / 255;
+
+          if (a != 0)
+            {
+              dst[0] = oe_render_blend_channel (dst[0], src[0], (guint8) a);
+              dst[1] = oe_render_blend_channel (dst[1], src[1], (guint8) a);
+              dst[2] = oe_render_blend_channel (dst[2], src[2], (guint8) a);
+            }
+
+          dst += 4;
+          src += 4;
+        }
+    }
+}
+
+/* Scales @src by @scale_permille (1000 = 1.0x), nearest-neighbor on
+ * integer coordinates — deterministic, and it cannot invent values at
+ * layer seams the way filtered scaling would. */
+static guint8 *
+scale_layer (const guint8 *src, int src_w, int src_h, guint scale_permille, int *out_w, int *out_h)
+{
+  const gint dw = MAX ((src_w * (gint) scale_permille + 500) / 1000, 1);
+  const gint dh = MAX ((src_h * (gint) scale_permille + 500) / 1000, 1);
+  guint8 *dst = g_malloc0 ((gsize) dw * dh * 4);
+
+  for (gint y = 0; y < dh; y++)
+    {
+      const gint sy = MIN (y * 1000 / (gint) scale_permille, src_h - 1);
+
+      for (gint x = 0; x < dw; x++)
+        {
+          const gint sx = MIN (x * 1000 / (gint) scale_permille, src_w - 1);
+
+          memcpy (dst + ((gsize) y * dw + x) * 4, src + ((gsize) sy * src_w + sx) * 4, 4);
+        }
+    }
+
+  *out_w = dw;
+  *out_h = dh;
+  return dst;
+}
+
+/* Rotates @src about its center by @rotation_cdeg (clockwise, 1/100
+ * degree units) into a freshly allocated buffer sized to the rotated
+ * bounding box. Inverse mapping: each destination pixel is pulled from
+ * the source through 2^15 fixed-point trig with two-stage bilinear
+ * interpolation — integer arithmetic in the pixel loop, so the output
+ * is bit-identical across runs and platforms. Samples outside the
+ * source stay transparent (zeroed). */
+static guint8 *
+rotate_layer (const guint8 *src, int src_w, int src_h, int rotation_cdeg, int *out_w, int *out_h)
+{
+  if (rotation_cdeg == 0)
+    {
+      guint8 *copy = g_memdup2 (src, (gsize) src_w * src_h * 4);
+
+      *out_w = src_w;
+      *out_h = src_h;
+      return copy;
+    }
+
+  const double rad = rotation_cdeg * (G_PI / 18000.0); /* 1/100 deg → rad */
+  const double cos_r = cos (rad);
+  const double sin_r = sin (rad);
+  const gint dw = (gint) ceil (src_w * fabs (cos_r) + src_h * fabs (sin_r));
+  const gint dh = (gint) ceil (src_w * fabs (sin_r) + src_h * fabs (cos_r));
+  const gint c15 = (gint) lround (cos_r * 32768.0); /* 2^15 fixed point */
+  const gint s15 = (gint) lround (sin_r * 32768.0);
+  const gint64 sw15 = (gint64) (src_w - 1) << 15; /* pixel ← centered map */
+  const gint64 sh15 = (gint64) (src_h - 1) << 15;
+  guint8 *dst = g_malloc0 ((gsize) dw * dh * 4);
+
+  for (gint dy = 0; dy < dh; dy++)
+    {
+      for (gint dx = 0; dx < dw; dx++)
+        {
+          /* Centered destination coordinate, half-pixel units in 2^15
+           * fixed point: (2*d + 1 - size) << 15. */
+          const gint64 u15 = ((gint64) (2 * dx + 1 - dw)) << 15;
+          const gint64 v15 = ((gint64) (2 * dy + 1 - dh)) << 15;
+          /* Inverse rotation into source space (same 2^15 units). */
+          const gint64 x15 = (((gint64) c15 * u15 + (gint64) s15 * v15) >> 15) + sw15;
+          const gint64 y15 = (((gint64) c15 * v15 - (gint64) s15 * u15) >> 15) + sh15;
+          /* Pixel coordinate x = (X2 + w - 1) / 2, still 2^15-scaled. */
+          const gint64 px15 = x15 >> 1;
+          const gint64 py15 = y15 >> 1;
+          const gint sx = (gint) (px15 >> 15);
+          const gint sy = (gint) (py15 >> 15);
+
+          if (sx < 0 || sy < 0 || sx >= src_w - 1 || sy >= src_h - 1)
+            continue; /* outside the source: destination stays transparent */
+
+          const gint fx = (gint) ((px15 - ((px15 >> 15) << 15)) >> 7); /* 8-bit */
+          const gint fy = (gint) ((py15 - ((py15 >> 15) << 15)) >> 7);
+
+          for (gint ch = 0; ch < 4; ch++)
+            {
+              const gint tl = src[((gsize) sy * src_w + sx) * 4 + ch];
+              const gint tr = src[((gsize) sy * src_w + sx + 1) * 4 + ch];
+              const gint bl = src[((gsize) (sy + 1) * src_w + sx) * 4 + ch];
+              const gint br = src[((gsize) (sy + 1) * src_w + sx + 1) * 4 + ch];
+              const gint top = tl + (((tr - tl) * fx) >> 7);
+              const gint bot = bl + (((br - bl) * fx) >> 7);
+
+              dst[((gsize) dy * dw + dx) * 4 + ch] = (guint8) (top + (((bot - top) * fy) >> 7));
+            }
+        }
+    }
+
+  *out_w = dw;
+  *out_h = dh;
+  return dst;
+}
+
 /* Composites @frame into a fresh @out_w x @out_h canvas: box-fit,
  * centered, opaque black letterbox — the monitor's presentation. */
 static guint8 *
@@ -394,17 +537,233 @@ compose_frame (VideoSource *vs, const AVFrame *frame, int out_w, int out_h, GErr
   return canvas;
 }
 
-/* Delivers @frame: caches it as the source's held frame, updates the
- * forward cursor, composites the canvas. Takes ownership of nothing —
- * @frame is unreffed by the caller. */
-static guint8 *
-deliver (VideoSource *vs, const AVFrame *frame, int out_w, int out_h, GError **error)
+/* Decode-to-frame for one source at a stream-time target: backward
+ * requests seek + flush (decode-at discipline), forward requests ride
+ * the sequential pump. Cursor and held frame advance exactly like
+ * deliver() minus compositing, so the fast path and the layered path
+ * share one decode story. Returns @vs's held frame on success, NULL
+ * with @error set on failure. */
+static const AVFrame *
+source_frame_at (VideoSource *vs, gint64 target_tb, GError **error)
 {
-  av_frame_unref (vs->held);
-  av_frame_ref (vs->held, frame);
-  vs->cursor_tb = frame_pts (frame);
+  if (target_tb < vs->cursor_tb)
+    {
+      /* Backward request: the decode-at discipline — seek backward,
+       * flush, deliver the first decoded frame (preview parity). */
+      if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, target_tb, AVSEEK_FLAG_BACKWARD) >= 0)
+        avcodec_flush_buffers (vs->dec.ctx);
+      else if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, 0, AVSEEK_FLAG_BACKWARD) >= 0)
+        avcodec_flush_buffers (vs->dec.ctx);
 
-  return compose_frame (vs, frame, out_w, out_h, error);
+      AVFrame *frame = av_frame_alloc ();
+
+      g_assert_nonnull (frame);
+
+      gboolean end_of_stream = FALSE;
+
+      if (read_next_frame (&vs->dec, frame, &end_of_stream, error))
+        {
+          av_frame_unref (vs->held);
+          av_frame_ref (vs->held, frame);
+          vs->cursor_tb = frame_pts (frame);
+          av_frame_free (&frame);
+          return vs->held;
+        }
+
+      av_frame_free (&frame);
+
+      if (end_of_stream && vs->held != NULL && vs->held->width > 0)
+        return vs->held;
+
+      g_prefix_error (error, "'%s': ", vs->path);
+      return NULL;
+    }
+
+  /* Forward request: read packets sequentially — no seek, the export
+   * loop's hot path — dropping frames before the target. */
+  for (;;)
+    {
+      AVFrame *frame = av_frame_alloc ();
+
+      g_assert_nonnull (frame);
+
+      gboolean end_of_stream = FALSE;
+
+      if (read_next_frame (&vs->dec, frame, &end_of_stream, error))
+        {
+          if (frame_pts (frame) >= target_tb)
+            {
+              av_frame_unref (vs->held);
+              av_frame_ref (vs->held, frame);
+              vs->cursor_tb = frame_pts (frame);
+              av_frame_free (&frame);
+              return vs->held;
+            }
+
+          av_frame_free (&frame); /* still before the target */
+          continue;
+        }
+
+      av_frame_free (&frame);
+
+      if (end_of_stream)
+        {
+          /* Past the source's last frame: hold it (stills render at
+           * every covered sequence time this way, matching the
+           * monitor's clamped decode). */
+          if (vs->held != NULL && vs->held->width > 0)
+            return vs->held;
+
+          g_set_error (error, OE_RENDER_ERROR, OE_RENDER_ERROR_DECODE_FAILED,
+                       "'%s': no video frame decoded", vs->path);
+          return NULL;
+        }
+
+      g_prefix_error (error, "'%s': ", vs->path);
+      return NULL;
+    }
+}
+
+/* Covering video clips at @t_us, ascending track order — the blend
+ * order. Mirrors oe_playback_session_map's cover rule and source
+ * clamp; the array holds borrowed clip pointers. */
+typedef struct
+{
+  const OeClip *clip;
+  gint64 source_us;
+} CoveringClip;
+
+static void
+collect_covering (const OeSequence *sequence, gint64 t_us, GArray *out)
+{
+  for (guint t = 0; t < sequence->tracks->len; t++)
+    {
+      const OeTrack *track = g_ptr_array_index (sequence->tracks, t);
+
+      if (track->kind != OE_TRACK_VIDEO || track->clips == NULL)
+        continue;
+
+      for (guint c = 0; c < track->clips->len; c++)
+        {
+          const OeClip *clip = g_ptr_array_index (track->clips, c);
+          const gint64 length = clip->source_out_us - clip->source_in_us;
+
+          if (t_us < clip->position_us || t_us >= clip->position_us + length)
+            continue;
+
+          const CoveringClip entry = {
+            .clip = clip,
+            .source_us = CLAMP (clip->source_in_us + (t_us - clip->position_us), clip->source_in_us,
+                                clip->source_out_us - 1),
+          };
+
+          g_array_append_val (out, entry);
+        }
+    }
+}
+
+/* The layered path (spec D2): decode → crop → scale → rotate →
+ * translate to the centered position → straight src-over blend, per
+ * covering clip in ascending track order. */
+static guint8 *
+compose_layered (OeRenderSession *session, const GArray *covering, int out_w, int out_h,
+                 GError **error)
+{
+  guint8 *canvas = g_malloc0 ((gsize) out_w * out_h * 4);
+
+  make_opaque (canvas, (gsize) out_w * out_h);
+
+  for (guint i = 0; i < covering->len; i++)
+    {
+      const CoveringClip *entry = &g_array_index (covering, CoveringClip, i);
+      const OeClipVisual *visual = &entry->clip->visual;
+
+      if (visual->opacity == 0)
+        continue; /* invisible layer: nothing to blend */
+
+      VideoSource *vs = ensure_source (session, entry->clip->media_ref, error);
+
+      if (vs == NULL)
+        {
+          g_free (canvas);
+          return NULL;
+        }
+
+      const gint64 target_tb
+          = av_rescale_q (entry->source_us, AV_TIME_BASE_Q, vs->dec.stream->time_base);
+      const AVFrame *frame = source_frame_at (vs, target_tb, error);
+
+      if (frame == NULL)
+        {
+          g_free (canvas);
+          return NULL;
+        }
+
+      gint fit_w = 0;
+      gint fit_h = 0;
+
+      if (!fit_frame (vs, frame, out_w, out_h, &fit_w, &fit_h, error))
+        {
+          g_free (canvas);
+          return NULL;
+        }
+
+      /* Own a copy: fit_frame's staging buffer is reused per source,
+       * and the pipeline below frees every intermediate. */
+      guint8 *layer = g_memdup2 (vs->fitted, (gsize) fit_w * fit_h * 4);
+      int layer_w = fit_w;
+      int layer_h = fit_h;
+
+      /* Crop first (source pixels, spec D2), then scale, then rotate. */
+      if (visual->crop_l != 0 || visual->crop_t != 0 || visual->crop_r != 0 || visual->crop_b != 0)
+        {
+          const gint cl = MIN ((gint) visual->crop_l, layer_w / 2);
+          const gint ct = MIN ((gint) visual->crop_t, layer_h / 2);
+          const gint cr = MIN ((gint) visual->crop_r, layer_w / 2);
+          const gint cb = MIN ((gint) visual->crop_b, layer_h / 2);
+          const gint cw = MAX (layer_w - cl - cr, 1);
+          const gint ch = MAX (layer_h - ct - cb, 1);
+          guint8 *cropped = g_malloc0 ((gsize) cw * ch * 4);
+
+          for (gint y = 0; y < ch; y++)
+            memcpy (cropped + (gsize) y * cw * 4,
+                    layer + (gsize) (ct + y) * layer_w * 4 + (gsize) cl * 4, (gsize) cw * 4);
+
+          g_free (layer);
+          layer = cropped;
+          layer_w = cw;
+          layer_h = ch;
+        }
+
+      if (!oe_clip_visual_is_default (visual))
+        {
+          int scaled_w = 0;
+          int scaled_h = 0;
+          guint8 *scaled
+              = scale_layer (layer, layer_w, layer_h, visual->scale_permille, &scaled_w, &scaled_h);
+
+          g_free (layer);
+
+          int rotated_w = 0;
+          int rotated_h = 0;
+          guint8 *rotated = rotate_layer (scaled, scaled_w, scaled_h, visual->rotation_cdeg,
+                                          &rotated_w, &rotated_h);
+
+          g_free (scaled);
+          layer = rotated;
+          layer_w = rotated_w;
+          layer_h = rotated_h;
+        }
+
+      /* Centered anchor, then the frame-pixel position offset. */
+      const gint dst_x = (out_w - layer_w) / 2 + visual->pos_x;
+      const gint dst_y = (out_h - layer_h) / 2 + visual->pos_y;
+
+      blend_layer (canvas, out_w, out_h, layer, layer_w, layer_h, dst_x, dst_y, visual->opacity);
+      g_free (layer);
+    }
+
+  return canvas;
 }
 
 /* Renders @t_us into a fresh canvas of @out_w x @out_h. */
@@ -429,94 +788,36 @@ oe_render_session_frame_at (OeRenderSession *session, gint64 t_us, int out_w, in
       return canvas;
     }
 
-  const OeTrack *track = g_ptr_array_index (session->source->sequence->tracks, map.track_index);
-  const OeClip *clip = g_ptr_array_index (track->clips, map.clip_index);
+  GArray *covering = g_array_sized_new (FALSE, FALSE, sizeof (CoveringClip), 4);
 
-  VideoSource *vs = ensure_source (session, clip->media_ref, error);
+  collect_covering (session->source->sequence, t_us, covering);
 
-  if (vs == NULL)
-    return NULL;
+  guint8 *canvas = NULL;
 
-  /* Stream-time target for the mapped source position. */
-  const gint64 target_tb = av_rescale_q (map.source_us, AV_TIME_BASE_Q, vs->dec.stream->time_base);
-
-  if (target_tb < vs->cursor_tb)
+  /* Fast path: exactly one covering clip with the default transform
+   * composites through the untouched single-layer pipeline — the
+   * pre-Phase-9 byte-identical presentation (straight cuts, parity). */
+  if (covering->len == 1
+      && oe_clip_visual_is_default (&g_array_index (covering, CoveringClip, 0).clip->visual))
     {
-      /* Backward request: the decode-at discipline — seek backward,
-       * flush, deliver the first decoded frame (preview parity). */
-      if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, target_tb, AVSEEK_FLAG_BACKWARD) >= 0)
-        avcodec_flush_buffers (vs->dec.ctx);
-      else if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, 0, AVSEEK_FLAG_BACKWARD) >= 0)
-        avcodec_flush_buffers (vs->dec.ctx);
+      const CoveringClip *entry = &g_array_index (covering, CoveringClip, 0);
+      VideoSource *vs = ensure_source (session, entry->clip->media_ref, error);
 
-      AVFrame *frame = av_frame_alloc ();
-
-      g_assert_nonnull (frame);
-
-      gboolean end_of_stream = FALSE;
-
-      if (read_next_frame (&vs->dec, frame, &end_of_stream, error))
+      if (vs != NULL)
         {
-          guint8 *canvas = deliver (vs, frame, out_w, out_h, error);
+          const gint64 target_tb
+              = av_rescale_q (entry->source_us, AV_TIME_BASE_Q, vs->dec.stream->time_base);
+          const AVFrame *frame = source_frame_at (vs, target_tb, error);
 
-          av_frame_free (&frame);
-          return canvas;
+          if (frame != NULL)
+            canvas = compose_frame (vs, frame, out_w, out_h, error);
         }
-
-      av_frame_free (&frame);
-
-      if (end_of_stream && vs->held != NULL && vs->held->width > 0)
-        return compose_frame (vs, vs->held, out_w, out_h, error);
-
-      g_prefix_error (error, "'%s': ", vs->path);
-      return NULL;
     }
+  else
+    canvas = compose_layered (session, covering, out_w, out_h, error);
 
-  /* Forward request: read packets sequentially — no seek, the export
-   * loop's hot path — dropping frames before the target. */
-  for (;;)
-    {
-      AVFrame *frame = av_frame_alloc ();
-
-      g_assert_nonnull (frame);
-
-      gboolean end_of_stream = FALSE;
-
-      if (read_next_frame (&vs->dec, frame, &end_of_stream, error))
-        {
-          if (frame_pts (frame) >= target_tb)
-            {
-              guint8 *canvas = deliver (vs, frame, out_w, out_h, error);
-
-              av_frame_free (&frame);
-
-              if (canvas == NULL)
-                g_prefix_error (error, "'%s': ", vs->path);
-              return canvas;
-            }
-
-          av_frame_free (&frame); /* still before the target */
-          continue;
-        }
-
-      av_frame_free (&frame);
-
-      if (end_of_stream)
-        {
-          /* Past the source's last frame: hold it (stills render at
-           * every covered sequence time this way, matching the
-           * monitor's clamped decode). */
-          if (vs->held != NULL && vs->held->width > 0)
-            return compose_frame (vs, vs->held, out_w, out_h, error);
-
-          g_set_error (error, OE_RENDER_ERROR, OE_RENDER_ERROR_DECODE_FAILED,
-                       "'%s': no video frame decoded", vs->path);
-          return NULL;
-        }
-
-      g_prefix_error (error, "'%s': ", vs->path);
-      return NULL;
-    }
+  g_array_unref (covering);
+  return canvas;
 }
 
 guint8 *
