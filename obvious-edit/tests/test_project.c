@@ -9,6 +9,10 @@
  *                                  every clip (stills included).
  *   /project/move-and-remove       move keeps order and rejects new
  *                                  overlaps; removal leaves a gap.
+ *   /project/sequence-size         new sequences default to 1920x1080;
+ *                                  the setter validates and notifies.
+ *   /project/sequence-size-rules   zero, negative, or odd sizes fail
+ *                                  with a typed error and never notify.
  *   /project/observer-once         every mutation fires the observer
  *                                  exactly once, and never from dispose.
  *   /project/deep-copy-getters     get_sequence hands out a copy the
@@ -581,6 +585,77 @@ test_destruction_order (void)
   g_free (observer);
 }
 
+/* --- sequence size --------------------------------------------------------- */
+
+static void
+test_sequence_size (void)
+{
+  OeProject *project = oe_project_new_default ();
+  Observer *observer = observer_new ();
+
+  oe_project_set_observer (project, observer_count, observer);
+
+  /* New sequences default to HD (Phase 8, D3). */
+  OeSequence sequence;
+
+  oe_project_get_sequence (project, &sequence);
+  g_assert_cmpint (sequence.width, ==, OE_SEQUENCE_DEFAULT_WIDTH);
+  g_assert_cmpint (sequence.height, ==, OE_SEQUENCE_DEFAULT_HEIGHT);
+  oe_sequence_clear (&sequence);
+
+  g_assert_true (oe_project_set_sequence_size (project, 640, 360, NULL));
+  g_assert_cmpuint (observer->count, ==, 1);
+
+  /* The snapshot reflects the change; the setter copied into the model. */
+  oe_project_get_sequence (project, &sequence);
+  g_assert_cmpint (sequence.width, ==, 640);
+  g_assert_cmpint (sequence.height, ==, 360);
+  g_assert_cmpuint (sequence.tracks->len, ==, 0);
+  oe_sequence_clear (&sequence);
+
+  g_clear_object (&project);
+  g_free (observer);
+}
+
+static void
+test_sequence_size_rejections (void)
+{
+  OeProject *project = oe_project_new_default ();
+  Observer *observer = observer_new ();
+
+  oe_project_set_observer (project, observer_count, observer);
+
+  static const struct
+  {
+    gint width, height;
+  } bad[] = {
+    { 0, 1080 },    { 1920, 0 }, { -1, 1080 }, { 1920, -640 }, { 1919, 1080 }, /* odd width  */
+    { 1920, 1081 },                                                            /* odd height */
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (bad); i++)
+    {
+      GError *error = NULL;
+
+      g_assert_false (oe_project_set_sequence_size (project, bad[i].width, bad[i].height, &error));
+      g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_SIZE);
+      g_clear_error (&error);
+    }
+
+  /* Failures never notify and never disturb the model. */
+  g_assert_cmpuint (observer->count, ==, 0);
+
+  OeSequence sequence;
+
+  oe_project_get_sequence (project, &sequence);
+  g_assert_cmpint (sequence.width, ==, OE_SEQUENCE_DEFAULT_WIDTH);
+  g_assert_cmpint (sequence.height, ==, OE_SEQUENCE_DEFAULT_HEIGHT);
+  oe_sequence_clear (&sequence);
+
+  g_clear_object (&project);
+  g_free (observer);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -592,6 +667,9 @@ main (int argc, char *argv[])
   g_test_add_func ("/project/overlap-rejection", test_overlap_rejection);
   g_test_add_func ("/project/clip-duration-rule", test_clip_duration_rule);
   g_test_add_func ("/project/move-and-remove", test_move_and_remove);
+  g_test_add_func ("/project/sequence-size", test_sequence_size);
+  g_test_add_func ("/project/sequence-size-rules", test_sequence_size_rejections);
+
   g_test_add_func ("/project/observer-once", test_observer_once);
   g_test_add_func ("/project/deep-copy-getters", test_deep_copy_getters);
   g_test_add_func ("/project/media-refs", test_media_refs);

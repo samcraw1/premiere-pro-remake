@@ -51,6 +51,10 @@ G_DECLARE_FINAL_TYPE (OeProject, oe_project, OE, PROJECT, GObject)
 /** Recommended source range length when inserting a still image (5 s of screen time). */
 #define OE_PROJECT_STILL_DEFAULT_DURATION_US G_GINT64_CONSTANT (5000000)
 
+/** Default output resolution for new sequences (even: yuv420p export compatibility). */
+#define OE_SEQUENCE_DEFAULT_WIDTH 1920
+#define OE_SEQUENCE_DEFAULT_HEIGHT 1080
+
 /**
  * OeClip: one non-destructive source-range placement on a track.
  * @position_us: sequence position (>= 0) of the clip's start.
@@ -94,12 +98,14 @@ typedef struct
 } OeTrack;
 
 /**
- * OeSequence: the whole timeline: one frame rate, ordered tracks.
- * @tracks is a GPtrArray of owned #OeTrack pointers.
+ * OeSequence: the whole timeline: one frame rate, an output size, and
+ * ordered tracks. @tracks is a GPtrArray of owned #OeTrack pointers.
  */
 typedef struct
 {
   OeRational frame_rate;
+  gint width;
+  gint height;
   GPtrArray *tracks;
 } OeSequence;
 
@@ -132,6 +138,8 @@ GQuark oe_project_error_quark (void);
  *     the project does not hold.
  * @OE_PROJECT_ERROR_DUPLICATE_REF: a media reference number is
  *     already taken.
+ * @OE_PROJECT_ERROR_BAD_SIZE: a sequence width or height is out of
+ *     domain (must be positive and even).
  */
 typedef enum
 {
@@ -141,6 +149,7 @@ typedef enum
   OE_PROJECT_ERROR_BAD_CLIP,
   OE_PROJECT_ERROR_UNKNOWN_MEDIA,
   OE_PROJECT_ERROR_DUPLICATE_REF,
+  OE_PROJECT_ERROR_BAD_SIZE,
 } OeProjectError;
 
 /**
@@ -196,6 +205,19 @@ void oe_project_set_name (OeProject *project, const gchar *name);
  * copy, and freeing the copy never disturbs the project.
  */
 void oe_project_get_sequence (OeProject *project, OeSequence *out);
+
+/**
+ * oe_project_set_sequence_size:
+ * @width: output frame width in pixels (> 0, even — yuv420p export
+ *     compatibility).
+ * @height: output frame height in pixels (> 0, even).
+ *
+ * Fires the observer exactly once on success; a rejected size leaves
+ * the model untouched and the observer silent.
+ *
+ * Returns: TRUE when the size was applied.
+ */
+gboolean oe_project_set_sequence_size (OeProject *project, gint width, gint height, GError **error);
 
 /**
  * oe_project_get_clip_count:
