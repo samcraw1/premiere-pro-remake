@@ -19,6 +19,8 @@
 
 #include "oe_timeline.h"
 
+#include "../app/oe_undo_stack.h"
+
 #include <math.h>
 
 #include "oe_timeline_layout.h"
@@ -83,6 +85,8 @@ struct _OeTimeline
   gpointer report_data;
   OeTimelinePlayheadFunc playhead_func;
   gpointer playhead_data;
+
+  OeUndoStack *undo_stack; /* weak — the window owns the stack */
 };
 
 G_DEFINE_TYPE (OeTimeline, oe_timeline, GTK_TYPE_DRAWING_AREA)
@@ -294,6 +298,13 @@ oe_timeline_set_playhead_func (OeTimeline *self, OeTimelinePlayheadFunc func, gp
   g_return_if_fail (OE_IS_TIMELINE (self));
   self->playhead_func = func;
   self->playhead_data = user_data;
+}
+
+void
+oe_timeline_set_undo_stack (OeTimeline *self, OeUndoStack *stack)
+{
+  g_return_if_fail (OE_IS_TIMELINE (self));
+  self->undo_stack = stack; /* weak: the window owns the stack */
 }
 
 static void
@@ -841,8 +852,8 @@ commit_drag (OeTimeline *self, gdouble total_dx, gdouble total_dy)
       {
         GError *error = NULL;
 
-        if (!oe_project_move_clip (self->project, self->drag.track_index, self->drag.clip_index,
-                                   self->drag.preview_position_us, &error))
+        if (!oe_edit_move_clip (self->project, self->undo_stack, self->drag.track_index,
+                                self->drag.clip_index, self->drag.preview_position_us, &error))
           {
             g_autofree gchar *msg = g_strdup_printf ("Move rejected: %s", error->message);
 
@@ -866,8 +877,8 @@ commit_drag (OeTimeline *self, gdouble total_dx, gdouble total_dy)
         gint64 new_out = self->drag.kind == DRAG_TRIM_OUT ? self->drag.preview_source_out_us
                                                           : clip.source_out_us;
 
-        if (!oe_project_trim_clip (self->project, self->drag.track_index, self->drag.clip_index,
-                                   new_in, new_out, &error))
+        if (!oe_edit_trim_clip (self->project, self->undo_stack, self->drag.track_index,
+                                self->drag.clip_index, new_in, new_out, &error))
           {
             g_autofree gchar *msg = g_strdup_printf ("Trim rejected: %s", error->message);
 
