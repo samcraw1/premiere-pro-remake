@@ -231,6 +231,19 @@ playing the rest of the sequence.
   line-range edit then landed on the wrong test. All repaired with
   exact-anchor edits; the format gate and the full suite pass on
   the final tree.
+- **Wall-clock cadence assertions did not survive Valgrind.** Found by
+  the delivery-verification run on merged main: the deadline, drift,
+  and end-of-sequence tests asserted real wall-clock cadence —
+  `g_usleep` until the deadline, then a ±2 ms spacing window — and the
+  end-of-sequence loop burned up to 300 × 20 ms of real sleep. Under
+  Valgrind's instruction slowdown the suite stalled past every timeout.
+  Fix: `oe_playback_session_set_time_source()` makes the clock source
+  injectable (production default `g_get_monotonic_time()`), and those
+  tests now advance a virtual clock by hand — exact assertions, zero
+  sleeps, and the full 13-suite Valgrind harness passes in about a
+  minute. Related: a scoped libasound suppression for the
+  `snd_device_name_hint` cache that SDL3's ALSA enumeration retains
+  (no upstream free path); the tests themselves keep the dummy driver.
 
 ## 9. What is next
 
