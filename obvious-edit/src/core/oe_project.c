@@ -43,6 +43,7 @@ G_DEFINE_TYPE (OeProject, oe_project, G_TYPE_OBJECT)
  * tracks the live sequence stores, and needs their free func first. */
 static OeTrack *track_new (OeTrackKind kind);
 static void track_free (gpointer data);
+static OeTrack *track_at (OeProject *self, guint track_index);
 
 G_DEFINE_QUARK (oe - project - error, oe_project_error)
 
@@ -353,6 +354,31 @@ oe_project_get_track_count (OeProject *self)
   g_return_val_if_fail (OE_IS_PROJECT (self), 0);
 
   return self->sequence.tracks->len;
+}
+
+guint
+oe_project_get_clip_count (OeProject *self, guint track_index)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), 0);
+
+  const OeTrack *track = track_at (self, track_index);
+
+  return track != NULL ? track->clips->len : 0;
+}
+
+gboolean
+oe_project_get_clip (OeProject *self, guint track_index, guint clip_index, OeClip *out)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (out != NULL, FALSE);
+
+  const OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL || clip_index >= track->clips->len)
+    return FALSE;
+
+  *out = *(const OeClip *) g_ptr_array_index (track->clips, clip_index);
+  return TRUE;
 }
 
 /* ------------------------------------------------------------------ */
