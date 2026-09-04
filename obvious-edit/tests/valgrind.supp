@@ -3,9 +3,10 @@
 # Scope policy: this file may suppress Memcheck findings whose allocation
 # stack lives inside GLib or GObject one-time initialization (the GType
 # registry, quark tables, slice allocator, default main context). It must
-# never grow entries for project code or for third-party libraries
-# (SDL3, FFmpeg, ALSA, PulseAudio). If a new leak class appears, fix or
-# scope it — do not widen this file.
+# never grow entries for project code. Third-party entries are the
+# documented exception below: one scoped libasound record, for a leak
+# with no upstream free path. If a new leak class appears, fix or scope
+# it — do not widen this file.
 #
 # Observed on GLib 2.84.4 / GObject 2.84.4 (Debian 13): ~43 KB of
 # "still reachable" blocks allocated by g_realloc inside GObject's static
@@ -45,4 +46,23 @@
    ...
    fun:pthread_create*
    obj:*/libglib-2.0.so*
+}
+
+# libasound's snd_device_name_hint() builds its device-hint list in
+# process-global config state and exposes no API to release it; SDL3's
+# ALSA backend calls it during audio-subsystem initialization (device
+# enumeration at oe_audio_output_init) and intentionally keeps the
+# results alive for device hot-plug. One-time per process, upstream-
+# owned on both sides of the call. Tests run under SDL_AUDIODRIVER=dummy
+# (no ALSA is ever loaded); this entry only matters for valgrind runs
+# with a real driver. Scoped to exactly that call path:
+{
+   libasound-snd-device-name-hint-cached-by-sdl3-enumeration
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   fun:*alloc
+   ...
+   fun:snd_device_name_hint
+   ...
+   fun:oe_audio_output_init
 }

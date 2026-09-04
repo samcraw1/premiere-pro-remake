@@ -13,8 +13,9 @@
  * whose file does not exist, exercising only the missing-media
  * continuation path (reported once per run, transport unaffected).
  *
- * Timing assertions use wall-clock ranges wide enough to hold under
- * sanitizer and Valgrind slowdowns.
+ * Wall-cadence tests install a virtual clock through
+ * oe_playback_session_set_time_source(): assertions advance the clock by
+ * hand, so they are deterministic and Valgrind-clean — no real sleeps.
  */
 
 #include <glib.h>
@@ -49,6 +50,26 @@ static void
 noop_notify (const OePlaybackSession *session G_GNUC_UNUSED, gint64 position G_GNUC_UNUSED,
              OePlaybackState state G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
 {
+}
+
+/* Virtual clock: the injected time source for wall-cadence tests. Every
+ * timing assertion advances the clock by hand, so runs are deterministic
+ * and Valgrind-clean — no real sleeps anywhere in this suite. */
+typedef struct
+{
+  gint64 now_us; /* monotonic-scale virtual "now" */
+} FakeClock;
+
+static gint64
+fake_time (gpointer data)
+{
+  return ((FakeClock *) data)->now_us;
+}
+
+static void
+fake_advance (FakeClock *clock, gint64 us)
+{
+  clock->now_us += us;
 }
 
 static void
@@ -119,14 +140,6 @@ add_video_clip (OeProject *project, guint media_ref, gint64 position_us, gint64 
   g_assert_true (oe_project_insert_clip (project, 0, media_ref, position_us, source_in_us,
                                          source_out_us, &error));
 }
-
-/* Pause tolerance: fast machines see ~the sleep duration; sanitizer or
- * Valgrind runs may stall far longer between g_usleep and get_position.
- * The clock is wall-anchored, so positions only ever run late, never
- * early — the lower bound is the sleep, the upper bound is generous. */
-#define assert_position_range(pos, min_us, max_us)                                                 \
-  g_assert_cmpint ((pos), >=, (min_us));                                                           \
-  g_assert_cmpint ((pos), <=, (max_us))
 
 /* ------------------------------------------------------------------ */
 /* Mapping                                                             */
@@ -237,6 +250,8 @@ test_tick_deadlines_are_future_and_frame_spaced (ClockFixture *fx,
   add_video_clip (fx->project, ref, 0, 0, G_GINT64_CONSTANT (5000000)); /* 5 s */
 
   fx->session = oe_playback_session_new ((const OeProject *) fx->project);
+  FakeClock clock = { G_GINT64_CONSTANT (1000000) };
+  oe_playback_session_set_time_source (fx->session, fake_time, &clock);
   oe_playback_session_set_event_func (fx->session, count_event, fx);
   oe_playback_session_set_observer (fx->session, noop_notify, fx);
 
@@ -245,21 +260,25 @@ test_tick_deadlines_are_future_and_frame_spaced (ClockFixture *fx,
   g_assert_true (oe_playback_session_play (fx->session, &error));
   g_assert_cmpint (oe_playback_session_get_state (fx->session), ==, OE_PLAYBACK_PLAYING);
 
-  /* First deadline: strictly in the future. */
-  gint64 now = g_get_monotonic_time ();
-  gint64 deadline = oe_playback_session_tick (fx->session);
-  g_assert_cmpint (deadline, >, now);
+  /* play() anchored the clock at the virtual now; tick() at the anchor
+   * hands back exactly one frame — strictly in the future. */
+  const gint64 anchor = clock.now_us;
+  const gint64 deadline = oe_playback_session_tick (fx->session);
 
-  /* 25 fps → 40 000 µs between deadlines, anchored (not drift-accumulated). */
-  g_usleep ((deadline - g_get_monotonic_time ()) + 3000);
-  now = g_get_monotonic_time ();
+  g_assert_cmpint (deadline, ==, anchor + 40000);
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, 0);
+
+  /* Advance past the first deadline: the anchored clock spaces the next
+   * deadline exactly one frame later — 25 fps → 40 000 µs, never
+   * drift-accumulated, and independent of scheduling jitter. */
+  fake_advance (&clock, 41000);
   const gint64 next_deadline = oe_playback_session_tick (fx->session);
 
-  g_assert_cmpint (next_deadline, >, now);
-  g_assert_cmpint (llabs (next_deadline - deadline - 40000), <=, 2000);
+  g_assert_cmpint (next_deadline, ==, anchor + 80000);
+  g_assert_cmpint (llabs (next_deadline - deadline - 40000), ==, 0);
 
-  /* Position advanced with the wall clock. */
-  g_assert_cmpint (oe_playback_session_get_position (fx->session), >, 0);
+  /* Position advanced with the (virtual) clock. */
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, 41000);
 
   oe_playback_session_stop (fx->session);
 }
@@ -277,6 +296,8 @@ test_end_of_sequence_stops_and_parks (ClockFixture *fx, gconstpointer user_data 
   add_video_clip (fx->project, ref, 0, 0, G_GINT64_CONSTANT (1000000)); /* 1 s */
 
   fx->session = oe_playback_session_new ((const OeProject *) fx->project);
+  FakeClock clock = { 0 };
+  oe_playback_session_set_time_source (fx->session, fake_time, &clock);
   oe_playback_session_set_event_func (fx->session, count_event, fx);
 
   GError *error = NULL;
@@ -285,18 +306,20 @@ test_end_of_sequence_stops_and_parks (ClockFixture *fx, gconstpointer user_data 
   g_assert_cmpint (oe_playback_session_get_sequence_end (fx->session), ==,
                    G_GINT64_CONSTANT (1000000));
 
-  /* Drive ticks until the sequence ends (bounded by count and wall time). */
-  const gint64 budget = g_get_monotonic_time () + G_GINT64_CONSTANT (10000000);
+  /* Advance one frame per tick: 1 s / 40 ms = 25 ticks, then the
+   * position crosses the sequence end and the session stops with the
+   * playhead parked. The iteration bound is exact — a virtual clock
+   * needs no wall-time budget. */
   guint iterations = 0;
 
-  while (oe_playback_session_get_state (fx->session) == OE_PLAYBACK_PLAYING && iterations < 300
-         && g_get_monotonic_time () < budget)
+  while (oe_playback_session_get_state (fx->session) == OE_PLAYBACK_PLAYING && iterations < 30)
     {
+      fake_advance (&clock, 40000);
       oe_playback_session_tick (fx->session);
-      g_usleep (20000);
       iterations++;
     }
 
+  g_assert_cmpuint (iterations, <=, 26);
   g_assert_cmpint (oe_playback_session_get_state (fx->session), ==, OE_PLAYBACK_STOPPED);
   g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (1000000));
   g_assert_cmpuint (fx->event_count, >=, 1);
@@ -323,34 +346,34 @@ test_pause_resume_reanchors (ClockFixture *fx, gconstpointer user_data G_GNUC_UN
   add_video_clip (fx->project, ref, 0, 0, G_GINT64_CONSTANT (30000000)); /* 30 s */
 
   fx->session = oe_playback_session_new ((const OeProject *) fx->project);
+  FakeClock clock = { 0 };
+  oe_playback_session_set_time_source (fx->session, fake_time, &clock);
 
   GError *error = NULL;
 
   g_assert_true (oe_playback_session_play (fx->session, &error));
-  g_usleep (60000);
+
+  /* 60 ms of playback, then pause: the parked position is exact. */
+  fake_advance (&clock, 60000);
   oe_playback_session_pause (fx->session);
 
   g_assert_cmpint (oe_playback_session_get_state (fx->session), ==, OE_PLAYBACK_PAUSED);
-  const gint64 parked = oe_playback_session_get_position (fx->session);
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (60000));
 
-  assert_position_range (parked, 60000, G_GINT64_CONSTANT (1000000));
-
-  /* Paused: the position is frozen, not creeping with the wall clock. */
-  g_usleep (80000);
-  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, parked);
+  /* Paused: the position is frozen — clock movement does not creep in. */
+  fake_advance (&clock, 80000);
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (60000));
 
   /* Resume: drift accounting resets — the clock re-anchors at the parked
-   * position and advances from there. */
+   * position and advances from there, not from the time lost while
+   * paused. */
   g_assert_true (oe_playback_session_play (fx->session, &error));
   g_assert_cmpint (oe_playback_session_get_state (fx->session), ==, OE_PLAYBACK_PLAYING);
 
-  g_usleep (60000);
+  fake_advance (&clock, 60000);
   oe_playback_session_pause (fx->session);
 
-  const gint64 parked_again = oe_playback_session_get_position (fx->session);
-
-  g_assert_cmpint (parked_again, >=, parked + 60000);
-  g_assert_cmpint (parked_again, <=, parked + G_GINT64_CONSTANT (1000000));
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (120000));
 
   oe_playback_session_stop (fx->session);
 }
@@ -368,23 +391,23 @@ test_stop_parks_and_play_continues (ClockFixture *fx, gconstpointer user_data G_
   add_video_clip (fx->project, ref, 0, 0, G_GINT64_CONSTANT (30000000));
 
   fx->session = oe_playback_session_new ((const OeProject *) fx->project);
+  FakeClock clock = { 0 };
+  oe_playback_session_set_time_source (fx->session, fake_time, &clock);
 
   GError *error = NULL;
 
   g_assert_true (oe_playback_session_play (fx->session, &error));
-  g_usleep (60000);
+  fake_advance (&clock, 60000);
   oe_playback_session_stop (fx->session);
 
   g_assert_cmpint (oe_playback_session_get_state (fx->session), ==, OE_PLAYBACK_STOPPED);
-  const gint64 parked = oe_playback_session_get_position (fx->session);
-
-  assert_position_range (parked, 60000, G_GINT64_CONSTANT (1000000));
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (60000));
 
   /* Play from the parked position, not from zero. */
   g_assert_true (oe_playback_session_play (fx->session, &error));
-  g_usleep (60000);
+  fake_advance (&clock, 60000);
 
-  g_assert_cmpint (oe_playback_session_get_position (fx->session), >=, parked);
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (120000));
 
   oe_playback_session_stop (fx->session);
 }
@@ -423,21 +446,23 @@ test_seek_during_playback_resets_clock (ClockFixture *fx, gconstpointer user_dat
   add_video_clip (fx->project, ref, 0, 0, G_GINT64_CONSTANT (30000000));
 
   fx->session = oe_playback_session_new ((const OeProject *) fx->project);
+  FakeClock clock = { 0 };
+  oe_playback_session_set_time_source (fx->session, fake_time, &clock);
 
   GError *error = NULL;
 
   g_assert_true (oe_playback_session_play (fx->session, &error));
-  g_usleep (50000);
+  fake_advance (&clock, 50000);
 
   /* Live seek: the clock re-anchors at the target and keeps playing. */
   oe_playback_session_seek (fx->session, G_GINT64_CONSTANT (5000000));
 
   g_assert_cmpint (oe_playback_session_get_state (fx->session), ==, OE_PLAYBACK_PLAYING);
-  assert_position_range (oe_playback_session_get_position (fx->session),
-                         G_GINT64_CONSTANT (5000000), G_GINT64_CONSTANT (5400000));
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (5000000));
 
-  g_usleep (60000);
-  g_assert_cmpint (oe_playback_session_get_position (fx->session), >=, G_GINT64_CONSTANT (5060000));
+  /* The clock resumed from the target, not from the pre-seek position. */
+  fake_advance (&clock, 60000);
+  g_assert_cmpint (oe_playback_session_get_position (fx->session), ==, G_GINT64_CONSTANT (5060000));
 
   oe_playback_session_stop (fx->session);
 }
@@ -456,6 +481,8 @@ test_missing_media_reports_once_and_transport_continues (ClockFixture *fx,
   add_video_clip (fx->project, ref, 0, 0, G_GINT64_CONSTANT (30000000));
 
   fx->session = oe_playback_session_new ((const OeProject *) fx->project);
+  FakeClock clock = { 0 };
+  oe_playback_session_set_time_source (fx->session, fake_time, &clock);
   oe_playback_session_set_event_func (fx->session, count_event, fx);
 
   GError *error = NULL;
@@ -465,7 +492,7 @@ test_missing_media_reports_once_and_transport_continues (ClockFixture *fx,
   /* Video open failures are synchronous in tick: the first tick reports
    * the missing file once, and later ticks stay quiet. */
   oe_playback_session_tick (fx->session);
-  g_usleep (20000);
+  fake_advance (&clock, 20000);
   oe_playback_session_tick (fx->session);
 
   g_assert_cmpuint (fx->event_count, ==, 1);

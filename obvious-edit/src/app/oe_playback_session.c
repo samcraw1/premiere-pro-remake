@@ -56,6 +56,11 @@ struct _OePlaybackSession
   OePlaybackEventFunc event_func;
   gpointer event_data;
 
+  /* Injectable clock: NULL keeps the production default. Tests install a
+   * virtual clock so wall-cadence assertions never need real sleeps. */
+  OePlaybackTimeSourceFunc time_func;
+  gpointer time_data;
+
   OeMediaPlaybackWorker *worker;
   guint audio_generation; /* bumped on every stream restart */
 
@@ -124,6 +129,16 @@ oe_playback_session_map (const OeSequence *sequence, OeTrackKind kind, gint64 po
 
   *out = (OePlaybackMapping) { FALSE, 0, 0, 0 };
   return FALSE;
+}
+
+/* The single "now" reader: production defaults to g_get_monotonic_time();
+ * tests install a virtual clock through oe_playback_session_set_time_source(). */
+static gint64
+session_now (const OePlaybackSession *self)
+{
+  if (self->time_func != NULL)
+    return self->time_func (self->time_data);
+  return g_get_monotonic_time ();
 }
 
 static gint64
@@ -380,7 +395,7 @@ restart_streaming (OePlaybackSession *self, gint64 position_us)
   self->audio_base_position_us = position_us;
   self->audio_pushed_frames = 0;
   self->anchor_position_us = position_us;
-  self->anchor_time_us = g_get_monotonic_time ();
+  self->anchor_time_us = session_now (self);
 
   submit_audio_request (self, position_us);
 }
@@ -560,7 +575,7 @@ oe_playback_session_new (const OeProject *project)
   self->project = project;
   self->state = OE_PLAYBACK_STOPPED;
   self->last_position_us = 0;
-  self->anchor_time_us = g_get_monotonic_time ();
+  self->anchor_time_us = session_now (self);
 
   refresh_sequence (self);
 
@@ -616,6 +631,16 @@ oe_playback_session_set_event_func (OePlaybackSession *session, OePlaybackEventF
   session->event_data = user_data;
 }
 
+void
+oe_playback_session_set_time_source (OePlaybackSession *session, OePlaybackTimeSourceFunc time_func,
+                                     gpointer user_data)
+{
+  g_return_if_fail (session != NULL);
+
+  session->time_func = time_func;
+  session->time_data = user_data;
+}
+
 gboolean
 oe_playback_session_play (OePlaybackSession *session, GError **error)
 {
@@ -661,7 +686,7 @@ oe_playback_session_pause (OePlaybackSession *session)
   if (session->state != OE_PLAYBACK_PLAYING)
     return;
 
-  session->last_position_us = compute_position (session, g_get_monotonic_time ());
+  session->last_position_us = compute_position (session, session_now (session));
   halt_streaming (session);
   session->state = OE_PLAYBACK_PAUSED;
   fire_notify (session, session->last_position_us);
@@ -676,7 +701,7 @@ oe_playback_session_stop (OePlaybackSession *session)
     return;
 
   if (session->state == OE_PLAYBACK_PLAYING)
-    session->last_position_us = compute_position (session, g_get_monotonic_time ());
+    session->last_position_us = compute_position (session, session_now (session));
 
   halt_streaming (session);
   session->state = OE_PLAYBACK_STOPPED;
@@ -708,7 +733,7 @@ oe_playback_session_tick (OePlaybackSession *session)
 {
   g_return_val_if_fail (session != NULL, g_get_monotonic_time ());
 
-  const gint64 now = g_get_monotonic_time ();
+  const gint64 now = session_now (session);
 
   if (session->state != OE_PLAYBACK_PLAYING)
     return now;
@@ -742,7 +767,7 @@ oe_playback_session_get_position (const OePlaybackSession *session)
   if (session->state != OE_PLAYBACK_PLAYING)
     return session->last_position_us;
 
-  return compute_position ((OePlaybackSession *) session, g_get_monotonic_time ());
+  return compute_position ((OePlaybackSession *) session, session_now (session));
 }
 
 OePlaybackState

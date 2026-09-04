@@ -90,7 +90,7 @@ premiere-pro-remake/
 | `src/app/oe_import_worker.c` | The decode thread: queue, cancel, dispatch | `oe_import_worker_new`, `oe_import_worker_submit`, `oe_import_worker_free` |
 | `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit + the push-model device stream (queue, depth, flush, pause/resume) | `oe_audio_output_init`, `oe_audio_output_open_stream`, `oe_audio_output_queue`, `oe_audio_output_shutdown` |
 | `src/media/oe_media_playback.c` | Playback decode: audio decode-ahead worker (owned f32 chunks, main-context delivery) + frame-at-time BGRA video | `oe_media_playback_request_audio`, `oe_media_playback_video_open`, `oe_media_playback_video_get_frame` |
-| `src/app/oe_playback_session.c` | The GTK-free playback clock: stopped/paused/playing, wall-anchor, drift accounting, clip→source mapping, events | `oe_playback_session_play`, `oe_playback_session_tick`, `oe_playback_session_seek`, `oe_playback_session_map` |
+| `src/app/oe_playback_session.c` | The GTK-free playback clock: stopped/paused/playing, wall-anchor, drift accounting, clip→source mapping, injectable time source (tests install a virtual clock), events | `oe_playback_session_play`, `oe_playback_session_tick`, `oe_playback_session_seek`, `oe_playback_session_set_time_source`, `oe_playback_session_map` |
 | `src/ui/oe_program_monitor.c` | The program monitor: owned-frame Cairo blits, empty state, missing-media hatch | `oe_program_monitor_new`, `oe_program_monitor_show_frame`, `oe_program_monitor_set_empty_state` |
 | `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector | `oe_main_window_new` |
 | `src/ui/oe_media_bin.c` | The bin panel: row projection, badges, DnD, selection | `oe_media_bin_new`, `oe_media_bin_refresh` |

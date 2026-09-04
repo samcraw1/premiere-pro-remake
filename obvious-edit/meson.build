@@ -285,6 +285,7 @@ test_playback_clock = executable('test_playback_clock',
 )
 
 test('playback-clock', test_playback_clock,
+  timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
   env: ['SDL_AUDIODRIVER=dummy'])
 
 # Audio output adapter: the SDL3 push-model stream contract on the
