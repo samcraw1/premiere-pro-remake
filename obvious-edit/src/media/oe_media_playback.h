@@ -82,7 +82,9 @@ typedef struct _OeMediaPlaybackWorker OeMediaPlaybackWorker;
 
 /**
  * oe_media_playback_worker_new:
- * @on_audio: delivery callback, invoked on the main context
+ * @on_audio: delivery callback, invoked on the main context. The chunk
+ *      and error stay owned by the delivery: the callback may read them
+ *      for the duration of the call but must not free them.
  * @user_data: passed to @on_audio
  *
  * The worker thread starts immediately and blocks until the first request.

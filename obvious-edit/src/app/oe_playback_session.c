@@ -320,10 +320,7 @@ on_worker_audio (OePlaybackAudioChunk *chunk, const GError *error, gpointer user
     }
 
   if (chunk->generation != self->audio_generation)
-    {
-      oe_playback_audio_chunk_free (chunk);
-      return;
-    }
+    return; /* stale delivery — the worker's trampoline owns the chunk */
 
   /* Map the chunk's source time through the owning clip recorded at
    * request time, truncate at the clip's sequence end (source in/out is
@@ -349,8 +346,8 @@ on_worker_audio (OePlaybackAudioChunk *chunk, const GError *error, gpointer user
         oe_log (OE_LOG_LEVEL_DEBUG, "audio queued: %zu frames, depth %zu", pushed,
                 oe_audio_output_queued_frames (self->stream));
     }
-
-  oe_playback_audio_chunk_free (chunk);
+  /* No free here: ownership stays with the worker's main-context
+   * delivery, which frees the chunk after this callback returns. */
 }
 
 static void
