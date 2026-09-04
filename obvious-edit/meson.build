@@ -199,3 +199,45 @@ test_import_worker = executable('test_import_worker',
 )
 
 test('import-worker', test_import_worker)
+
+# Rational time: reduction, rounding, and conversions (GLib only).
+test_time = executable('test_time',
+  [
+    'tests/test_time.c',
+    'src/core/oe_time.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [glib_dep, gobject_dep],
+)
+
+test('time', test_time)
+
+# Project model: ordering, overlap rejection, observer, deep copies —
+# links the core model only (GLib/GObject, no GTK).
+test_project = executable('test_project',
+  [
+    'tests/test_project.c',
+    'src/core/oe_project.c',
+    'src/core/oe_time.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [glib_dep, gobject_dep],
+)
+
+test('project', test_project)
+
+# Project format: strict v1 parse, integer-only serialization, and the
+# atomic-save contract. json-glib is in oe_deps but not test_deps, so
+# it is an explicit dependency of this suite (meson.build:80-92).
+test_project_format = executable('test_project_format',
+  [
+    'tests/test_project_format.c',
+    'src/core/oe_project.c',
+    'src/core/oe_project_format.c',
+    'src/core/oe_time.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [glib_dep, gobject_dep, json_glib_dep],
+)
+
+test('project-format', test_project_format)
