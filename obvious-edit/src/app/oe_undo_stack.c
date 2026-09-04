@@ -28,13 +28,14 @@ fire_changed (OeUndoStack *self)
     self->changed_func (self->cursor > 0, self->cursor < self->records->len, self->changed_data);
 }
 
+/* Takes ownership of @label (callers pass freshly formatted strings). */
 static OeUndoRecord *
-record_new (OeUndoOpKind kind, const gchar *label, guint track_index, guint clip_index)
+record_new (OeUndoOpKind kind, gchar *label, guint track_index, guint clip_index)
 {
   OeUndoRecord *rec = g_new0 (OeUndoRecord, 1);
 
   rec->kind = kind;
-  rec->label = g_strdup (label);
+  rec->label = label;
   rec->track_index = track_index;
   rec->clip_index = clip_index;
   return rec;
