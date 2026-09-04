@@ -259,15 +259,19 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
       const gint64 shift_us = removed.source_out_us - removed.source_in_us;
       const guint count = oe_project_get_clip_count (project, track_index);
 
-      /* Sub-step 2: shift the suffix left by the primary's duration,
-       * ascending index order. Moving clip i left cannot overlap its
-       * not-yet-moved right neighbour (equal shifts preserve pairwise
-       * gaps), so every intermediate state stays valid. Index k here
-       * is the post-removal index of the (clip_index + 1 + k)th clip.
-       * A move failure is unreachable for a contract-abiding model;
-       * the record keeps only the shifts that landed, so undo still
-       * restores exactly what this action did. */
-      for (guint k = 0; k < count; k++)
+      /* Sub-step 2: shift the SUFFIX — the clips that sat to the
+       * primary's right — left by the primary's duration, ascending
+       * index order. Post-removal the first suffix clip has been
+       * renumbered into the primary's old slot, so the suffix starts
+       * at index clip_index; clips before it keep their positions.
+       * Moving clip i left cannot overlap its not-yet-moved right
+       * neighbour (equal shifts preserve pairwise gaps), so every
+       * intermediate state stays valid. Index k here is the
+       * post-removal index of the (clip_index + 1 + (k - clip_index))th
+       * clip. A move failure is unreachable for a contract-abiding
+       * model; the record keeps only the shifts that landed, so undo
+       * still restores exactly what this action did. */
+      for (guint k = clip_index; k < count; k++)
         {
           OeClip suffix = { 0 };
           OeRippleShift entry;
@@ -275,7 +279,7 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
           if (!oe_project_get_clip (project, track_index, k, &suffix))
             break;
 
-          entry.pre_index = clip_index + 1 + k;
+          entry.pre_index = k + 1;
           entry.post_index = k;
           entry.pre_position_us = suffix.position_us;
           entry.post_position_us = suffix.position_us - shift_us;
