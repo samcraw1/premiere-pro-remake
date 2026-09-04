@@ -35,6 +35,7 @@ static OeCommandEntry command_table[OE_CMD_COUNT] = {
   { OE_CMD_ZOOM_OUT, "view.zoom-out", "<Control>minus", TRUE },
   { OE_CMD_SNAP_TOGGLE, "edit.snap-toggle", "s", TRUE },
   { OE_CMD_SHOW_ABOUT, "help.about", NULL, TRUE },
+  { OE_CMD_EXPORT, "project.export", NULL, TRUE },
 };
 
 static OeCommandHandler handlers[OE_CMD_COUNT];

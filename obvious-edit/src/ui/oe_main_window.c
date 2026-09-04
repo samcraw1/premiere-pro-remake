@@ -36,6 +36,7 @@
 #include "../app/oe_undo_stack.h"
 #include "../core/oe_project.h"
 #include "../core/oe_project_format.h"
+#include "../media/oe_export.h"
 #include "oe_media_bin.h"
 #include "oe_program_monitor.h"
 #include "oe_shell_layout.h"
@@ -86,6 +87,22 @@ struct _OeMainWindow
    * whenever the project is replaced — history never crosses a
    * project boundary. */
   OeUndoStack *undo_stack;
+
+  /* Phase 8: one running export. The chooser deep-copies the sequence
+   * snapshot and builds the immutable media-ref→path table the worker's
+   * resolver reads; the completion callback owns and frees it on the
+   * main context. NULL when no export is running. */
+  struct OeExportUi
+  {
+    OeSequence sequence;     /* deep-copied snapshot, cleared at end */
+    GHashTable *ref_to_path; /* guint ref → owned path (immutable) */
+    gchar *destination;      /* chosen output path */
+    guint epoch;             /* session epoch at start; stale results drop */
+    gint cancel;             /* atomic: Cancel button → worker */
+    GThread *thread;         /* unref'd by the completion callback */
+    GtkWidget *dialog;       /* progress window */
+    GtkWidget *progress_bar;
+  } *export_ui;
 
   /* TRUE while the current import batch belongs to a project open: the
    * generic "Imported N file(s)" summary would bury the Loaded
@@ -1499,6 +1516,299 @@ inspector_panel_new (GtkWidget **stack_out, GtkWidget **grid_out)
 }
 
 /* ------------------------------------------------------------------ */
+/* Phase 8: export. The chooser mirrors the Save Project flow; the job */
+/* runs on a window-owned thread with progress and completion          */
+/* marshalled onto the main context (import-worker pattern).           */
+/* ------------------------------------------------------------------ */
+
+/* Worker-thread resolver: the ref→path table is immutable after the
+ * chooser builds it, so lock-free lookups are safe off the main loop. */
+static gchar *
+export_resolve_path (guint media_ref, gpointer user_data)
+{
+  GHashTable *table = user_data;
+  const gchar *path = g_hash_table_lookup (table, GUINT_TO_POINTER (media_ref));
+
+  return path != NULL ? g_strdup (path) : NULL;
+}
+
+/* GDestroyNotify-shaped wrapper: gtk_window_destroy takes GtkWindow *,
+ * not gpointer, so the typed free in g_clear_pointer needs this shim. */
+static void
+export_dialog_destroy (gpointer dialog)
+{
+  gtk_window_destroy (GTK_WINDOW (dialog));
+}
+
+/* oe_export_run's cancel seam: an atomic flag the Cancel button sets. */
+static gboolean
+export_cancelled (gpointer user_data)
+{
+  struct OeExportUi *ui = user_data;
+
+  return g_atomic_int_get (&ui->cancel) != 0;
+}
+
+static void
+export_ui_free (OeMainWindow *self, struct OeExportUi *ui)
+{
+  if (self != NULL && self->export_ui == ui)
+    self->export_ui = NULL;
+
+  g_clear_pointer (&ui->thread, g_thread_unref);
+  g_clear_pointer (&ui->dialog, export_dialog_destroy);
+  g_clear_pointer (&ui->destination, g_free);
+  g_clear_pointer (&ui->ref_to_path, g_hash_table_unref);
+  oe_sequence_clear (&ui->sequence);
+  g_free (ui);
+}
+
+typedef struct
+{
+  gint64 frame;
+  gint64 total;
+} ExportProgressTick;
+
+/* Main context: one bar update per marshalled frame. */
+static gboolean
+export_progress_on_main (gpointer user_data)
+{
+  ExportProgressTick *tick = user_data;
+  OeMainWindow *self = command_owner;
+
+  if (self != NULL && self->export_ui != NULL && self->export_ui->progress_bar != NULL)
+    gtk_progress_bar_set_fraction (GTK_PROGRESS_BAR (self->export_ui->progress_bar),
+                                   (gdouble) tick->frame / (gdouble) tick->total);
+
+  g_free (tick);
+  return G_SOURCE_REMOVE;
+}
+
+/* Worker thread → main context (g_main_context_invoke, per frame). */
+static void
+export_progress_cb (gint64 frame_index, gint64 total_frames, gpointer user_data G_GNUC_UNUSED)
+{
+  ExportProgressTick *tick = g_new (ExportProgressTick, 1);
+
+  tick->frame = frame_index;
+  tick->total = total_frames;
+  g_main_context_invoke (NULL, export_progress_on_main, tick);
+}
+
+/* The completion payload: the ui and error transfer to the callback. */
+typedef struct
+{
+  struct OeExportUi *ui;
+  gboolean ok;
+  GError *error;
+} ExportDone;
+
+static gboolean
+export_done_on_main (gpointer user_data)
+{
+  ExportDone *done = user_data;
+  OeMainWindow *self = command_owner; /* cleared in dispose — never cached */
+  struct OeExportUi *ui = done->ui;
+
+  /* A session switch orphans the result: the dialog goes with the
+   * context, and no status message is written over the new session. */
+  if (self != NULL && ui->epoch == self->session_epoch)
+    {
+      g_clear_pointer (&ui->dialog, export_dialog_destroy);
+
+      if (done->ok)
+        {
+          g_autofree gchar *msg = g_strdup_printf ("Exported to %s", ui->destination);
+
+          set_status_message (self, msg);
+        }
+      else if (g_error_matches (done->error, OE_EXPORT_ERROR, OE_EXPORT_ERROR_CANCELLED))
+        {
+          set_status_message (self, "Export cancelled");
+        }
+      else
+        {
+          g_autofree gchar *msg = g_strdup_printf (
+              "Export failed: %s", done->error != NULL ? done->error->message : "unknown error");
+
+          oe_log (OE_LOG_LEVEL_WARNING, "export to '%s' failed: %s", ui->destination,
+                  done->error != NULL ? done->error->message : "unknown error");
+          set_status_message (self, msg);
+        }
+    }
+
+  g_clear_error (&done->error);
+  g_free (done);
+  export_ui_free (self, ui);
+  return G_SOURCE_REMOVE;
+}
+
+static gpointer
+export_thread_func (gpointer data)
+{
+  ExportDone *done = data;
+  OeExportSpec spec = { 0 };
+
+  spec.sequence = &done->ui->sequence;
+  spec.destination_path = done->ui->destination;
+  spec.quality = OE_EXPORT_QUALITY_MEDIUM;
+  spec.resolve_path = export_resolve_path;
+  spec.resolve_data = done->ui->ref_to_path;
+
+  done->ok
+      = oe_export_run (&spec, export_cancelled, done->ui, export_progress_cb, NULL, &done->error);
+
+  g_main_context_invoke (NULL, export_done_on_main, done);
+  return NULL;
+}
+
+static void
+export_cancel_clicked (GtkButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  struct OeExportUi *ui = user_data;
+
+  g_atomic_int_set (&ui->cancel, 1);
+}
+
+/* Builds the export context from the live session (deep-copied
+ * sequence snapshot plus the current media-ref→path map) and starts
+ * the worker. Only these immutable copies cross the thread boundary. */
+static void
+export_start (OeMainWindow *self, const gchar *path)
+{
+  struct OeExportUi *ui = g_new0 (struct OeExportUi, 1);
+
+  oe_project_get_sequence (self->project, &ui->sequence);
+  ui->destination = g_strdup (path);
+  ui->epoch = self->session_epoch;
+  ui->ref_to_path = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, g_free);
+
+  GHashTableIter iter;
+  gpointer key, value;
+
+  g_hash_table_iter_init (&iter, self->media_ref_to_asset);
+
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      OeAssetInfo info;
+
+      oe_asset_info_init (&info);
+
+      if (oe_media_library_get (self->media_library, GPOINTER_TO_UINT (value), &info)
+          && info.path != NULL)
+        g_hash_table_insert (ui->ref_to_path, key, g_strdup (info.path));
+
+      oe_asset_info_clear (&info);
+    }
+
+  GtkWidget *dialog = gtk_window_new ();
+
+  gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
+  gtk_window_set_modal (GTK_WINDOW (dialog), TRUE);
+  gtk_window_set_title (GTK_WINDOW (dialog), "Exporting…");
+  gtk_window_set_default_size (GTK_WINDOW (dialog), 360, -1);
+
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+
+  gtk_widget_set_margin_top (box, 12);
+  gtk_widget_set_margin_bottom (box, 12);
+  gtk_widget_set_margin_start (box, 12);
+  gtk_widget_set_margin_end (box, 12);
+
+  GtkWidget *label = gtk_label_new ("Exporting sequence…");
+  GtkWidget *bar = gtk_progress_bar_new ();
+  GtkWidget *cancel = gtk_button_new_with_label ("Cancel");
+
+  g_signal_connect (cancel, "clicked", G_CALLBACK (export_cancel_clicked), ui);
+
+  gtk_box_append (GTK_BOX (box), label);
+  gtk_box_append (GTK_BOX (box), bar);
+  gtk_box_append (GTK_BOX (box), cancel);
+  gtk_window_set_child (GTK_WINDOW (dialog), box);
+
+  ui->dialog = dialog;
+  ui->progress_bar = bar;
+  self->export_ui = ui;
+
+  gtk_window_present (GTK_WINDOW (dialog));
+
+  ExportDone *done = g_new (ExportDone, 1);
+
+  done->ui = ui;
+  done->ok = FALSE;
+  done->error = NULL;
+
+  ui->thread = g_thread_new ("oe-export", export_thread_func, done);
+}
+
+static void
+add_export_filter (GtkFileDialog *dialog)
+{
+  GtkFileFilter *filter = gtk_file_filter_new ();
+
+  gtk_file_filter_set_name (filter, "MP4 video (*.mp4)");
+  gtk_file_filter_add_pattern (filter, "*.mp4");
+
+  GListStore *filters = g_list_store_new (GTK_TYPE_FILE_FILTER);
+
+  g_list_store_append (filters, filter);
+  gtk_file_dialog_set_filters (dialog, G_LIST_MODEL (filters));
+  g_object_unref (filters);
+  g_object_unref (filter);
+}
+
+static void
+on_export_dialog_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  GError *error = NULL;
+
+  GFile *file = gtk_file_dialog_save_finish (GTK_FILE_DIALOG (source), result, &error);
+
+  if (file == NULL)
+    {
+      /* A canceled chooser is a no-op; real failures surface. */
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          oe_log (OE_LOG_LEVEL_WARNING, "export dialog failed: %s", error->message);
+          set_status_message (self, "Could not open the file chooser");
+        }
+      g_clear_error (&error);
+      return;
+    }
+
+  const gchar *path = g_file_peek_path (file);
+
+  if (path != NULL)
+    export_start (self, path);
+  g_object_unref (file);
+}
+
+static void
+export_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  if (command_owner->export_ui != NULL)
+    {
+      set_status_message (command_owner, "An export is already running");
+      return;
+    }
+
+  GtkFileDialog *dialog = gtk_file_dialog_new ();
+  g_autofree gchar *initial
+      = g_strdup_printf ("%s.mp4", oe_project_get_name (command_owner->project));
+
+  gtk_file_dialog_set_title (dialog, "Export");
+  add_export_filter (dialog);
+  gtk_file_dialog_set_initial_name (dialog, initial);
+  gtk_file_dialog_save (dialog, GTK_WINDOW (command_owner), NULL, on_export_dialog_done,
+                        command_owner);
+  g_object_unref (dialog);
+}
+
+/* ------------------------------------------------------------------ */
 /* Menu bar: every item routes through an app.<command> action.        */
 /* ------------------------------------------------------------------ */
 
@@ -1546,6 +1856,7 @@ build_menu_bar (void)
   menu_add_command (file, "Open Project…", "project.open");
   menu_add_command (file, "Save Project", "project.save");
   menu_add_command (file, "Import Media…", "media.import");
+  menu_add_command (file, "Export…", "project.export");
 
   GMenu *help = g_menu_new ();
 
@@ -1756,6 +2067,14 @@ oe_main_window_dispose (GObject *object)
   oe_command_set_handler (OE_CMD_UNDO, NULL);
   oe_command_set_handler (OE_CMD_REDO, NULL);
   oe_command_set_handler (OE_CMD_SNAP_TOGGLE, NULL);
+  oe_command_set_handler (OE_CMD_EXPORT, NULL);
+
+  /* Phase 8: cancel a running export. Its completion callback drops
+   * the stale result (command_owner is already NULL here) and frees
+   * the context on the main context. */
+  if (self->export_ui != NULL)
+    g_atomic_int_set (&self->export_ui->cancel, 1);
+
   command_owner = NULL;
 
   /* Free the worker first: it drains, joins, and flushes pending
@@ -1939,6 +2258,7 @@ oe_main_window_constructed (GObject *object)
   oe_command_set_handler (OE_CMD_NEW_PROJECT, project_new_command_handler);
   oe_command_set_handler (OE_CMD_OPEN_PROJECT, project_open_command_handler);
   oe_command_set_handler (OE_CMD_SAVE_PROJECT, project_save_command_handler);
+  oe_command_set_handler (OE_CMD_EXPORT, export_command_handler);
   oe_command_set_handler (OE_CMD_IMPORT_FROM_BIN, media_insert_from_bin_command_handler);
   oe_command_set_handler (OE_CMD_DELETE_SELECTION, selection_delete_command_handler);
   oe_command_set_handler (OE_CMD_ZOOM_IN, view_zoom_in_command_handler);
