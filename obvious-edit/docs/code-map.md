@@ -25,16 +25,19 @@ premiere-pro-remake/
     │   │   ├── oe_import_worker.[ch]# one decode thread; main-context results
     │   │   ├── oe_log.[ch]        # structured logging, OE_LOG_LEVEL
     │   │   ├── oe_media_cache.[ch]# raw-binary derived-media cache (XDG)
-    │   │   └── oe_media_library.[ch]# session assets: statuses, monitors
+    │   │   ├── oe_media_library.[ch]# session assets: statuses, monitors
+    │   │   └── oe_playback_session.[ch] # GTK-free playback clock/state machine
     │   ├── media/
     │   │   ├── oe_ffmpeg.[ch]     # FFmpeg lifecycle adapter (GError, g_once)
     │   │   ├── oe_media_jobs.[ch] # GTK-free thumbnail + waveform decode jobs
+    │   │   ├── oe_media_playback.[ch] # playback decode: audio worker + video
     │   │   └── oe_probe.[ch]      # FFmpeg metadata probe (GError domain)
     │   ├── playback/
-    │   │   └── oe_audio_output.[ch] # SDL3 audio lifecycle adapter (GError)
+    │   │   └── oe_audio_output.[ch] # SDL3 audio adapter + push-model stream
     │   └── ui/
     │       ├── oe_main_window.[ch]  # the editor shell: panels, status bar
     │       ├── oe_media_bin.[ch]    # the media bin: rows, badges, DnD
+    │       ├── oe_program_monitor.[ch] # the program monitor: frame blits
     │       ├── oe_timeline_layout.[ch] # GTK-free zoom/geometry/hit-test math
     │       ├── oe_timeline.[ch]      # the timeline widget: Cairo drawing + drags
     │       ├── oe_shell_layout.[ch] # GTK-free layout persistence (GKeyFile)
@@ -85,7 +88,10 @@ premiere-pro-remake/
 | `src/core/oe_project.c` | The document model: sequence/tracks/clips, media refs, observer | `oe_project_insert_clip`, `oe_project_move_clip`, `oe_project_get_sequence` |
 | `src/core/oe_project_format.c` | Strict JSON v1 load + atomic save | `oe_project_format_load`, `oe_project_format_save` |
 | `src/app/oe_import_worker.c` | The decode thread: queue, cancel, dispatch | `oe_import_worker_new`, `oe_import_worker_submit`, `oe_import_worker_free` |
-| `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit | `oe_audio_output_init`, `oe_audio_output_shutdown` |
+| `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit + the push-model device stream (queue, depth, flush, pause/resume) | `oe_audio_output_init`, `oe_audio_output_open_stream`, `oe_audio_output_queue`, `oe_audio_output_shutdown` |
+| `src/media/oe_media_playback.c` | Playback decode: audio decode-ahead worker (owned f32 chunks, main-context delivery) + frame-at-time BGRA video | `oe_media_playback_request_audio`, `oe_media_playback_video_open`, `oe_media_playback_video_get_frame` |
+| `src/app/oe_playback_session.c` | The GTK-free playback clock: stopped/paused/playing, wall-anchor, drift accounting, clip→source mapping, events | `oe_playback_session_play`, `oe_playback_session_tick`, `oe_playback_session_seek`, `oe_playback_session_map` |
+| `src/ui/oe_program_monitor.c` | The program monitor: owned-frame Cairo blits, empty state, missing-media hatch | `oe_program_monitor_new`, `oe_program_monitor_show_frame`, `oe_program_monitor_set_empty_state` |
 | `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector | `oe_main_window_new` |
 | `src/ui/oe_media_bin.c` | The bin panel: row projection, badges, DnD, selection | `oe_media_bin_new`, `oe_media_bin_refresh` |
 | `src/ui/oe_timeline_layout.c` | GTK-free timeline math: zoom round-trips, lane mapping, edge-band hit-test, move/trim clamps | `oe_timeline_x_for_us`, `oe_timeline_hit_test`, `oe_timeline_clamp_move_position`, `oe_timeline_trim_bounds` |

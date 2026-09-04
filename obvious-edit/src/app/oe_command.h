@@ -2,8 +2,9 @@
  *
  * Commands are the stable vocabulary of the application: the dotted names
  * and enum IDs chosen here are permanent API. Later phases build undo/redo
- * entries (after the playback clock, per the roadmap) and configurable
- * keymaps (Phase 4) on this registry.
+ * entries on this registry (after the playback clock, per the roadmap).
+ * Configurable keymaps remain deferred to a later phase — the accelerator
+ * column below stays the default, immutable map until then.
  *
  * The registry knows nothing about GTK. The application layer wires GTK
  * actions and default accelerators to oe_command_dispatch(); the UI layer
@@ -21,10 +22,18 @@ G_BEGIN_DECLS
  * OeCommandId:
  * @OE_CMD_PLAY_PAUSE: transport play/pause toggle (Space).
  * @OE_CMD_STOP: transport stop (K).
- * @OE_CMD_SHUTTLE_FORWARD: shuttle forward (L).
- * @OE_CMD_SHUTTLE_BACK: shuttle back (J).
- * @OE_CMD_MARK_IN: mark in point (I).
- * @OE_CMD_MARK_OUT: mark out point (O).
+ * @OE_CMD_SHUTTLE_FORWARD: shuttle forward (L) — deferred: multi-speed
+ *   and reverse playback arrive in a later phase; Phase 5 leaves the
+ *   command registered but unwired.
+ * @OE_CMD_SHUTTLE_BACK: shuttle back (J) — deferred: multi-speed and
+ *   reverse playback arrive in a later phase; Phase 5 leaves the
+ *   command registered but unwired.
+ * @OE_CMD_MARK_IN: mark in point (I) — deferred: range playback between
+ *   in/out points arrives in a later phase; Phase 5 leaves the command
+ *   registered but unwired.
+ * @OE_CMD_MARK_OUT: mark out point (O) — deferred: range playback
+ *   between in/out points arrives in a later phase; Phase 5 leaves the
+ *   command registered but unwired.
  * @OE_CMD_TOOL_SELECT: select tool (V).
  * @OE_CMD_TOOL_RAZOR: razor tool (C).
  * @OE_CMD_DELETE_SELECTION: delete the current selection (Delete).

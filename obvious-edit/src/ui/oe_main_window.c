@@ -32,9 +32,11 @@
 #include "../app/oe_import_worker.h"
 #include "../app/oe_log.h"
 #include "../app/oe_media_library.h"
+#include "../app/oe_playback_session.h"
 #include "../core/oe_project.h"
 #include "../core/oe_project_format.h"
 #include "oe_media_bin.h"
+#include "oe_program_monitor.h"
 #include "oe_shell_layout.h"
 #include "oe_timeline.h"
 
@@ -70,10 +72,21 @@ struct _OeMainWindow
   GHashTable *media_ref_to_asset; /* guint ref → guint asset id */
   GHashTable *asset_to_media_ref; /* guint asset id → guint ref */
 
+  /* Phase 5: the GTK-free playback session (borrows self->project),
+   * the program monitor it feeds, and the single tick GSource (0 when
+   * no tick is scheduled). */
+  OePlaybackSession *playback;
+  GtkWidget *program_monitor;
+  guint playback_tick_source;
+
   /* TRUE while the current import batch belongs to a project open: the
    * generic "Imported N file(s)" summary would bury the Loaded
    * message, so it is suppressed until the batch drains. */
   gboolean import_batch_open;
+
+  /* --insert-media dogfood batch: every OK import verdict is inserted
+   * on the timeline automatically (headless runs cannot click the bin). */
+  gboolean insert_all_pending;
 
   GtkWidget *inspector_stack; /* "empty" | "media" */
   GtkWidget *inspector_media; /* grid rebuilt per selection */
@@ -138,6 +151,16 @@ oe_main_window_import_files (OeMainWindow *window, const gchar *const *paths)
   import_paths (window, paths);
 }
 
+void
+oe_main_window_import_and_insert_files (OeMainWindow *window, const gchar *const *paths)
+{
+  g_return_if_fail (OE_IS_MAIN_WINDOW (window));
+  g_return_if_fail (paths != NULL && paths[0] != NULL);
+
+  window->insert_all_pending = TRUE;
+  import_paths (window, paths);
+}
+
 /* ------------------------------------------------------------------ */
 /* Import pipeline: one entry point for the chooser and drag-and-drop. */
 /* ------------------------------------------------------------------ */
@@ -163,6 +186,7 @@ import_paths (OeMainWindow *self, const gchar *const *paths)
  * the import verdict and project-open flows run earlier in the file. */
 static void register_media_asset_pair (OeMainWindow *self, guint media_ref, guint asset_id);
 static guint lookup_media_ref_for_asset (OeMainWindow *self, guint asset_id);
+static void insert_ready_asset (OeMainWindow *self, guint asset_id);
 
 static void
 on_import_done (const OeImportJobResult *result, gpointer user_data)
@@ -193,6 +217,12 @@ on_import_done (const OeImportJobResult *result, gpointer user_data)
       }
 
       self->import_ok++;
+
+      /* --insert-media dogfood batch: every OK verdict goes straight
+       * to the timeline so a headless run reaches playback without a
+       * bin click. */
+      if (self->insert_all_pending)
+        insert_ready_asset (self, result->asset_id);
       break;
 
     case OE_IMPORT_RESULT_MISSING:
@@ -559,6 +589,180 @@ media_import_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G
 /* window only supplies choosers and status-bar feedback.              */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Phase 5: playback. The session clock owns the position while playing; */
+/* its notifications push the playhead and monitor frames down; ruler    */
+/* clicks and playhead drags push seeks back up. Exactly one tick GSource */
+/* exists while playing, scheduled at the session's returned deadline.   */
+/* ------------------------------------------------------------------ */
+
+static gboolean playback_tick (gpointer user_data);
+
+static void
+cancel_tick (OeMainWindow *self)
+{
+  if (self->playback_tick_source != 0)
+    {
+      g_source_remove (self->playback_tick_source);
+      self->playback_tick_source = 0;
+    }
+}
+
+static void
+schedule_tick (OeMainWindow *self, gint64 deadline_us)
+{
+  if (self->playback_tick_source != 0)
+    return;
+
+  const gint64 now = g_get_monotonic_time ();
+  const guint delay_ms = deadline_us > now ? (guint) ((deadline_us - now + 999) / 1000) : 0;
+
+  self->playback_tick_source = g_timeout_add (delay_ms, playback_tick, self);
+}
+
+static gboolean
+playback_tick (gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  self->playback_tick_source = 0;
+
+  if (self->playback == NULL)
+    return G_SOURCE_REMOVE;
+
+  schedule_tick (self, oe_playback_session_tick (self->playback));
+  return G_SOURCE_REMOVE;
+}
+
+/* Session → UI: the playhead follows the clock; frames adopt into the
+ * monitor; events become status-bar reports. The observer never sets a
+ * "Playing" message — ticks would repeat it every frame. */
+static void
+on_playback_notify (const OePlaybackSession *session G_GNUC_UNUSED, gint64 position_us,
+                    OePlaybackState state, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  oe_timeline_set_playhead (OE_TIMELINE (self->timeline), position_us);
+
+  if (state == OE_PLAYBACK_PAUSED)
+    set_status_message (self, "Paused");
+}
+
+static void
+on_playback_frame (const OePlaybackSession *session G_GNUC_UNUSED, OePlaybackVideoFrame *frame,
+                   gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  oe_program_monitor_show_frame (OE_PROGRAM_MONITOR (self->program_monitor), frame);
+}
+
+static void
+on_playback_event (const OePlaybackSession *session G_GNUC_UNUSED, OePlaybackEvent event,
+                   const gchar *detail, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  switch (event)
+    {
+    case OE_PLAYBACK_EVENT_NOTHING_TO_PLAY:
+      set_status_message (self, "Nothing to play — the timeline is empty");
+      break;
+
+    case OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED:
+      {
+        g_autofree gchar *msg = g_strdup_printf ("Skipped missing media — playback continues (%s)",
+                                                 detail != NULL ? detail : "unknown");
+
+        set_status_message (self, msg);
+        break;
+      }
+
+    case OE_PLAYBACK_EVENT_END_OF_SEQUENCE:
+      set_status_message (self, "End of sequence — stopped");
+      break;
+    }
+}
+
+/* UI → session: hand moves of the playhead seek the clock. Seeks during
+ * playback reset the clock, flush the decoders, and clear the audio
+ * queue inside the session. */
+static void
+on_timeline_playhead (gint64 playhead_us, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  oe_playback_session_seek (self->playback, playhead_us);
+}
+
+/* Creates or re-creates the session against @project. The session
+ * borrows the project: reset_session frees the session while the
+ * outgoing project is still alive, then re-attaches here. */
+static void
+playback_attach (OeMainWindow *self, OeProject *project)
+{
+  cancel_tick (self);
+  g_clear_pointer (&self->playback, oe_playback_session_free);
+
+  self->playback = oe_playback_session_new ((const OeProject *) project);
+  oe_playback_session_set_observer (self->playback, on_playback_notify, self);
+  oe_playback_session_set_frame_func (self->playback, on_playback_frame, self);
+  oe_playback_session_set_event_func (self->playback, on_playback_event, self);
+  oe_program_monitor_clear (OE_PROGRAM_MONITOR (self->program_monitor));
+}
+
+/* transport.play-pause: Space toggles the clock. Empty timelines report
+ * "nothing to play" without an error dialog. */
+static void
+transport_play_pause_command_handler (OeCommandId id G_GNUC_UNUSED,
+                                      gpointer user_data G_GNUC_UNUSED)
+{
+  OeMainWindow *self = command_owner;
+
+  if (self == NULL || self->playback == NULL)
+    return;
+
+  if (oe_playback_session_get_state (self->playback) == OE_PLAYBACK_PLAYING)
+    {
+      oe_playback_session_pause (self->playback);
+      cancel_tick (self);
+      return;
+    }
+
+  GError *error = NULL;
+
+  if (!oe_playback_session_play (self->playback, &error))
+    {
+      set_status_message (self, error->message);
+      g_error_free (error);
+      return;
+    }
+
+  if (oe_playback_session_get_state (self->playback) != OE_PLAYBACK_PLAYING)
+    return; /* empty timeline: NOTHING_TO_PLAY was already reported */
+
+  set_status_message (self, "Playing");
+  cancel_tick (self);
+  playback_tick (self); /* first tick now; the source re-arms at the deadline */
+}
+
+/* transport.stop: end playback and park the playhead. The monitor keeps
+ * its last frame (matching pro-editor behavior); the empty state returns
+ * on the next session attach. */
+static void
+transport_stop_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  OeMainWindow *self = command_owner;
+
+  if (self == NULL || self->playback == NULL)
+    return;
+
+  oe_playback_session_stop (self->playback);
+  cancel_tick (self);
+  set_status_message (self, "Stopped");
+}
+
 /* Replaces the whole session: the model and the library. Asset ids are
  * a per-library sequence, so an in-flight result from the outgoing
  * session could alias a new row; every job submitted after this point
@@ -566,6 +770,12 @@ media_import_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G
 static void
 reset_session (OeMainWindow *self, OeProject *project)
 {
+  /* The playback session borrows the outgoing project: free it while
+   * that project is still alive, then re-attach to the replacement
+   * once self->project points at it. */
+  cancel_tick (self);
+  g_clear_pointer (&self->playback, oe_playback_session_free);
+
   g_clear_pointer (&self->project_path, g_free);
   g_clear_object (&self->project);
   g_clear_pointer (&self->media_library, oe_media_library_free);
@@ -584,6 +794,7 @@ reset_session (OeMainWindow *self, OeProject *project)
 
   self->project = project;
   self->session_epoch++;
+  playback_attach (self, project);
   populate_inspector (self);
 }
 
@@ -955,25 +1166,14 @@ selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_da
   set_status_message (self, "Deleted selected clip");
 }
 
-/* Insert from Bin: the selected asset's file joins the project model
- * (one stable media ref per unique path) and a clip lands at the
- * playhead on the first kind-matching track. */
+/* Shared insertion core for the Insert-from-Bin command and the
+ * --insert-media dogfood batch: one ready asset's file joins the
+ * project model (one stable media ref per unique path) and a clip
+ * lands at the playhead on the first kind-matching track. Every
+ * refusal reports through the status seam. */
 static void
-media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
-                                       gpointer user_data G_GNUC_UNUSED)
+insert_ready_asset (OeMainWindow *self, guint asset_id)
 {
-  if (command_owner == NULL)
-    return;
-
-  OeMainWindow *self = command_owner;
-  const guint asset_id = oe_media_bin_get_selected (OE_MEDIA_BIN (self->media_bin));
-
-  if (asset_id == 0)
-    {
-      set_status_message (self, "Insert from Bin: select an asset in the bin first");
-      return;
-    }
-
   OeAssetInfo asset;
 
   oe_asset_info_init (&asset);
@@ -1077,6 +1277,27 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
 
   set_status_message (self, msg);
   oe_asset_info_clear (&asset);
+}
+
+/* Insert from Bin: the selected asset goes through the shared
+ * insertion core above. */
+static void
+media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
+                                       gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  const guint asset_id = oe_media_bin_get_selected (OE_MEDIA_BIN (self->media_bin));
+
+  if (asset_id == 0)
+    {
+      set_status_message (self, "Insert from Bin: select an asset in the bin first");
+      return;
+    }
+
+  insert_ready_asset (self, asset_id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1413,12 +1634,20 @@ oe_main_window_dispose (GObject *object)
   oe_command_set_handler (OE_CMD_DELETE_SELECTION, NULL);
   oe_command_set_handler (OE_CMD_ZOOM_IN, NULL);
   oe_command_set_handler (OE_CMD_ZOOM_OUT, NULL);
+  oe_command_set_handler (OE_CMD_PLAY_PAUSE, NULL);
+  oe_command_set_handler (OE_CMD_STOP, NULL);
   command_owner = NULL;
 
   /* Free the worker first: it drains, joins, and flushes pending
    * results onto the main context while the library and widgets it
    * reports about are still alive. Runs BEFORE oe_ffmpeg_shutdown,
    * which the application performs in its own teardown. */
+  /* Phase 5: the playback session frees its decode worker (drain +
+   * join) while the widgets it reports to are alive — the same
+   * before-oe_ffmpeg_shutdown ordering as the import worker. */
+  cancel_tick (self);
+  g_clear_pointer (&self->playback, oe_playback_session_free);
+
   g_clear_pointer (&self->import_worker, oe_import_worker_free);
   g_clear_pointer (&self->media_library, oe_media_library_free);
 
@@ -1514,9 +1743,19 @@ oe_main_window_constructed (GObject *object)
   gtk_box_append (GTK_BOX (monitors),
                   panel_new ("Source Monitor",
                              "No clip loaded yet — source playback arrives in a later phase"));
-  gtk_box_append (GTK_BOX (monitors),
-                  panel_new ("Program Monitor",
-                             "No video output yet — program display arrives in a later phase"));
+  /* Phase 5: the program monitor is a live drawing area in the same
+   * panel frame; the source monitor stays a phase-later placeholder. */
+  GtkWidget *program_panel = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *program_header = gtk_label_new ("Program Monitor");
+
+  gtk_widget_add_css_class (program_panel, "panel");
+  gtk_widget_add_css_class (program_header, "panel-title");
+  gtk_widget_set_halign (program_header, GTK_ALIGN_START);
+  gtk_box_append (GTK_BOX (program_panel), program_header);
+
+  self->program_monitor = GTK_WIDGET (oe_program_monitor_new ());
+  gtk_box_append (GTK_BOX (program_panel), self->program_monitor);
+  gtk_box_append (GTK_BOX (monitors), program_panel);
 
   gtk_paned_set_start_child (GTK_PANED (self->inspector_paned), monitors);
   gtk_paned_set_end_child (GTK_PANED (self->inspector_paned),
@@ -1537,6 +1776,11 @@ oe_main_window_constructed (GObject *object)
   oe_timeline_set_resolve_func (OE_TIMELINE (self->timeline), timeline_resolve_media, self);
   oe_timeline_set_report_func (OE_TIMELINE (self->timeline), timeline_report, self);
   oe_timeline_set_project (OE_TIMELINE (self->timeline), self->project);
+
+  /* Phase 5: the session drives the playhead and program monitor; the
+   * timeline feeds hand moves back as seeks. */
+  playback_attach (self, self->project);
+  oe_timeline_set_playhead_func (OE_TIMELINE (self->timeline), on_timeline_playhead, self);
 
   gtk_paned_set_end_child (GTK_PANED (self->bin_paned), self->timeline_paned);
   gtk_box_append (GTK_BOX (root), self->bin_paned);
@@ -1564,6 +1808,8 @@ oe_main_window_constructed (GObject *object)
   oe_command_set_handler (OE_CMD_DELETE_SELECTION, selection_delete_command_handler);
   oe_command_set_handler (OE_CMD_ZOOM_IN, view_zoom_in_command_handler);
   oe_command_set_handler (OE_CMD_ZOOM_OUT, view_zoom_out_command_handler);
+  oe_command_set_handler (OE_CMD_PLAY_PAUSE, transport_play_pause_command_handler);
+  oe_command_set_handler (OE_CMD_STOP, transport_stop_command_handler);
 
   g_signal_connect (self, "map", G_CALLBACK (on_map_apply_positions), NULL);
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);

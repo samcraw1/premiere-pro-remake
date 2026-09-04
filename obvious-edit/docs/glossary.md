@@ -196,9 +196,10 @@ dropping or guessing members is forbidden by the strict-reader rule.
 **Playhead** — the widget-session cursor marking the timeline position
 where playback or insertion happens. Session state only: it lives in
 the timeline widget, never in the project model, and is never
-serialized. The Phase 5 playback clock owns what the playhead means;
-until then it is a view artifact set by ruler clicks and advanced by
-insert-from-bin.
+serialized. Since Phase 5 it shows the playback session's position
+(see [Clock](#playback-terms-phase-5) below) and dragging it feeds a
+seek back into the session; it stays a view artifact, never model
+state.
 
 **Selection** — the widget-session designation of one clip as the
 target of commands (Delete, zoom-independent highlight painting).
@@ -230,6 +231,30 @@ error; our Valgrind suppression file covers only GLib/GObject internals.
 **Suppression file** — a Valgrind config listing known-safe allocation
 patterns to exclude from error reporting. Ours is scoped by policy to
 GLib/GObject internals only.
+
+## Playback terms (Phase 5)
+
+**Clock** — the playback session's notion of "where are we": a
+wall-clock-anchored position in integer microseconds, recomputed from
+the anchor on demand and re-anchored by play, pause-resume, and seek
+so nothing ever accumulates drift. The clock is GTK-free state inside
+`oe_playback_session` — widgets only read it (the
+[playhead](#timeline-terms-phase-4) is its on-screen shadow) and feed
+it seeks.
+
+**A/V sync** — keeping what you hear and what you see pointed at the
+same source microsecond. The session maps every tick position to one
+clip per lane, decodes audio ahead through the worker, decodes video
+frame-at-time, and nudges the visible position toward the audio queue
+when a real device makes the two diverge. Under SDL's dummy driver
+there is no device time, so verification of true sync is deferred to
+real hardware (the PR's honest-limits note says so).
+
+**Frame pacing** — when the next frame shows. The session's
+`tick()` returns the next deadline in monotonic microseconds (one
+frame interval at the sequence rate); the window schedules its GSource
+at exactly that deadline instead of guessing an interval, so ticks
+stay anchored even when a draw runs late.
 
 ## Project-specific terms
 

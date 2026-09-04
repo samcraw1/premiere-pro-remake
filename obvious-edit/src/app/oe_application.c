@@ -16,6 +16,8 @@ struct _OeApplication
   gboolean startup_attempted;
   gboolean startup_succeeded;
   gchar **import_media_paths; /* owned; consumed on first activate */
+  gchar **insert_media_paths; /* owned; consumed on first activate */
+  gboolean insert_media;      /* --insert-media seen in handle-local */
 };
 
 G_DEFINE_TYPE (OeApplication, oe_application, GTK_TYPE_APPLICATION)
@@ -102,6 +104,15 @@ oe_application_activate (GApplication *application)
       g_strfreev (self->import_media_paths);
       self->import_media_paths = NULL;
     }
+  if (self->insert_media)
+    {
+      oe_log (OE_LOG_LEVEL_INFO, "insert seam: firing %u path(s)",
+              self->insert_media_paths ? g_strv_length (self->insert_media_paths) : 0);
+      oe_main_window_import_and_insert_files (OE_MAIN_WINDOW (window),
+                                              (const gchar *const *) self->insert_media_paths);
+      g_strfreev (self->insert_media_paths);
+      self->insert_media_paths = NULL;
+    }
 }
 
 static void
@@ -171,6 +182,23 @@ oe_application_handle_local_options (GApplication *application, GVariantDict *op
       }
   }
 
+  {
+    g_autoptr (GVariant) insert
+        = g_variant_dict_lookup_value (options, "insert-media", G_VARIANT_TYPE_STRING_ARRAY);
+    if (insert != NULL)
+      {
+        self->insert_media = TRUE;
+        g_strfreev (self->insert_media_paths);
+        self->insert_media_paths = g_new0 (gchar *, g_variant_n_children (insert) + 1);
+        for (gsize i = 0; i < g_variant_n_children (insert); i++)
+          {
+            g_autoptr (GVariant) child = g_variant_get_child_value (insert, i);
+
+            self->insert_media_paths[i] = g_variant_dup_string (child, NULL);
+          }
+      }
+  }
+
   /* -1 continues into the local application instance. */
   return -1;
 }
@@ -211,6 +239,11 @@ oe_application_new (void)
                                  G_OPTION_ARG_STRING_ARRAY,
                                  "Import paths through the normal pipeline after the window "
                                  "maps (headless smoke and dogfood seam)",
+                                 NULL);
+  g_application_add_main_option (G_APPLICATION (self), "insert-media", '\0', G_OPTION_FLAG_NONE,
+                                 G_OPTION_ARG_STRING_ARRAY,
+                                 "Import paths and insert every ready asset at the playhead so a "
+                                 "headless run reaches playback (headless dogfood seam)",
                                  NULL);
 
   return self;

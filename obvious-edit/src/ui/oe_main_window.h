@@ -41,4 +41,16 @@ GtkWidget *oe_main_window_new (GtkApplication *application);
  */
 void oe_main_window_import_files (OeMainWindow *window, const gchar *const *paths);
 
+/**
+ * oe_main_window_import_and_insert_files:
+ * @window: the editor shell
+ * @paths: a %NULL-terminated array of filesystem paths
+ *
+ * The headless playback-dogfood seam: feeds paths through the import
+ * pipeline and inserts every OK verdict on the first kind-matching
+ * track at the playhead. Exists because a bare Xvfb session cannot
+ * click a bin row any more than it can drive the file chooser.
+ */
+void oe_main_window_import_and_insert_files (OeMainWindow *window, const gchar *const *paths);
+
 G_END_DECLS
