@@ -342,7 +342,10 @@ static gboolean
 check_members (JsonObject *obj, const gchar *const *known, gsize n, const gchar *where,
                GError **error)
 {
+  /* json_object_get_members transfers the list container (the member
+   * names stay owned by the object), so it must be freed on every path. */
   GList *members = json_object_get_members (obj);
+  gboolean ok = TRUE;
 
   for (GList *l = members; l != NULL; l = l->next)
     {
@@ -364,10 +367,13 @@ check_members (JsonObject *obj, const gchar *const *known, gsize n, const gchar 
                        "%s: unknown member \"%s\" — v1 is strict; the file may be from a "
                        "newer format version",
                        where, name);
-          return FALSE;
+          ok = FALSE;
+          break;
         }
     }
-  return TRUE;
+
+  g_list_free (members);
+  return ok;
 }
 
 static gboolean
