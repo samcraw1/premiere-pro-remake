@@ -158,6 +158,39 @@ handler runs; disabled commands report and log instead of executing.
 Command-table integrity, dispatch paths, and layout persistence are
 all covered this way so CI can run them headlessly.
 
+## Document model terms (Phase 3)
+
+**Sequence time** — the coordinate system of the composed timeline,
+counted in integer microseconds from the sequence start, driven by the
+sequence's rational frame rate. Sequence time is what a position means;
+it is independent of any particular source file's timebase.
+
+**Position** — where a clip sits in sequence time: the sequence-time
+offset of the clip's first frame on its track. Positions are integer
+microseconds and clips on one track are stored sorted by position.
+
+**In/out point** — the pair `source-in-us` / `source-out-us`: the
+half-open range `[in, out)` of the source media a clip references. The
+timeline duration of every clip — stills included — is
+`source-out-us − source-in-us` exactly.
+
+**Media reference** — the file-stable handle a project file uses to
+name source media: a unique positive integer (`ref`) paired with a
+path, owned by the project. Clips point at references, never directly
+at files, so a relink re-points every clip that uses the source. Media
+references persist in project files; the Phase 2 session asset ids are
+transient and never serialize.
+
+**Format version** — the `format-version` integer, the first member
+inside the document root. It exists so readers can refuse documents
+they do not understand: anything other than the supported version is a
+typed error, never a best-effort import.
+
+**Migration** — converting a document from one format version to
+another on load. v1 defines no migration; when a future version needs
+one, it will be an explicit, reported transformation — silently
+dropping or guessing members is forbidden by the strict-reader rule.
+
 ## Build terms
 
 **Meson / Ninja** — the build configuration system and the low-level

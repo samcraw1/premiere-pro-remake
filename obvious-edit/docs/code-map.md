@@ -1,4 +1,4 @@
-# Code map (Phases 1 + 2)
+# Code map (Phases 1–3)
 
 What lives where, and why it lives there.
 
@@ -15,6 +15,10 @@ premiere-pro-remake/
     │   └── run-headless.sh        # dbus-run-session + xvfb-run self-check
     ├── src/
     │   ├── main.c                 # entry point: logging init, app run
+    │   ├── core/
+    │   │   ├── oe_time.[ch]       # rational time: reduced rates, µs conversions
+    │   │   ├── oe_project.[ch]    # the document model: project/tracks/clips
+    │   │   └── oe_project_format.[ch] # strict JSON v1, atomic save/load
     │   ├── app/
     │   │   ├── oe_application.[ch]# GtkApplication; startup/shutdown owner
     │   │   ├── oe_command.[ch]    # GTK-free command registry (IDs, accels)
@@ -43,6 +47,9 @@ premiere-pro-remake/
     │   ├── test_media_jobs.c      # thumbnail box-fit, peaks, cache hit/miss
     │   ├── test_media_library.c   # records, observers, monitor round trip
     │   ├── test_import_worker.c   # thread → main-context completion
+    │   ├── test_time.c            # rational time: reduction, rounding, rates
+    │   ├── test_project.c         # model invariants, observer, media refs
+    │   ├── test_project_format.c  # strict v1, round trip, atomic saves
     │   ├── fixture_media.[ch]     # runtime media fixtures (WAV/AVI/PNG)
     │   └── valgrind.supp          # GLib/GObject-only suppressions
     └── docs/
@@ -52,7 +59,9 @@ premiere-pro-remake/
         ├── glossary.md            # NLE vocabulary
         └── learning/
             ├── phase-0.md         # guided Phase 0 walkthrough
-            └── phase-1.md         # guided Phase 1 walkthrough
+            ├── phase-1.md         # guided Phase 1 walkthrough
+            ├── phase-2.md         # guided Phase 2 walkthrough
+            └── phase-3.md         # guided Phase 3 walkthrough
 ```
 
 ## File-by-file responsibilities
@@ -68,6 +77,9 @@ premiere-pro-remake/
 | `src/media/oe_media_jobs.c` | Thumbnail + waveform decode jobs | `oe_media_job_thumbnail`, `oe_media_job_waveform` |
 | `src/app/oe_media_cache.c` | Derived-media cache: keys, lookup, atomic store | `oe_media_cache_lookup`, `oe_media_cache_store` |
 | `src/app/oe_media_library.c` | Session asset records, statuses, monitors | `oe_media_library_add`, `oe_media_library_relink`, `…_set_observer` |
+| `src/core/oe_time.c` | Reduced rationals, frame↔µs conversions (nearest, halves away) | `oe_time_rate`, `oe_time_rate_reduce`, `oe_time_frame_to_us`, `oe_time_us_to_frame` |
+| `src/core/oe_project.c` | The document model: sequence/tracks/clips, media refs, observer | `oe_project_insert_clip`, `oe_project_move_clip`, `oe_project_get_sequence` |
+| `src/core/oe_project_format.c` | Strict JSON v1 load + atomic save | `oe_project_format_load`, `oe_project_format_save` |
 | `src/app/oe_import_worker.c` | The decode thread: queue, cancel, dispatch | `oe_import_worker_new`, `oe_import_worker_submit`, `oe_import_worker_free` |
 | `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit | `oe_audio_output_init`, `oe_audio_output_shutdown` |
 | `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector | `oe_main_window_new` |
@@ -81,6 +93,9 @@ premiere-pro-remake/
 | `tests/test_media_jobs.c` | Decode jobs + cache round trip | `/media-jobs/*` |
 | `tests/test_media_library.c` | Records, observers, monitor, relink | `/media-library/*` |
 | `tests/test_import_worker.c` | Worker thread → main-context contract | `/import-worker/*` |
+| `tests/test_time.c` | Rate reduction, typed rejection, rounding, identities | `/time/*` |
+| `tests/test_project.c` | Ordering, overlap, observer, deep copies, media refs | `/project/*` |
+| `tests/test_project_format.c` | Strict v1 parse, round trip, atomic failure | `/format/*` |
 | `tests/fixture_media.c` | Runtime WAV/AVI/PNG/text fixture generator | `oe_fixture_media_create`, `oe_fixture_media_free` |
 
 ## Conventions

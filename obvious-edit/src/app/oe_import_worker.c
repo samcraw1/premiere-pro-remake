@@ -21,6 +21,7 @@ typedef struct
   gchar *path;
   guint asset_id;
   gboolean relink;
+  gpointer tag;
 } OeImportJob;
 
 /* Queue terminator: g_async_queue_push rejects NULL, so we push the
@@ -49,7 +50,7 @@ static gpointer worker_thread_main (gpointer data);
 /* ---- refcounted immutable job ---- */
 
 static OeImportJob *
-job_new (const gchar *path, guint asset_id, gboolean relink)
+job_new (const gchar *path, guint asset_id, gboolean relink, gpointer tag)
 {
   OeImportJob *job = g_new0 (OeImportJob, 1);
 
@@ -57,6 +58,7 @@ job_new (const gchar *path, guint asset_id, gboolean relink)
   job->path = g_strdup (path);
   job->asset_id = asset_id;
   job->relink = relink;
+  job->tag = tag;
   return job;
 }
 
@@ -170,7 +172,8 @@ load_cached_thumbnail (const gchar *key, OeThumbnail *out)
   gsize len = 0;
   gboolean hit = FALSE;
 
-  if (oe_media_cache_lookup (variant, &data, &len) && len >= 12 && get_u32 (data) == OE_CACHE_MAGIC_THUMB)
+  if (oe_media_cache_lookup (variant, &data, &len) && len >= 12
+      && get_u32 (data) == OE_CACHE_MAGIC_THUMB)
     {
       guint32 width = get_u32 (data + 4);
       guint32 height = get_u32 (data + 8);
@@ -224,7 +227,8 @@ load_cached_waveform (const gchar *key, OeWaveform *out)
   gsize len = 0;
   gboolean hit = FALSE;
 
-  if (oe_media_cache_lookup (variant, &data, &len) && len >= 8 && get_u32 (data) == OE_CACHE_MAGIC_WAVE)
+  if (oe_media_cache_lookup (variant, &data, &len) && len >= 8
+      && get_u32 (data) == OE_CACHE_MAGIC_WAVE)
     {
       guint32 buckets = get_u32 (data + 4);
 
@@ -297,6 +301,7 @@ process_job (OeImportWorker *worker, OeImportJob *job)
 
   dispatch->job = job_ref (job);
   res->asset_id = job->asset_id;
+  res->tag = job->tag;
   res->relink = job->relink;
 
   GError *error = NULL;
@@ -435,13 +440,13 @@ oe_import_worker_new (OeImportDoneFunc done, gpointer user_data)
 }
 
 void
-oe_import_worker_submit (OeImportWorker *worker, const gchar *path, guint asset_id,
-                         gboolean relink)
+oe_import_worker_submit (OeImportWorker *worker, const gchar *path, guint asset_id, gboolean relink,
+                         gpointer tag)
 {
   g_return_if_fail (worker != NULL);
   g_return_if_fail (path != NULL && path[0] != '\0');
 
-  g_async_queue_push (worker->queue, job_new (path, asset_id, relink));
+  g_async_queue_push (worker->queue, job_new (path, asset_id, relink, tag));
 }
 
 void

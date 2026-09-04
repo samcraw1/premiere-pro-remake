@@ -43,6 +43,9 @@ const gchar *oe_import_result_get_name (OeImportResult result);
 /**
  * OeImportJobResult: what the completion callback receives.
  * @asset_id: opaque library id the job was submitted with.
+ * @tag: opaque caller tag carried through the job untouched (the window
+ *   stamps its session epoch here so results from a previous session can
+ *   be recognized and dropped after a project Open/New).
  * @relink: TRUE when the job re-probed an existing bin row.
  * @result: outcome of the job.
  * @info: probed metadata; meaningful only when @result is OK.
@@ -55,6 +58,7 @@ const gchar *oe_import_result_get_name (OeImportResult result);
 typedef struct
 {
   guint asset_id;
+  gpointer tag;
   gboolean relink;
   OeImportResult result;
   OeProbeInfo info;
@@ -99,11 +103,12 @@ void oe_import_worker_free (OeImportWorker *worker);
  * @path: media file path (copied).
  * @asset_id: library record the result will be applied to.
  * @relink: TRUE for a re-probe of an existing row.
+ * @tag: opaque caller value returned in the result's tag.
  *
  * Enqueues an immutable job. Results arrive via the @done callback.
  */
 void oe_import_worker_submit (OeImportWorker *worker, const gchar *path, guint asset_id,
-                              gboolean relink);
+                              gboolean relink, gpointer tag);
 
 /**
  * oe_import_worker_cancel_current:

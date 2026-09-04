@@ -16,6 +16,12 @@
  *     status-bar messages, and inspector content.
  *   - Layout persistence flows through the OeShellLayout struct only:
  *     load at construction (defaults on first run), save on close-request.
+ *   - Phase 3: the window drives File > New/Open/Save through the
+ *     GTK-free project model and format modules. All parsing,
+ *     validation, serialization, and writing lives in src/core; the
+ *     window supplies choosers and status-bar feedback only. Every
+ *     session is stamped with an epoch so import results from a
+ *     replaced session are dropped instead of aliasing new rows.
  */
 
 #include "oe_main_window.h"
@@ -26,6 +32,8 @@
 #include "../app/oe_import_worker.h"
 #include "../app/oe_log.h"
 #include "../app/oe_media_library.h"
+#include "../core/oe_project.h"
+#include "../core/oe_project_format.h"
 #include "oe_media_bin.h"
 #include "oe_shell_layout.h"
 
@@ -46,6 +54,18 @@ struct _OeMainWindow
   OeImportWorker *import_worker;
   GtkWidget *media_bin;
 
+  /* Phase 3: the GTK-free project model, its on-disk anchor, and the
+   * session epoch stamped onto worker jobs (results carrying an older
+   * epoch belong to a replaced session and are dropped). */
+  OeProject *project;
+  gchar *project_path;
+  guint session_epoch;
+
+  /* TRUE while the current import batch belongs to a project open: the
+   * generic "Imported N file(s)" summary would bury the Loaded
+   * message, so it is suppressed until the batch drains. */
+  gboolean import_batch_open;
+
   GtkWidget *inspector_stack; /* "empty" | "media" */
   GtkWidget *inspector_media; /* grid rebuilt per selection */
 
@@ -63,13 +83,12 @@ struct _OeMainWindow
 G_DEFINE_TYPE (OeMainWindow, oe_main_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* ------------------------------------------------------------------ */
-/* Static handler seam: media.import carries no user_data through      */
-/* dispatch, so the handler context rides a static pointer, installed  */
-/* at construction and cleared in dispose — the same pattern as the    */
-/* reporter seam.                                                      */
+/* Static handler seam: command dispatch carries no user_data, so the  */
+/* handler context rides a static pointer, installed at construction   */
+/* and cleared in dispose — the same pattern as the reporter seam.     */
 /* ------------------------------------------------------------------ */
 
-static OeMainWindow *media_import_owner = NULL;
+static OeMainWindow *command_owner = NULL;
 
 /* ------------------------------------------------------------------ */
 /* Status reporting: every user-visible phase-2 message lands through   */
@@ -77,8 +96,10 @@ static OeMainWindow *media_import_owner = NULL;
 /* ------------------------------------------------------------------ */
 
 /* Forward decls: the import callback repopulates the inspector before
- * the inspector section below defines it. */
+ * the inspector section below defines it; the session reset re-attaches
+ * the library observer defined further down. */
 static void populate_inspector (OeMainWindow *self);
+static void on_library_changed (guint asset_id, gpointer user_data);
 
 static void
 set_status_message (OeMainWindow *self, const gchar *message)
@@ -101,13 +122,16 @@ report_to_status_bar (OeCommandId id G_GNUC_UNUSED, const gchar *message, gpoint
 static void
 import_paths (OeMainWindow *self, const gchar *const *paths)
 {
+  self->import_batch_open = FALSE;
+
   for (guint i = 0; paths != NULL && paths[i] != NULL; i++)
     {
       guint id = oe_media_library_add (self->media_library, paths[i]);
 
       /* The observer refreshed the bin (IMPORTING row); the worker's
        * verdict will move the record to OK, MISSING, or UNSUPPORTED. */
-      oe_import_worker_submit (self->import_worker, paths[i], id, FALSE);
+      oe_import_worker_submit (self->import_worker, paths[i], id, FALSE,
+                               GUINT_TO_POINTER (self->session_epoch));
       self->import_pending++;
     }
 }
@@ -116,6 +140,12 @@ static void
 on_import_done (const OeImportJobResult *result, gpointer user_data)
 {
   OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  /* A result stamped with an older epoch belongs to a replaced session:
+   * asset ids are a per-library sequence, so applying it to the current
+   * library could alias a new row. Drop it untouched. */
+  if (GPOINTER_TO_UINT (result->tag) != self->session_epoch)
+    return;
 
   switch (result->result)
     {
@@ -178,13 +208,16 @@ on_import_done (const OeImportJobResult *result, gpointer user_data)
   if (self->import_pending > 0)
     self->import_pending--;
 
-  if (self->import_pending == 0 && self->import_ok > 0)
+  if (self->import_pending == 0 && self->import_ok > 0 && !self->import_batch_open)
     {
       g_autofree gchar *msg = g_strdup_printf ("Imported %u file(s)", self->import_ok);
 
       set_status_message (self, msg);
       self->import_ok = 0;
     }
+
+  if (self->import_pending == 0)
+    self->import_batch_open = FALSE;
 
   /* The selected row may have changed underneath the inspector. */
   guint selected = oe_media_bin_get_selected (OE_MEDIA_BIN (self->media_bin));
@@ -442,7 +475,8 @@ on_relink_dialog_done (GObject *source, GAsyncResult *result, gpointer user_data
   if (path != NULL && target != 0 && oe_media_library_relink (self->media_library, target, path))
     {
       /* Back to IMPORTING; the re-probe runs through the same worker. */
-      oe_import_worker_submit (self->import_worker, path, target, TRUE);
+      oe_import_worker_submit (self->import_worker, path, target, TRUE,
+                               GUINT_TO_POINTER (self->session_epoch));
     }
   g_object_unref (file);
 }
@@ -475,8 +509,233 @@ bin_import_sink (const gchar *const *paths, gpointer user_data)
 static void
 media_import_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
 {
-  if (media_import_owner != NULL)
-    open_import_dialog (media_import_owner);
+  if (command_owner != NULL)
+    open_import_dialog (command_owner);
+}
+
+/* ------------------------------------------------------------------ */
+/* Project session: File > New/Open/Save. All parse/validate/apply/    */
+/* serialize/write behavior lives in src/core (oe_project_format); the */
+/* window only supplies choosers and status-bar feedback.              */
+/* ------------------------------------------------------------------ */
+
+/* Replaces the whole session: the model and the library. Asset ids are
+ * a per-library sequence, so an in-flight result from the outgoing
+ * session could alias a new row; every job submitted after this point
+ * carries the bumped epoch, and on_import_done drops older tags. */
+static void
+reset_session (OeMainWindow *self, OeProject *project)
+{
+  g_clear_pointer (&self->project_path, g_free);
+  g_clear_object (&self->project);
+  g_clear_pointer (&self->media_library, oe_media_library_free);
+
+  self->media_library = oe_media_library_new ();
+  oe_media_library_set_observer (self->media_library, on_library_changed, self);
+  oe_media_bin_set_library (OE_MEDIA_BIN (self->media_bin), self->media_library);
+  oe_media_bin_refresh (OE_MEDIA_BIN (self->media_bin));
+
+  self->project = project;
+  self->session_epoch++;
+  populate_inspector (self);
+}
+
+static void
+save_project_to_path (OeMainWindow *self, const gchar *path)
+{
+  GError *error = NULL;
+
+  if (!oe_project_format_save (self->project, path, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Could not save project: %s", error->message);
+
+      oe_log (OE_LOG_LEVEL_WARNING, "project save failed for '%s': %s", path, error->message);
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  /* Only a successful save moves the on-disk anchor: a failed save
+   * leaves any previous file byte-identical, so the anchor must not
+   * move either. */
+  g_clear_pointer (&self->project_path, g_free);
+  self->project_path = g_strdup (path);
+
+  g_autofree gchar *msg = g_strdup_printf ("Project saved to %s", path);
+
+  set_status_message (self, msg);
+}
+
+static void
+open_project_path (OeMainWindow *self, const gchar *path)
+{
+  GError *error = NULL;
+  OeProject *loaded = oe_project_format_load (path, &error);
+
+  if (loaded == NULL)
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Could not open project: %s", error->message);
+
+      oe_log (OE_LOG_LEVEL_WARNING, "project open failed for '%s': %s", path, error->message);
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  /* Strict parse succeeded: replace the session, then re-import every
+   * referenced path through the existing worker. Probe verdicts land as
+   * OK / MISSING / UNSUPPORTED rows with the usual relink flow; the
+   * model itself is already complete — clips reference project media
+   * refs, not session assets. */
+  reset_session (self, loaded);
+  self->project_path = g_strdup (path);
+
+  guint media_count = oe_project_get_media_count (self->project);
+
+  for (guint i = 0; i < media_count; i++)
+    {
+      guint ref = 0;
+      gchar *media_path = NULL;
+
+      if (!oe_project_get_media (self->project, i, &ref, &media_path))
+        continue;
+
+      guint id = oe_media_library_add (self->media_library, media_path);
+
+      oe_import_worker_submit (self->import_worker, media_path, id, FALSE,
+                               GUINT_TO_POINTER (self->session_epoch));
+      self->import_pending++;
+      self->import_batch_open = TRUE;
+      g_free (media_path);
+    }
+
+  g_autofree gchar *msg
+      = g_strdup_printf ("Loaded %s (%u tracks, %u media)", oe_project_get_name (self->project),
+                         oe_project_get_track_count (self->project), media_count);
+
+  set_status_message (self, msg);
+}
+
+/* The project picker filter mirrors add_media_filter: it only narrows
+ * the chooser; the strict parser remains the accept/reject authority. */
+static void
+add_project_filter (GtkFileDialog *dialog)
+{
+  GtkFileFilter *filter = gtk_file_filter_new ();
+
+  gtk_file_filter_set_name (filter, "Obvious Edit projects (*.oe)");
+  gtk_file_filter_add_pattern (filter, "*.oe");
+
+  GListStore *filters = g_list_store_new (GTK_TYPE_FILE_FILTER);
+
+  g_list_store_append (filters, filter);
+  gtk_file_dialog_set_filters (dialog, G_LIST_MODEL (filters));
+  g_object_unref (filters);
+  g_object_unref (filter);
+}
+
+static void
+on_open_project_dialog_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  GError *error = NULL;
+
+  GFile *file = gtk_file_dialog_open_finish (GTK_FILE_DIALOG (source), result, &error);
+
+  if (file == NULL)
+    {
+      /* A canceled chooser is a no-op; real failures surface. */
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          oe_log (OE_LOG_LEVEL_WARNING, "open project dialog failed: %s", error->message);
+          set_status_message (self, "Could not open the file chooser");
+        }
+      g_clear_error (&error);
+      return;
+    }
+
+  const gchar *path = g_file_peek_path (file);
+
+  if (path != NULL)
+    open_project_path (self, path);
+  g_object_unref (file);
+}
+
+static void
+project_open_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  GtkFileDialog *dialog = gtk_file_dialog_new ();
+
+  gtk_file_dialog_set_title (dialog, "Open Project");
+  add_project_filter (dialog);
+  gtk_file_dialog_open (dialog, GTK_WINDOW (command_owner), NULL, on_open_project_dialog_done,
+                        command_owner);
+  g_object_unref (dialog);
+}
+
+static void
+on_save_dialog_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  GError *error = NULL;
+
+  GFile *file = gtk_file_dialog_save_finish (GTK_FILE_DIALOG (source), result, &error);
+
+  if (file == NULL)
+    {
+      if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          oe_log (OE_LOG_LEVEL_WARNING, "save project dialog failed: %s", error->message);
+          set_status_message (self, "Could not open the file chooser");
+        }
+      g_clear_error (&error);
+      return;
+    }
+
+  const gchar *path = g_file_peek_path (file);
+
+  if (path != NULL)
+    save_project_to_path (self, path);
+  g_object_unref (file);
+}
+
+static void
+project_save_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  /* Saving to the current anchor goes straight to disk; without one the
+   * command turns into Save As. */
+  if (command_owner->project_path != NULL)
+    {
+      save_project_to_path (command_owner, command_owner->project_path);
+      return;
+    }
+
+  GtkFileDialog *dialog = gtk_file_dialog_new ();
+  g_autofree gchar *initial
+      = g_strdup_printf ("%s.oe", oe_project_get_name (command_owner->project));
+
+  gtk_file_dialog_set_title (dialog, "Save Project");
+  add_project_filter (dialog);
+  gtk_file_dialog_set_initial_name (dialog, initial);
+  gtk_file_dialog_save (dialog, GTK_WINDOW (command_owner), NULL, on_save_dialog_done,
+                        command_owner);
+  g_object_unref (dialog);
+}
+
+static void
+project_new_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  reset_session (command_owner, oe_project_new_default ());
+  set_status_message (command_owner, "New project started");
 }
 
 /* ------------------------------------------------------------------ */
@@ -768,7 +1027,10 @@ oe_main_window_dispose (GObject *object)
    * widget. */
   oe_command_set_reporter (NULL, NULL);
   oe_command_set_handler (OE_CMD_IMPORT_MEDIA, NULL);
-  media_import_owner = NULL;
+  oe_command_set_handler (OE_CMD_NEW_PROJECT, NULL);
+  oe_command_set_handler (OE_CMD_OPEN_PROJECT, NULL);
+  oe_command_set_handler (OE_CMD_SAVE_PROJECT, NULL);
+  command_owner = NULL;
 
   /* Free the worker first: it drains, joins, and flushes pending
    * results onto the main context while the library and widgets it
@@ -776,6 +1038,11 @@ oe_main_window_dispose (GObject *object)
    * which the application performs in its own teardown. */
   g_clear_pointer (&self->import_worker, oe_import_worker_free);
   g_clear_pointer (&self->media_library, oe_media_library_free);
+
+  /* The model dies last: the worker is drained and both seams are
+   * cleared above, so nothing can reference it during teardown. */
+  g_clear_pointer (&self->project_path, g_free);
+  g_clear_object (&self->project);
 
   G_OBJECT_CLASS (oe_main_window_parent_class)->dispose (object);
 }
@@ -809,8 +1076,10 @@ oe_main_window_constructed (GObject *object)
   self->pending_timeline = layout.timeline_height;
 
   /* Phase 2 services: the window owns the GTK-free library and worker;
-   * the bin is a projection of the library. */
+   * the bin is a projection of the library. Phase 3 adds the GTK-free
+   * project model the New/Open/Save commands act on. */
   self->media_library = oe_media_library_new ();
+  self->project = oe_project_new_default ();
   self->media_bin = GTK_WIDGET (oe_media_bin_new (self->media_library));
   self->import_worker = oe_import_worker_new (on_import_done, self);
 
@@ -854,7 +1123,8 @@ oe_main_window_constructed (GObject *object)
                   panel_new ("Source Monitor",
                              "No clip loaded yet — source playback arrives in a later phase"));
   gtk_box_append (GTK_BOX (monitors),
-                  panel_new ("Program Monitor", "No sequence loaded yet — Phase 3"));
+                  panel_new ("Program Monitor",
+                             "No video output yet — program display arrives in a later phase"));
 
   gtk_paned_set_start_child (GTK_PANED (self->inspector_paned), monitors);
   gtk_paned_set_end_child (GTK_PANED (self->inspector_paned),
@@ -865,7 +1135,8 @@ oe_main_window_constructed (GObject *object)
   gtk_paned_set_shrink_end_child (GTK_PANED (self->timeline_paned), FALSE);
   gtk_paned_set_start_child (GTK_PANED (self->timeline_paned), self->inspector_paned);
 
-  GtkWidget *timeline = panel_new ("Timeline", "No sequence yet — Phase 3 adds the timeline model");
+  GtkWidget *timeline = panel_new (
+      "Timeline", "Timeline model loaded — the timeline view arrives in a later phase");
 
   gtk_box_append (GTK_BOX (timeline), build_transport_row ());
   gtk_paned_set_end_child (GTK_PANED (self->timeline_paned), timeline);
@@ -884,10 +1155,14 @@ oe_main_window_constructed (GObject *object)
 
   gtk_window_set_child (GTK_WINDOW (self), root);
 
-  /* Dispatch feedback lands in the status bar; media.import lands here. */
+  /* Dispatch feedback lands in the status bar; media.import and the
+   * project commands land here. */
   oe_command_set_reporter (report_to_status_bar, self);
-  media_import_owner = self;
+  command_owner = self;
   oe_command_set_handler (OE_CMD_IMPORT_MEDIA, media_import_command_handler);
+  oe_command_set_handler (OE_CMD_NEW_PROJECT, project_new_command_handler);
+  oe_command_set_handler (OE_CMD_OPEN_PROJECT, project_open_command_handler);
+  oe_command_set_handler (OE_CMD_SAVE_PROJECT, project_save_command_handler);
 
   g_signal_connect (self, "map", G_CALLBACK (on_map_apply_positions), NULL);
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);
@@ -904,6 +1179,7 @@ oe_main_window_init (OeMainWindow *self)
   self->import_pending = 0;
   self->import_ok = 0;
   self->relink_target = 0;
+  self->session_epoch = 1; /* stamps worker jobs; never 0 so NULL tags fail */
 }
 
 static void

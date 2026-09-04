@@ -93,7 +93,7 @@ run_and_wait (OeImportWorker *worker, DoneCtx *ctx, const gchar *path, guint ass
 
   guint timeout_id = g_timeout_add_seconds (30, on_timeout, ctx);
 
-  oe_import_worker_submit (worker, path, asset_id, relink);
+  oe_import_worker_submit (worker, path, asset_id, relink, NULL);
   g_main_loop_run (ctx->loop);
   g_source_remove (timeout_id);
 

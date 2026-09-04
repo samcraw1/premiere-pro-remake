@@ -32,6 +32,17 @@ G_DECLARE_FINAL_TYPE (OeMediaBin, oe_media_bin, OE, MEDIA_BIN, GtkWidget)
 OeMediaBin *oe_media_bin_new (OeMediaLibrary *library);
 
 /**
+ * oe_media_bin_set_library:
+ * @library: the replacement session store (not owned).
+ *
+ * Points the projection at a different library — the window calls this
+ * when a project Open/New replaces the session. The bin keeps no
+ * reference; the window keeps both the old and new stores alive as long
+ * as in-flight results may still name them.
+ */
+void oe_media_bin_set_library (OeMediaBin *bin, OeMediaLibrary *library);
+
+/**
  * oe_media_bin_set_import_func:
  * @func: called with a NULL-terminated array of paths, then @user_data.
  *
