@@ -18,6 +18,7 @@ struct _OeApplication
   gchar **import_media_paths; /* owned; consumed on first activate */
   gchar **insert_media_paths; /* owned; consumed on first activate */
   gboolean insert_media;      /* --insert-media seen in handle-local */
+  GtkWidget *main_window;     /* weak; set in activate, cleared on destroy */
 };
 
 G_DEFINE_TYPE (OeApplication, oe_application, GTK_TYPE_APPLICATION)
@@ -31,6 +32,34 @@ on_command_action (GSimpleAction *action G_GNUC_UNUSED, GVariant *parameter G_GN
   oe_command_dispatch ((OeCommandId) GPOINTER_TO_INT (user_data), NULL);
 }
 
+/* edit.snap-toggle is the one stateful command action: its checkbox
+ * state mirrors the timeline widget's session flag, read back through
+ * the window after the dispatch flips it — the action's own state is
+ * never the source of truth. */
+static void
+on_snap_toggle_action (GSimpleAction *action, GVariant *parameter G_GNUC_UNUSED, gpointer user_data)
+{
+  OeApplication *self = OE_APPLICATION (user_data);
+
+  oe_command_dispatch (OE_CMD_SNAP_TOGGLE, NULL);
+
+  if (self->main_window != NULL)
+    {
+      gboolean enabled = oe_main_window_get_snapping (OE_MAIN_WINDOW (self->main_window));
+
+      g_simple_action_set_state (action, g_variant_new_boolean (enabled));
+    }
+}
+
+/* The weak main_window back-pointer dies with the window. */
+static void
+on_main_window_destroy (GtkWidget *widget G_GNUC_UNUSED, gpointer user_data)
+{
+  OeApplication *self = OE_APPLICATION (user_data);
+
+  self->main_window = NULL;
+}
+
 static void
 oe_application_install_commands (OeApplication *self)
 {
@@ -38,10 +67,22 @@ oe_application_install_commands (OeApplication *self)
 
   for (int i = 0; i < OE_CMD_COUNT; i++)
     {
-      GSimpleAction *action = g_simple_action_new (table[i].name, NULL);
+      GSimpleAction *action;
 
-      g_signal_connect (action, "activate", G_CALLBACK (on_command_action),
-                        GINT_TO_POINTER (table[i].id));
+      if (table[i].id == OE_CMD_SNAP_TOGGLE)
+        {
+          /* Stateful, default ON: GTK renders the Edit-menu row as a
+           * real check item driven by the action state. */
+          action = g_simple_action_new_stateful (table[i].name, NULL, g_variant_new_boolean (TRUE));
+          g_signal_connect (action, "activate", G_CALLBACK (on_snap_toggle_action), self);
+        }
+      else
+        {
+          action = g_simple_action_new (table[i].name, NULL);
+          g_signal_connect (action, "activate", G_CALLBACK (on_command_action),
+                            GINT_TO_POINTER (table[i].id));
+        }
+
       g_action_map_add_action (G_ACTION_MAP (self), G_ACTION (action));
       g_object_unref (action);
 
@@ -82,6 +123,8 @@ oe_application_activate (GApplication *application)
     }
 
   window = oe_main_window_new (gtk_application);
+  self->main_window = window;
+  g_signal_connect (window, "destroy", G_CALLBACK (on_main_window_destroy), self);
 
   /*
    * The handler is connected before present so the one-shot self-check

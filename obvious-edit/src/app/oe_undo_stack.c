@@ -38,6 +38,7 @@ record_new (OeUndoOpKind kind, gchar *label, guint track_index, guint clip_index
   rec->label = label;
   rec->track_index = track_index;
   rec->clip_index = clip_index;
+  rec->ripple_shifts = NULL;
   return rec;
 }
 
@@ -47,6 +48,7 @@ record_free (gpointer data)
   OeUndoRecord *rec = data;
 
   g_free (rec->label);
+  g_clear_pointer (&rec->ripple_shifts, g_array_unref);
   g_free (rec);
 }
 
@@ -222,6 +224,89 @@ oe_edit_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index, 
 }
 
 gboolean
+oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index,
+                            guint clip_index, GError **error)
+{
+  OeClip removed = { 0 };
+  GArray *shifts = NULL;
+
+  /* Capture the pre-state before the first mutation: the primary copy
+   * and, for every downstream clip, its record-time identity. */
+  if (stack != NULL)
+    {
+      if (!oe_project_get_clip (project, track_index, clip_index, &removed))
+        {
+          /* Same range checks the mutator runs; report as BAD_CLIP so
+           * the caller sees the typed error instead of a warning. */
+          g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                       "ripple delete: no clip %u on track %u", clip_index, track_index);
+          return FALSE;
+        }
+
+      shifts = g_array_new (FALSE, FALSE, sizeof (OeRippleShift));
+    }
+
+  /* Sub-step 1: the primary removal (renumbers downstream indices by
+   * one — the shift entries below record both generations). */
+  if (!oe_project_remove_clip (project, track_index, clip_index, error))
+    {
+      g_clear_pointer (&shifts, g_array_unref);
+      return FALSE;
+    }
+
+  if (stack != NULL)
+    {
+      const gint64 shift_us = removed.source_out_us - removed.source_in_us;
+      const guint count = oe_project_get_clip_count (project, track_index);
+
+      /* Sub-step 2: shift the suffix left by the primary's duration,
+       * ascending index order. Moving clip i left cannot overlap its
+       * not-yet-moved right neighbour (equal shifts preserve pairwise
+       * gaps), so every intermediate state stays valid. Index k here
+       * is the post-removal index of the (clip_index + 1 + k)th clip.
+       * A move failure is unreachable for a contract-abiding model;
+       * the record keeps only the shifts that landed, so undo still
+       * restores exactly what this action did. */
+      for (guint k = 0; k < count; k++)
+        {
+          OeClip suffix = { 0 };
+          OeRippleShift entry;
+
+          if (!oe_project_get_clip (project, track_index, k, &suffix))
+            break;
+
+          entry.pre_index = clip_index + 1 + k;
+          entry.post_index = k;
+          entry.pre_position_us = suffix.position_us;
+          entry.post_position_us = suffix.position_us - shift_us;
+
+          if (!oe_project_move_clip (project, track_index, k, entry.post_position_us, error))
+            {
+              oe_log (OE_LOG_LEVEL_ERROR,
+                      "ripple delete: suffix move %u failed (%s); recording partial shift", k,
+                      (*error)->message);
+              g_error_free (*error);
+              *error = NULL;
+              break;
+            }
+
+          g_array_append_vals (shifts, &entry, 1);
+        }
+
+      OeUndoRecord *rec = record_new (
+          OE_UNDO_OP_RIPPLE_DELETE,
+          g_strdup_printf ("Ripple delete clip %u on track %u", clip_index, track_index),
+          track_index, clip_index);
+
+      rec->clip = removed;
+      rec->ripple_shifts = shifts;
+      stack_push (stack, rec);
+    }
+
+  return TRUE;
+}
+
+gboolean
 oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
                    gint64 position_us, GError **error)
 {
@@ -299,6 +384,58 @@ oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
 /* History application: inverse replay through the model mutators.     */
 /* ------------------------------------------------------------------ */
 
+/* Replay a composite RIPPLE_DELETE inverse: shift the suffix back
+ * right (descending index order — moving clip i right cannot overlap
+ * its not-yet-moved left neighbour, and the already-restored right
+ * neighbour leaves room), then re-insert the primary into its freed
+ * slot. Every sub-step runs through the model's validated mutators. */
+static gboolean
+apply_ripple_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
+{
+  const GArray *shifts = rec->ripple_shifts;
+  const gint64 shift_us = rec->clip.source_out_us - rec->clip.source_in_us;
+
+  g_return_val_if_fail (shifts != NULL, FALSE);
+
+  for (gsize k = shifts->len; k > 0; k--)
+    {
+      const OeRippleShift *entry = &g_array_index (shifts, OeRippleShift, k - 1);
+
+      if (!oe_project_move_clip (project, rec->track_index, entry->post_index,
+                                 entry->post_position_us + shift_us, error))
+        return FALSE;
+    }
+
+  return oe_project_insert_clip (project, rec->track_index, rec->clip.media_ref,
+                                 rec->clip.position_us, rec->clip.source_in_us,
+                                 rec->clip.source_out_us, error);
+}
+
+/* Replay a composite RIPPLE_DELETE forward: remove the primary, then
+ * re-shift the suffix left in ascending index order — the record
+ * path's own orderings, so redo reproduces the post-state exactly. */
+static gboolean
+apply_ripple_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
+{
+  const GArray *shifts = rec->ripple_shifts;
+
+  g_return_val_if_fail (shifts != NULL, FALSE);
+
+  if (!oe_project_remove_clip (project, rec->track_index, rec->clip_index, error))
+    return FALSE;
+
+  for (gsize k = 0; k < shifts->len; k++)
+    {
+      const OeRippleShift *entry = &g_array_index (shifts, OeRippleShift, k);
+
+      if (!oe_project_move_clip (project, rec->track_index, entry->post_index,
+                                 entry->post_position_us, error))
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
 static gboolean
 apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
 {
@@ -316,6 +453,8 @@ apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
     case OE_UNDO_OP_TRIM:
       return oe_project_trim_clip (project, rec->track_index, rec->clip_index, rec->old_a_us,
                                    rec->old_b_us, error);
+    case OE_UNDO_OP_RIPPLE_DELETE:
+      return apply_ripple_undo (project, rec, error);
     }
 
   g_assert_not_reached ();
@@ -338,6 +477,8 @@ apply_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
     case OE_UNDO_OP_TRIM:
       return oe_project_trim_clip (project, rec->track_index, rec->clip_index, rec->new_a_us,
                                    rec->new_b_us, error);
+    case OE_UNDO_OP_RIPPLE_DELETE:
+      return apply_ripple_redo (project, rec, error);
     }
 
   g_assert_not_reached ();

@@ -53,4 +53,15 @@ void oe_main_window_import_files (OeMainWindow *window, const gchar *const *path
  */
 void oe_main_window_import_and_insert_files (OeMainWindow *window, const gchar *const *paths);
 
+/**
+ * oe_main_window_get_snapping:
+ * @window: the editor shell
+ *
+ * The timeline's session snapping flag (Phase 7). The application's
+ * stateful edit.snap-toggle action mirrors this after every dispatch
+ * so the Edit-menu check reflects the widget, not the action's own
+ * history.
+ */
+gboolean oe_main_window_get_snapping (OeMainWindow *window);
+
 G_END_DECLS

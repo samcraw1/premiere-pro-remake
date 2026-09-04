@@ -51,6 +51,8 @@ G_BEGIN_DECLS
  *     in Phase 4; zoom is view session state).
  * @OE_CMD_ZOOM_OUT: timeline zoom out, around the widget center
  *     (wired in Phase 4; zoom is view session state).
+ * @OE_CMD_SNAP_TOGGLE: toggle timeline snapping (S) — wired in Phase 7;
+ *     session-only state on the timeline widget, never persisted.
  * @OE_CMD_SHOW_ABOUT: menu-only; about surface.
  * @OE_CMD_COUNT: sentinel — number of commands, not a valid ID.
  *
@@ -77,6 +79,7 @@ typedef enum
   OE_CMD_IMPORT_FROM_BIN,
   OE_CMD_ZOOM_IN,
   OE_CMD_ZOOM_OUT,
+  OE_CMD_SNAP_TOGGLE,
   OE_CMD_SHOW_ABOUT,
   OE_CMD_COUNT
 } OeCommandId;

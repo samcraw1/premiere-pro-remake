@@ -33,6 +33,7 @@ static OeCommandEntry command_table[OE_CMD_COUNT] = {
   { OE_CMD_IMPORT_FROM_BIN, "media.insert-from-bin", "<Control>e", TRUE },
   { OE_CMD_ZOOM_IN, "view.zoom-in", "<Control>equal", TRUE },
   { OE_CMD_ZOOM_OUT, "view.zoom-out", "<Control>minus", TRUE },
+  { OE_CMD_SNAP_TOGGLE, "edit.snap-toggle", "s", TRUE },
   { OE_CMD_SHOW_ABOUT, "help.about", NULL, TRUE },
 };
 
