@@ -433,3 +433,15 @@ oe_media_bin_set_import_func (OeMediaBin *bin, OeMediaBinImportFunc func, gpoint
   bin->import_func = func;
   bin->import_data = user_data;
 }
+
+void
+oe_media_bin_set_library (OeMediaBin *bin, OeMediaLibrary *library)
+{
+  g_return_if_fail (OE_IS_MEDIA_BIN (bin));
+  g_return_if_fail (library != NULL);
+
+  /* Session replacement: the bin still owns nothing — it just points at
+   * whichever library the window currently keeps alive. The next refresh
+   * rebuilds every row from the new store. */
+  bin->library = library;
+}

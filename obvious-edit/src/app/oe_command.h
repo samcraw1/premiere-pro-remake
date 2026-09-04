@@ -2,7 +2,8 @@
  *
  * Commands are the stable vocabulary of the application: the dotted names
  * and enum IDs chosen here are permanent API. Later phases build undo/redo
- * entries (Phase 3) and configurable keymaps (Phase 4) on this registry.
+ * entries (after the playback clock, per the roadmap) and configurable
+ * keymaps (Phase 4) on this registry.
  *
  * The registry knows nothing about GTK. The application layer wires GTK
  * actions and default accelerators to oe_command_dispatch(); the UI layer
@@ -27,12 +28,14 @@ G_BEGIN_DECLS
  * @OE_CMD_TOOL_SELECT: select tool (V).
  * @OE_CMD_TOOL_RAZOR: razor tool (C).
  * @OE_CMD_DELETE_SELECTION: delete the current selection (Delete).
- * @OE_CMD_UNDO: reserved — reports not implemented until Phase 3.
- * @OE_CMD_REDO: reserved — reports not implemented until Phase 3.
- * @OE_CMD_IMPORT_MEDIA: menu-only until Phase 2 (media import).
- * @OE_CMD_NEW_PROJECT: menu-only until the project phase.
- * @OE_CMD_OPEN_PROJECT: menu-only until the project phase.
- * @OE_CMD_SAVE_PROJECT: menu-only until the project phase.
+ * @OE_CMD_UNDO: reserved — not implemented; undo/redo arrive after the
+ *   playback clock (roadmap order).
+ * @OE_CMD_REDO: reserved — not implemented; undo/redo arrive after the
+ *   playback clock (roadmap order).
+ * @OE_CMD_IMPORT_MEDIA: media import (wired in Phase 2).
+ * @OE_CMD_NEW_PROJECT: project lifecycle (wired in Phase 3).
+ * @OE_CMD_OPEN_PROJECT: project lifecycle (wired in Phase 3).
+ * @OE_CMD_SAVE_PROJECT: project lifecycle (wired in Phase 3).
  * @OE_CMD_SHOW_ABOUT: menu-only; about surface.
  * @OE_CMD_COUNT: sentinel — number of commands, not a valid ID.
  *
