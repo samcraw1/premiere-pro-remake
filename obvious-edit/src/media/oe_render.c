@@ -66,8 +66,8 @@ decoder_open (const gchar *path, Decoder *d, GError **error)
 
   if (avformat_open_input (&d->fmt, path, NULL, NULL) != 0)
     {
-      g_set_error (error, OE_RENDER_ERROR, OE_RENDER_ERROR_OPEN_FAILED,
-                   "'%s': cannot open file", path);
+      g_set_error (error, OE_RENDER_ERROR, OE_RENDER_ERROR_OPEN_FAILED, "'%s': cannot open file",
+                   path);
       return FALSE;
     }
 
@@ -268,7 +268,7 @@ fit_frame (VideoSource *vs, const AVFrame *frame, int canvas_w, int canvas_h, gi
     {
       sws_freeContext (vs->fit_sws);
       vs->fit_sws = sws_getCachedContext (NULL, frame->width, frame->height, frame->format, *out_w,
-                                         *out_h, AV_PIX_FMT_BGRA, SWS_BILINEAR, NULL, NULL, NULL);
+                                          *out_h, AV_PIX_FMT_BGRA, SWS_BILINEAR, NULL, NULL, NULL);
       vs->fit_w = *out_w;
       vs->fit_h = *out_h;
       g_clear_pointer (&vs->fitted, g_free);
@@ -284,8 +284,8 @@ fit_frame (VideoSource *vs, const AVFrame *frame, int canvas_w, int canvas_h, gi
     }
 
   const guint8 *src_data[4] = { frame->data[0], frame->data[1], frame->data[2], frame->data[3] };
-  const int src_stride[4] = { frame->linesize[0], frame->linesize[1], frame->linesize[2],
-                              frame->linesize[3] };
+  const int src_stride[4]
+      = { frame->linesize[0], frame->linesize[1], frame->linesize[2], frame->linesize[3] };
   guint8 *dst_data[4] = { vs->fitted, NULL, NULL, NULL };
   int dst_stride[4] = { vs->fit_w * 4, 0, 0, 0 };
 
@@ -313,8 +313,7 @@ oe_render_session_new (const OeRenderSource *source)
   OeRenderSession *session = g_new0 (OeRenderSession, 1);
 
   session->source = source;
-  session->sources
-      = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, video_source_free);
+  session->sources = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, video_source_free);
   return session;
 }
 
