@@ -15,6 +15,17 @@
  *                                  model cannot see or be hurt by.
  *   /project/media-refs            file-stable refs: sequential, explicit,
  *                                  duplicate and unknown rejections.
+ *   /project/trim                 both edges trim in place; position
+ *                                 untouched; AV bounded by the probed
+ *                                 source duration.
+ *   /project/trim-rejections      empty, negative, or beyond-media
+ *                                 ranges and bad indices fail with
+ *                                 typed errors; observer stays silent.
+ *   /project/trim-still-extension stills extend freely (uniform-
+ *                                 duration rule) but never across a
+ *                                 neighbour.
+ *   /project/trim-observer        a successful trim notifies exactly
+ *                                 once; failures never notify.
  *   /project/destruction-order     observer cleared before teardown.
  */
 
@@ -393,7 +404,156 @@ test_media_refs (void)
   g_assert_false (oe_project_insert_clip (project, 0, 99, 0, 0, 1000, &error));
   g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_UNKNOWN_MEDIA);
   g_clear_error (&error);
+}
 
+/* --- trims ------------------------------------------------------------------ */
+
+/* One video track, an AV media with a probed 2 s source, an unannotated
+ * still media, and three clips: AV at [1 s, 2 s), stills at [3 s, 4 s)
+ * and [4 s, 4.5 s). */
+static OeProject *
+build_trim_fixture (void)
+{
+  OeProject *project = oe_project_new_default ();
+
+  oe_project_add_media (project, "/media/a.mp4"); /* ref 1: AV, probed below */
+  oe_project_add_media (project, "/media/b.png"); /* ref 2: still, never annotated */
+  oe_project_add_track (project, OE_TRACK_VIDEO);
+
+  oe_project_set_media_source_duration (project, 1, 2000000);
+
+  gint64 annotated = 12345;
+
+  g_assert_true (oe_project_get_media_source_duration (project, 1, &annotated));
+  g_assert_cmpint (annotated, ==, 2000000);
+  g_assert_true (oe_project_get_media_source_duration (project, 2, &annotated));
+  g_assert_cmpint (annotated, ==, 0); /* unannotated reads as unbounded */
+  g_assert_false (oe_project_get_media_source_duration (project, 99, NULL));
+
+  g_assert_true (oe_project_insert_clip (project, 0, 1, 1000000, 0, 1000000, NULL));
+  g_assert_true (oe_project_insert_clip (project, 0, 2, 3000000, 0, 1000000, NULL));
+  g_assert_true (oe_project_insert_clip (project, 0, 2, 4000000, 0, 500000, NULL));
+
+  return project;
+}
+
+static void
+test_trim (void)
+{
+  OeProject *project = build_trim_fixture ();
+
+  /* Trim the in edge: position untouched, duration follows the range. */
+  g_assert_true (oe_project_trim_clip (project, 0, 0, 500000, 1000000, NULL));
+  OeClip clip = get_clip (project, 0, 0);
+
+  g_assert_cmpint (clip.source_in_us, ==, 500000);
+  g_assert_cmpint (clip.source_out_us, ==, 1000000);
+  g_assert_cmpint (clip.position_us, ==, 1000000);
+
+  /* Trim the out edge to exactly the probed bound — inside is legal. */
+  g_assert_true (oe_project_trim_clip (project, 0, 0, 500000, 2000000, NULL));
+  clip = get_clip (project, 0, 0);
+  g_assert_cmpint (clip.source_out_us, ==, 2000000);
+  g_assert_cmpint (clip.position_us, ==, 1000000);
+
+  /* Adjacency: the trimmed clip may end exactly where the next starts. */
+  g_assert_true (oe_project_trim_clip (project, 0, 1, 0, 1000000, NULL));
+  clip = get_clip (project, 0, 1);
+  g_assert_cmpint (clip.source_out_us, ==, 1000000);
+
+  g_clear_object (&project);
+}
+
+static void
+test_trim_rejections (void)
+{
+  OeProject *project = build_trim_fixture ();
+  Observer *observer = observer_new ();
+
+  oe_project_set_observer (project, observer_count, observer);
+
+  GError *error = NULL;
+
+  /* Empty range, reversed range, negative in. */
+  g_assert_false (oe_project_trim_clip (project, 0, 0, 500000, 500000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE);
+  g_clear_error (&error);
+
+  g_assert_false (oe_project_trim_clip (project, 0, 0, 900000, 100000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE);
+  g_clear_error (&error);
+
+  g_assert_false (oe_project_trim_clip (project, 0, 0, -1, 500000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE);
+  g_clear_error (&error);
+
+  /* AV media is bounded by its probed 2 s source. */
+  g_assert_false (oe_project_trim_clip (project, 0, 0, 0, 2500000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE);
+  g_clear_error (&error);
+
+  /* Bad indices. */
+  g_assert_false (oe_project_trim_clip (project, 5, 0, 0, 500000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK);
+  g_clear_error (&error);
+
+  g_assert_false (oe_project_trim_clip (project, 0, 9, 0, 500000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP);
+  g_clear_error (&error);
+
+  /* Every rejection stayed silent. */
+  g_assert_cmpuint (observer->count, ==, 0);
+
+  g_free (observer);
+  g_clear_object (&project);
+}
+
+static void
+test_trim_still_extension (void)
+{
+  OeProject *project = build_trim_fixture ();
+
+  /* A still extends freely: its source range encodes screen duration,
+   * there is no probed bound to exceed (uniform-duration rule). */
+  g_assert_true (oe_project_trim_clip (project, 0, 1, 0, 900000, NULL));
+  OeClip clip = get_clip (project, 0, 1);
+
+  g_assert_cmpint (clip.source_out_us, ==, 900000);
+  g_assert_cmpint (clip.position_us, ==, 3000000);
+
+  /* ...but a still grown across a neighbour is an overlap like any
+   * other duration edit — the model invariant stays absolute. */
+  GError *error = NULL;
+
+  g_assert_false (oe_project_trim_clip (project, 0, 1, 0, 1500000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_OVERLAP);
+  g_clear_error (&error);
+
+  clip = get_clip (project, 0, 1);
+  g_assert_cmpint (clip.source_out_us, ==, 900000); /* untouched by the rejection */
+
+  g_clear_object (&project);
+}
+
+static void
+test_trim_observer (void)
+{
+  OeProject *project = build_trim_fixture ();
+  Observer *observer = observer_new ();
+
+  oe_project_set_observer (project, observer_count, observer);
+
+  g_assert_true (oe_project_trim_clip (project, 0, 0, 250000, 750000, NULL));
+  g_assert_cmpuint (observer->count, ==, 1);
+
+  g_assert_true (oe_project_trim_clip (project, 0, 0, 250000, 500000, NULL));
+  g_assert_cmpuint (observer->count, ==, 2);
+
+  /* Rejections never notify. */
+  g_assert_false (oe_project_trim_clip (project, 0, 0, 500000, 500000, NULL));
+  g_assert_cmpuint (observer->count, ==, 2);
+
+  g_free (observer);
   g_clear_object (&project);
 }
 
@@ -433,6 +593,10 @@ main (int argc, char *argv[])
   g_test_add_func ("/project/observer-once", test_observer_once);
   g_test_add_func ("/project/deep-copy-getters", test_deep_copy_getters);
   g_test_add_func ("/project/media-refs", test_media_refs);
+  g_test_add_func ("/project/trim", test_trim);
+  g_test_add_func ("/project/trim-rejections", test_trim_rejections);
+  g_test_add_func ("/project/trim-still-extension", test_trim_still_extension);
+  g_test_add_func ("/project/trim-observer", test_trim_observer);
   g_test_add_func ("/project/destruction-order", test_destruction_order);
 
   return g_test_run ();
