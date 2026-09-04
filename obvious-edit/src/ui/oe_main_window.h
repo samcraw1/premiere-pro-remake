@@ -29,4 +29,16 @@ G_DECLARE_FINAL_TYPE (OeMainWindow, oe_main_window, OE, MAIN_WINDOW, GtkApplicat
  */
 GtkWidget *oe_main_window_new (GtkApplication *application);
 
+/**
+ * oe_main_window_import_files:
+ * @window: the editor shell
+ * @paths: a %NULL-terminated array of filesystem paths
+ *
+ * Feeds paths through the same import pipeline the chooser and
+ * drag-and-drop use. This is the headless smoke-test seam: --import-media
+ * reaches it without touching the file chooser, which cannot be driven
+ * under bare Xvfb.
+ */
+void oe_main_window_import_files (OeMainWindow *window, const gchar *const *paths);
+
 G_END_DECLS

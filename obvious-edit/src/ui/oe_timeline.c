@@ -771,6 +771,14 @@ update_drag (OeTimeline *self, gdouble x)
         if (self->project != NULL)
           oe_project_get_media_source_duration (self->project, clip.media_ref, &max_source_us);
 
+        /* Stills are unbounded (uniform-duration rule): the session
+         * annotation encodes screen time, not a source ceiling, so a
+         * still never passes a positive ceiling to the bounds math. */
+        OeTimelineMediaInfo media = resolve_media (self, clip.media_ref);
+
+        if (media.is_still)
+          max_source_us = 0;
+
         oe_timeline_trim_bounds (&clip, max_source_us, &min_in, &max_in, &min_out, &max_out);
 
         gint64 wanted = oe_timeline_us_for_x (&self->geometry, x);

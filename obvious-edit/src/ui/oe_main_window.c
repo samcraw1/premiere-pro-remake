@@ -124,6 +124,20 @@ report_to_status_bar (OeCommandId id G_GNUC_UNUSED, const gchar *message, gpoint
   set_status_message (self, message);
 }
 
+/* Headless import seam: the chooser and drag-and-drop land here too, but
+ * --import-media needs a public entry that skips the dialog entirely — a
+ * bare Xvfb session cannot drive a modal file chooser. */
+static void import_paths (OeMainWindow *self, const gchar *const *paths);
+
+void
+oe_main_window_import_files (OeMainWindow *window, const gchar *const *paths)
+{
+  g_return_if_fail (OE_IS_MAIN_WINDOW (window));
+  g_return_if_fail (paths != NULL && paths[0] != NULL);
+
+  import_paths (window, paths);
+}
+
 /* ------------------------------------------------------------------ */
 /* Import pipeline: one entry point for the chooser and drag-and-drop. */
 /* ------------------------------------------------------------------ */
@@ -762,13 +776,26 @@ project_save_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G
   g_object_unref (dialog);
 }
 
+/* A new session starts with the default sequence template: one video
+ * and one audio lane. The core model starts empty — this is a shell
+ * product decision, not model behavior. */
+static OeProject *
+new_default_session_project (void)
+{
+  OeProject *project = oe_project_new_default ();
+
+  oe_project_add_track (project, OE_TRACK_VIDEO);
+  oe_project_add_track (project, OE_TRACK_AUDIO);
+  return project;
+}
+
 static void
 project_new_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
 {
   if (command_owner == NULL)
     return;
 
-  reset_session (command_owner, oe_project_new_default ());
+  reset_session (command_owner, new_default_session_project ());
   set_status_message (command_owner, "New project started");
 }
 
@@ -985,7 +1012,13 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
     {
       media_ref = oe_project_add_media (self->project, asset.path);
       register_media_asset_pair (self, media_ref, asset_id);
-      oe_project_set_media_source_duration (self->project, media_ref, duration_us);
+
+      /* The annotation is a SOURCE ceiling for trim validation: the
+       * probed length for AV media. A still has no source ceiling
+       * (uniform-duration rule) — its screen duration lives in the
+       * clip range, so leave the annotation unset (unbounded). */
+      if (asset.info.kind != OE_MEDIA_KIND_STILL_IMAGE)
+        oe_project_set_media_source_duration (self->project, media_ref, duration_us);
     }
 
   /* Destination: the first kind-matching track, from a fresh deep
@@ -994,7 +1027,9 @@ media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
   OeSequence sequence;
   guint track_index = G_MAXUINT;
 
-  oe_sequence_init (&sequence);
+  /* oe_project_get_sequence overwrites caller storage wholesale —
+   * zeroed storage, never a pre-initialized sequence (leak). */
+  memset (&sequence, 0, sizeof (sequence));
   oe_project_get_sequence (self->project, &sequence);
 
   for (guint i = 0; i < sequence.tracks->len; i++)
@@ -1436,7 +1471,7 @@ oe_main_window_constructed (GObject *object)
    * the bin is a projection of the library. Phase 3 adds the GTK-free
    * project model the New/Open/Save commands act on. */
   self->media_library = oe_media_library_new ();
-  self->project = oe_project_new_default ();
+  self->project = new_default_session_project ();
   self->media_bin = GTK_WIDGET (oe_media_bin_new (self->media_library));
   self->import_worker = oe_import_worker_new (on_import_done, self);
 
