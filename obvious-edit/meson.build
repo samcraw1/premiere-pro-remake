@@ -50,6 +50,7 @@ oe_deps = [
   swscale_dep,
   swresample_dep,
   sdl3_dep,
+  math_dep,
 ]
 
 executable('obvious-edit',
@@ -72,6 +73,7 @@ executable('obvious-edit',
     'src/ui/oe_main_window.c',
     'src/ui/oe_media_bin.c',
     'src/ui/oe_timeline_layout.c',
+    'src/ui/oe_timeline.c',
     'src/ui/oe_shell_layout.c',
     'src/ui/oe_theme.c',
   ],

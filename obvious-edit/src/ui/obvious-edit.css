@@ -33,6 +33,17 @@ window,
   padding: 12px;
 }
 
+/* Phase 4: the timeline canvas paints its own palette with Cairo;
+ * the CSS class only guarantees an opaque base and focus outline. */
+.timeline {
+  background-color: #1d1d20;
+  border-radius: 0 0 5px 5px;
+}
+
+.timeline:focus {
+  outline-color: #ffb454;
+}
+
 /* Menu bar, toolbar, status bar */
 .menubar {
   background-color: #1e2126;

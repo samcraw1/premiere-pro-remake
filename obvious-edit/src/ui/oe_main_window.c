@@ -36,6 +36,7 @@
 #include "../core/oe_project_format.h"
 #include "oe_media_bin.h"
 #include "oe_shell_layout.h"
+#include "oe_timeline.h"
 
 /* Pending splitter positions from the loaded layout, applied on first map
  * (GtkPaned positions are only meaningful once the window is allocated). */
@@ -60,6 +61,14 @@ struct _OeMainWindow
   OeProject *project;
   gchar *project_path;
   guint session_epoch;
+
+  /* Phase 4: the live timeline view plus the session map between
+   * project media references (stable, serialized) and bin asset ids
+   * (session-transient). The widget resolves missing/kind/audio info
+   * through the library via this map — it never probes during draws. */
+  GtkWidget *timeline;
+  GHashTable *media_ref_to_asset; /* guint ref → guint asset id */
+  GHashTable *asset_to_media_ref; /* guint asset id → guint ref */
 
   /* TRUE while the current import batch belongs to a project open: the
    * generic "Imported N file(s)" summary would bury the Loaded
@@ -136,6 +145,12 @@ import_paths (OeMainWindow *self, const gchar *const *paths)
     }
 }
 
+
+/* Phase 4 session map helpers (defined with the timeline seams below);
+ * the import verdict and project-open flows run earlier in the file. */
+static void register_media_asset_pair (OeMainWindow *self, guint media_ref, guint asset_id);
+static guint lookup_media_ref_for_asset (OeMainWindow *self, guint asset_id);
+
 static void
 on_import_done (const OeImportJobResult *result, gpointer user_data)
 {
@@ -152,6 +167,18 @@ on_import_done (const OeImportJobResult *result, gpointer user_data)
     case OE_IMPORT_RESULT_OK:
       oe_media_library_mark_ok (self->media_library, result->asset_id, &result->info);
       oe_media_library_set_thumbnail (self->media_library, result->asset_id, &result->thumbnail);
+
+      /* Phase 4: annotate the project's media record with the probed
+       * source duration so trim validation has AV bounds. Stills probe
+       * 0 and stay unannotated (unbounded, uniform-duration rule).
+       * Session-only: never serialized. */
+      {
+        guint media_ref = lookup_media_ref_for_asset (self, result->asset_id);
+
+        if (media_ref != 0 && result->info.duration_us > 0)
+          oe_project_set_media_source_duration (self->project, media_ref, result->info.duration_us);
+      }
+
       self->import_ok++;
       break;
 
@@ -535,6 +562,13 @@ reset_session (OeMainWindow *self, OeProject *project)
   oe_media_bin_set_library (OE_MEDIA_BIN (self->media_bin), self->media_library);
   oe_media_bin_refresh (OE_MEDIA_BIN (self->media_bin));
 
+  /* Phase 4: the ref↔asset pairs belong to the replaced library, and
+   * the timeline re-observes the replacement project (playhead and
+   * selection reset inside the widget). */
+  g_hash_table_remove_all (self->media_ref_to_asset);
+  g_hash_table_remove_all (self->asset_to_media_ref);
+  oe_timeline_set_project (OE_TIMELINE (self->timeline), project);
+
   self->project = project;
   self->session_epoch++;
   populate_inspector (self);
@@ -602,6 +636,7 @@ open_project_path (OeMainWindow *self, const gchar *path)
 
       guint id = oe_media_library_add (self->media_library, media_path);
 
+      register_media_asset_pair (self, ref, id);
       oe_import_worker_submit (self->import_worker, media_path, id, FALSE,
                                GUINT_TO_POINTER (self->session_epoch));
       self->import_pending++;
@@ -738,6 +773,273 @@ project_new_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_
   set_status_message (command_owner, "New project started");
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Phase 4: timeline commands and the widget's resolve/report seams.   */
+/* ------------------------------------------------------------------ */
+
+/* Registers the session mapping between a project media reference
+ * (stable, serialized) and the bin asset row that probed its file
+ * (session-transient). */
+static void
+register_media_asset_pair (OeMainWindow *self, guint media_ref, guint asset_id)
+{
+  g_hash_table_insert (self->media_ref_to_asset, GUINT_TO_POINTER (media_ref),
+                       GUINT_TO_POINTER (asset_id));
+  g_hash_table_insert (self->asset_to_media_ref, GUINT_TO_POINTER (asset_id),
+                       GUINT_TO_POINTER (media_ref));
+}
+
+static guint
+lookup_asset_for_media_ref (OeMainWindow *self, guint media_ref)
+{
+  gpointer value = NULL;
+
+  if (!g_hash_table_lookup_extended (self->media_ref_to_asset, GUINT_TO_POINTER (media_ref), NULL, &value))
+    return 0;
+
+  return GPOINTER_TO_UINT (value);
+}
+
+static guint
+lookup_media_ref_for_asset (OeMainWindow *self, guint asset_id)
+{
+  gpointer value = NULL;
+
+  if (!g_hash_table_lookup_extended (self->asset_to_media_ref, GUINT_TO_POINTER (asset_id), NULL, &value))
+    return 0;
+
+  return GPOINTER_TO_UINT (value);
+}
+
+/* Returns the existing project media reference for @path, or 0 when the
+ * path is not referenced yet (oe_project_add_media always allocates a
+ * fresh ref, so reuse is decided here, at the session layer). */
+static guint
+find_media_ref_by_path (OeMainWindow *self, const gchar *path)
+{
+  guint count = oe_project_get_media_count (self->project);
+
+  for (guint i = 0; i < count; i++)
+    {
+      guint ref = 0;
+      gchar *media_path = NULL;
+
+      if (!oe_project_get_media (self->project, i, &ref, &media_path))
+        continue;
+
+      const gboolean match = g_strcmp0 (media_path, path) == 0;
+
+      g_free (media_path);
+      if (match)
+        return ref;
+    }
+
+  return 0;
+}
+
+/* Resolve seam: the widget asks about one media reference per clip per
+ * frame. Answers come from the library's session records through the
+ * ref→asset map — no probing happens during draws. Unknown refs answer
+ * missing, which renders the clip hatched. */
+static void
+timeline_resolve_media (guint media_ref, OeTimelineMediaInfo *info, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  OeAssetInfo asset;
+
+  info->missing = TRUE;
+  info->has_audio = FALSE;
+  info->is_still = FALSE;
+
+  if (lookup_asset_for_media_ref (self, media_ref) == 0)
+    return;
+
+  oe_asset_info_init (&asset);
+  if (!oe_media_library_get (self->media_library,
+                             lookup_asset_for_media_ref (self, media_ref), &asset))
+    return;
+
+  if (asset.status == OE_ASSET_STATUS_OK)
+    {
+      info->missing = FALSE;
+      info->is_still = asset.info.kind == OE_MEDIA_KIND_STILL_IMAGE;
+      info->has_audio = asset.info.channels > 0 && asset.info.sample_rate > 0;
+    }
+
+  oe_asset_info_clear (&asset);
+}
+
+/* Report seam: typed model rejections and missing-media refusals land
+ * in the status bar, like every other command surface. */
+static void
+timeline_report (const gchar *message, gpointer user_data)
+{
+  set_status_message (OE_MAIN_WINDOW (user_data), message);
+}
+
+static void
+view_zoom_in_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  oe_timeline_zoom_in (OE_TIMELINE (command_owner->timeline));
+}
+
+static void
+view_zoom_out_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  oe_timeline_zoom_out (OE_TIMELINE (command_owner->timeline));
+}
+
+/* Fulfills the Phase 1 registry promise for selection.delete. */
+static void
+selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  guint track_index = 0;
+  guint clip_index = 0;
+
+  if (!oe_timeline_get_selection (OE_TIMELINE (self->timeline), &track_index, &clip_index))
+    {
+      set_status_message (self, "Delete: no clip selected");
+      return;
+    }
+
+  GError *error = NULL;
+
+  if (!oe_project_remove_clip (self->project, track_index, clip_index, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Delete rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
+  set_status_message (self, "Deleted selected clip");
+}
+
+/* Insert from Bin: the selected asset's file joins the project model
+ * (one stable media ref per unique path) and a clip lands at the
+ * playhead on the first kind-matching track. */
+static void
+media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  const guint asset_id = oe_media_bin_get_selected (OE_MEDIA_BIN (self->media_bin));
+
+  if (asset_id == 0)
+    {
+      set_status_message (self, "Insert from Bin: select an asset in the bin first");
+      return;
+    }
+
+  OeAssetInfo asset;
+
+  oe_asset_info_init (&asset);
+  if (!oe_media_library_get (self->media_library, asset_id, &asset))
+    return;
+
+  if (asset.status != OE_ASSET_STATUS_OK)
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Insert from Bin: '%s' is not ready (%s)", asset.name,
+                                               oe_asset_status_get_name (asset.status));
+
+      set_status_message (self, msg);
+      oe_asset_info_clear (&asset);
+      return;
+    }
+
+  /* Screen duration for stills (uniform-duration rule: the source
+   * range encodes screen time); probed length for AV media. */
+  const gint64 duration_us = asset.info.kind == OE_MEDIA_KIND_STILL_IMAGE
+                                 ? (gint64) OE_TIMELINE_DEFAULT_STILL_US
+                                 : asset.info.duration_us;
+
+  if (duration_us <= 0)
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Insert from Bin: '%s' has no usable duration", asset.name);
+
+      set_status_message (self, msg);
+      oe_asset_info_clear (&asset);
+      return;
+    }
+
+  guint media_ref = find_media_ref_by_path (self, asset.path);
+
+  if (media_ref == 0)
+    {
+      media_ref = oe_project_add_media (self->project, asset.path);
+      register_media_asset_pair (self, media_ref, asset_id);
+      oe_project_set_media_source_duration (self->project, media_ref, duration_us);
+    }
+
+  /* Destination: the first kind-matching track, from a fresh deep
+   * copy (track kinds are sequence data). */
+  const OeTrackKind want = asset.info.kind == OE_MEDIA_KIND_AUDIO ? OE_TRACK_AUDIO : OE_TRACK_VIDEO;
+  OeSequence sequence;
+  guint track_index = G_MAXUINT;
+
+  oe_sequence_init (&sequence);
+  oe_project_get_sequence (self->project, &sequence);
+
+  for (guint i = 0; i < sequence.tracks->len; i++)
+    {
+      const OeTrack *track = g_ptr_array_index (sequence.tracks, i);
+
+      if (track->kind == want)
+        {
+          track_index = i;
+          break;
+        }
+    }
+
+  oe_sequence_clear (&sequence);
+
+  if (track_index == G_MAXUINT)
+    {
+      set_status_message (self, want == OE_TRACK_AUDIO ? "Insert from Bin: no audio track in the sequence"
+                                                       : "Insert from Bin: no video track in the sequence");
+      oe_asset_info_clear (&asset);
+      return;
+    }
+
+  const gint64 playhead_us = oe_timeline_get_playhead (OE_TIMELINE (self->timeline));
+  GError *error = NULL;
+
+  if (!oe_project_insert_clip (self->project, track_index, media_ref, playhead_us, 0, duration_us, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Insert rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      oe_asset_info_clear (&asset);
+      return;
+    }
+
+  /* The playhead advances past the inserted clip so consecutive
+   * inserts stack; session-only state (Phase 5 owns the clock). */
+  oe_timeline_set_playhead (OE_TIMELINE (self->timeline), playhead_us + duration_us);
+
+  g_autofree gchar *msg = g_strdup_printf ("Inserted '%s' on track %u at the playhead", asset.name,
+                                           track_index);
+
+  set_status_message (self, msg);
+  oe_asset_info_clear (&asset);
+}
+
 /* ------------------------------------------------------------------ */
 /* Panels: labeled frames with a phase-aware empty state.              */
 /* ------------------------------------------------------------------ */
@@ -848,9 +1150,18 @@ build_menu_bar (void)
 
   menu_add_command (edit, "Undo", "edit.undo");
   menu_add_command (edit, "Redo", "edit.redo");
+  menu_add_command (edit, "Insert from Bin (Ctrl+E)", "media.insert-from-bin");
   menu_add_command (edit, "Delete Selection", "selection.delete");
   menu_add_command (edit, "Select Tool (V)", "tool.select");
   menu_add_command (edit, "Razor Tool (C)", "tool.razor");
+
+  /* Phase 4: zoom is view session state; the timeline widget clamps
+   * around the anchor (widget center for commands, pointer for
+   * Ctrl+wheel). */
+  GMenu *view = g_menu_new ();
+
+  menu_add_command (view, "Zoom In (Ctrl+=)", "view.zoom-in");
+  menu_add_command (view, "Zoom Out (Ctrl+-)", "view.zoom-out");
 
   GMenu *file = g_menu_new ();
 
@@ -867,6 +1178,7 @@ build_menu_bar (void)
 
   g_menu_append_submenu (menubar, "File", G_MENU_MODEL (file));
   g_menu_append_submenu (menubar, "Edit", G_MENU_MODEL (edit));
+  g_menu_append_submenu (menubar, "View", G_MENU_MODEL (view));
   g_menu_append_submenu (menubar, "Transport", G_MENU_MODEL (transport));
   g_menu_append_submenu (menubar, "Help", G_MENU_MODEL (help));
 
@@ -970,6 +1282,34 @@ on_map_apply_positions (GtkWidget *widget, gpointer user_data G_GNUC_UNUSED)
   gtk_paned_set_position (GTK_PANED (self->timeline_paned), self->pending_timeline);
 }
 
+/* The timeline panel: labeled chrome, transport row, and the live
+ * OeTimeline body. The truthful empty states (no tracks / empty
+ * tracks) are painted by the widget itself, replacing the Phase 3
+ * placeholder string. */
+static GtkWidget *
+timeline_panel_new (GtkWidget **timeline_out)
+{
+  GtkWidget *panel = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+
+  gtk_widget_add_css_class (panel, "panel");
+
+  GtkWidget *header = gtk_label_new ("Timeline");
+
+  gtk_widget_add_css_class (header, "panel-title");
+  gtk_widget_set_halign (header, GTK_ALIGN_START);
+  gtk_box_append (GTK_BOX (panel), header);
+
+  GtkWidget *timeline = GTK_WIDGET (oe_timeline_new ());
+
+  gtk_widget_set_hexpand (timeline, TRUE);
+  gtk_widget_set_vexpand (timeline, TRUE);
+  gtk_box_append (GTK_BOX (panel), timeline);
+  gtk_box_append (GTK_BOX (panel), build_transport_row ());
+
+  *timeline_out = timeline;
+  return panel;
+}
+
 static void
 on_close_request (OeMainWindow *self, gpointer user_data G_GNUC_UNUSED)
 {
@@ -1030,6 +1370,10 @@ oe_main_window_dispose (GObject *object)
   oe_command_set_handler (OE_CMD_NEW_PROJECT, NULL);
   oe_command_set_handler (OE_CMD_OPEN_PROJECT, NULL);
   oe_command_set_handler (OE_CMD_SAVE_PROJECT, NULL);
+  oe_command_set_handler (OE_CMD_IMPORT_FROM_BIN, NULL);
+  oe_command_set_handler (OE_CMD_DELETE_SELECTION, NULL);
+  oe_command_set_handler (OE_CMD_ZOOM_IN, NULL);
+  oe_command_set_handler (OE_CMD_ZOOM_OUT, NULL);
   command_owner = NULL;
 
   /* Free the worker first: it drains, joins, and flushes pending
@@ -1039,10 +1383,19 @@ oe_main_window_dispose (GObject *object)
   g_clear_pointer (&self->import_worker, oe_import_worker_free);
   g_clear_pointer (&self->media_library, oe_media_library_free);
 
+  /* The timeline observes the project through a weak pointer: detach
+   * it before the model dies so the observer can never fire into a
+   * widget that is mid-teardown (or vice versa). */
+  if (self->timeline != NULL)
+    oe_timeline_set_project (OE_TIMELINE (self->timeline), NULL);
+
   /* The model dies last: the worker is drained and both seams are
    * cleared above, so nothing can reference it during teardown. */
   g_clear_pointer (&self->project_path, g_free);
   g_clear_object (&self->project);
+
+  g_clear_pointer (&self->media_ref_to_asset, g_hash_table_unref);
+  g_clear_pointer (&self->asset_to_media_ref, g_hash_table_unref);
 
   G_OBJECT_CLASS (oe_main_window_parent_class)->dispose (object);
 }
@@ -1135,11 +1488,16 @@ oe_main_window_constructed (GObject *object)
   gtk_paned_set_shrink_end_child (GTK_PANED (self->timeline_paned), FALSE);
   gtk_paned_set_start_child (GTK_PANED (self->timeline_paned), self->inspector_paned);
 
-  GtkWidget *timeline = panel_new (
-      "Timeline", "Timeline model loaded — the timeline view arrives in a later phase");
+  GtkWidget *timeline = timeline_panel_new (&self->timeline);
 
-  gtk_box_append (GTK_BOX (timeline), build_transport_row ());
   gtk_paned_set_end_child (GTK_PANED (self->timeline_paned), timeline);
+
+  /* The widget is the first production observer consumer: it redraws
+   * from deep copies on every project notification and answers
+   * missing/kind questions through the session's resolve seam. */
+  oe_timeline_set_resolve_func (OE_TIMELINE (self->timeline), timeline_resolve_media, self);
+  oe_timeline_set_report_func (OE_TIMELINE (self->timeline), timeline_report, self);
+  oe_timeline_set_project (OE_TIMELINE (self->timeline), self->project);
 
   gtk_paned_set_end_child (GTK_PANED (self->bin_paned), self->timeline_paned);
   gtk_box_append (GTK_BOX (root), self->bin_paned);
@@ -1163,6 +1521,10 @@ oe_main_window_constructed (GObject *object)
   oe_command_set_handler (OE_CMD_NEW_PROJECT, project_new_command_handler);
   oe_command_set_handler (OE_CMD_OPEN_PROJECT, project_open_command_handler);
   oe_command_set_handler (OE_CMD_SAVE_PROJECT, project_save_command_handler);
+  oe_command_set_handler (OE_CMD_IMPORT_FROM_BIN, media_insert_from_bin_command_handler);
+  oe_command_set_handler (OE_CMD_DELETE_SELECTION, selection_delete_command_handler);
+  oe_command_set_handler (OE_CMD_ZOOM_IN, view_zoom_in_command_handler);
+  oe_command_set_handler (OE_CMD_ZOOM_OUT, view_zoom_out_command_handler);
 
   g_signal_connect (self, "map", G_CALLBACK (on_map_apply_positions), NULL);
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);
@@ -1180,6 +1542,10 @@ oe_main_window_init (OeMainWindow *self)
   self->import_ok = 0;
   self->relink_target = 0;
   self->session_epoch = 1; /* stamps worker jobs; never 0 so NULL tags fail */
+
+  /* Phase 4: ref↔asset pairs, rebuilt per session by reset_session. */
+  self->media_ref_to_asset = g_hash_table_new (g_direct_hash, g_direct_equal);
+  self->asset_to_media_ref = g_hash_table_new (g_direct_hash, g_direct_equal);
 }
 
 static void

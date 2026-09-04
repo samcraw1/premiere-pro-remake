@@ -30,6 +30,9 @@ static OeCommandEntry command_table[OE_CMD_COUNT] = {
   { OE_CMD_NEW_PROJECT, "project.new", NULL, TRUE },
   { OE_CMD_OPEN_PROJECT, "project.open", NULL, TRUE },
   { OE_CMD_SAVE_PROJECT, "project.save", NULL, TRUE },
+  { OE_CMD_IMPORT_FROM_BIN, "media.insert-from-bin", "<Control>e", TRUE },
+  { OE_CMD_ZOOM_IN, "view.zoom-in", "<Control>=", TRUE },
+  { OE_CMD_ZOOM_OUT, "view.zoom-out", "<Control>-", TRUE },
   { OE_CMD_SHOW_ABOUT, "help.about", NULL, TRUE },
 };
 

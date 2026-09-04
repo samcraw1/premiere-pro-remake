@@ -1,4 +1,4 @@
-# Code map (Phases 1–3)
+# Code map (Phases 1–4)
 
 What lives where, and why it lives there.
 
@@ -35,6 +35,8 @@ premiere-pro-remake/
     │   └── ui/
     │       ├── oe_main_window.[ch]  # the editor shell: panels, status bar
     │       ├── oe_media_bin.[ch]    # the media bin: rows, badges, DnD
+    │       ├── oe_timeline_layout.[ch] # GTK-free zoom/geometry/hit-test math
+    │       ├── oe_timeline.[ch]      # the timeline widget: Cairo drawing + drags
     │       ├── oe_shell_layout.[ch] # GTK-free layout persistence (GKeyFile)
     │       ├── oe_theme.[ch]        # GtkCssProvider loader (GResource CSS)
     │       ├── obvious-edit.css     # the original dark theme
@@ -50,6 +52,7 @@ premiere-pro-remake/
     │   ├── test_time.c            # rational time: reduction, rounding, rates
     │   ├── test_project.c         # model invariants, observer, media refs
     │   ├── test_project_format.c  # strict v1, round trip, atomic saves
+    │   ├── test_timeline_layout.c # zoom conversions, hit-test, drag clamps
     │   ├── fixture_media.[ch]     # runtime media fixtures (WAV/AVI/PNG)
     │   └── valgrind.supp          # GLib/GObject-only suppressions
     └── docs/
@@ -61,7 +64,8 @@ premiere-pro-remake/
             ├── phase-0.md         # guided Phase 0 walkthrough
             ├── phase-1.md         # guided Phase 1 walkthrough
             ├── phase-2.md         # guided Phase 2 walkthrough
-            └── phase-3.md         # guided Phase 3 walkthrough
+            ├── phase-3.md         # guided Phase 3 walkthrough
+            └── phase-4.md         # guided Phase 4 walkthrough
 ```
 
 ## File-by-file responsibilities
@@ -84,6 +88,8 @@ premiere-pro-remake/
 | `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit | `oe_audio_output_init`, `oe_audio_output_shutdown` |
 | `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector | `oe_main_window_new` |
 | `src/ui/oe_media_bin.c` | The bin panel: row projection, badges, DnD, selection | `oe_media_bin_new`, `oe_media_bin_refresh` |
+| `src/ui/oe_timeline_layout.c` | GTK-free timeline math: zoom round-trips, lane mapping, edge-band hit-test, move/trim clamps | `oe_timeline_x_for_us`, `oe_timeline_hit_test`, `oe_timeline_clamp_move_position`, `oe_timeline_trim_bounds` |
+| `src/ui/oe_timeline.c` | The timeline widget: observer snapshots, Cairo painting, one drag state machine → model mutators | `oe_timeline_new`, `oe_timeline_set_project`, `oe_timeline_get_selection`, `oe_timeline_zoom_in/out` |
 | `src/ui/oe_shell_layout.c` | Layout struct, GKeyFile save/load | `oe_shell_layout_defaults`, `oe_shell_layout_save`, `oe_shell_layout_load` |
 | `src/ui/oe_theme.c` | Theme loading from GResource | `oe_theme_init` |
 | `tests/test_lifecycle.c` | Adapter + logging contracts | `/lifecycle/*`, `/log/*` |
@@ -94,8 +100,9 @@ premiere-pro-remake/
 | `tests/test_media_library.c` | Records, observers, monitor, relink | `/media-library/*` |
 | `tests/test_import_worker.c` | Worker thread → main-context contract | `/import-worker/*` |
 | `tests/test_time.c` | Rate reduction, typed rejection, rounding, identities | `/time/*` |
-| `tests/test_project.c` | Ordering, overlap, observer, deep copies, media refs | `/project/*` |
+| `tests/test_project.c` | Ordering, overlap, observer, deep copies, media refs, trim validation | `/project/*` |
 | `tests/test_project_format.c` | Strict v1 parse, round trip, atomic failure | `/format/*` |
+| `tests/test_timeline_layout.c` | Pure timeline math: zoom, lanes, hit-test bands, drag clamps | `/timeline-layout/*` |
 | `tests/fixture_media.c` | Runtime WAV/AVI/PNG/text fixture generator | `oe_fixture_media_create`, `oe_fixture_media_free` |
 
 ## Conventions

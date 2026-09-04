@@ -174,12 +174,44 @@ cold cache.
 frame rates are num/den rationals, no floats in metadata — the
 project-format time-model floor is enforced from the first probe.
 
+## The timeline widget (Phase 4)
+
+The timeline is the first GTK surface that both reads and writes the
+project model, so its layer rules are strict:
+
+**The widget observes; it never holds model references.**
+`oe_timeline` registers itself as the project's observer (the first
+production consumer of the seam) and every repaint works on a fresh
+`oe_project_get_sequence()` deep copy. Between notifications the widget
+touches only its own snapshot, so a model mutation can never be
+observed half-applied.
+
+**Geometry is GTK-free.** `src/ui/oe_timeline_layout.[ch]` owns the
+zoom state (`px_per_us`), microsecond↔pixel round-trips, lane
+mapping, edge-band hit-testing, and the pure move/trim clamp math.
+It links GLib only, so all of it is unit-tested headlessly in
+`test_timeline_layout` — the widget just feeds it pixels.
+
+**One drag state machine, model mutators commit.** The gesture
+controllers share a single state: press arms `move`, `trim-in`,
+`trim-out`, `playhead`, or a click; motion previews the *clamped*
+candidate without writing the model; release commits through
+`oe_project_move_clip` / `oe_project_trim_clip`. A typed rejection is
+reported through the window's status seam and the preview snaps back —
+the model stays authoritative and always legal.
+
+**Session state stays out of the model.** The playhead, zoom, and
+selection are widget-session state. The playhead has no model field
+and is never serialized (the Phase 5 playback clock owns time); zoom
+is view state only. Missing media is resolved through a window-supplied
+callback backed by the session library — hatched rendering, no
+probing during draws — and missing media refuses trims.
+
 ## What comes later
 
-The timeline widget (Phase 4), the playback clock with audio output
-wiring (Phase 5), undo/redo (after the playback clock), snapping,
-ripple edits, and export arrive in later phases; `src/core/` is the
-foundation they all build on, and the adapter seams in `src/media/`
-and `src/playback/` are where media and audio plug in. See
-`docs/learning/phase-0.md` through `phase-3.md` for guided walkthroughs
-of each phase.
+The playback clock with audio output wiring (Phase 5), undo/redo
+(after the playback clock), snapping, ripple edits, and export arrive
+in later phases; `src/core/` is the foundation they all build on, and
+the adapter seams in `src/media/` and `src/playback/` are where media
+and audio plug in. See `docs/learning/phase-0.md` through `phase-4.md`
+for guided walkthroughs of each phase.
