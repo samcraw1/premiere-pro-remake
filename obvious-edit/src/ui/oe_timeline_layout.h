@@ -28,6 +28,11 @@ G_BEGIN_DECLS
 /* A source range shorter than this is a mistyped click, not a trim. */
 #define OE_TIMELINE_MIN_TRIM_US 1
 
+/* Phase 7: magnetism band for snapping, in pixels. The default sits
+ * just outside the 6 px trim edge band: close enough to feel
+ * magnetic, far enough not to eat trim presses. */
+#define OE_TIMELINE_SNAP_THRESHOLD_PX 8.0
+
 typedef struct
 {
   /* Zoom: pixels per microsecond. Session-only — the widget owns it
@@ -41,6 +46,31 @@ typedef struct
   /* Number of track lanes below the ruler. */
   guint track_count;
 } OeTimelineGeometry;
+
+/* Phase 7: pure snapping. The context carries everything the snap
+ * decision needs — the toggle, the px threshold, the current zoom, the
+ * playhead, the frame interval, and the dragged clip's same-track
+ * neighbour edges — so the decision itself stays free of the widget,
+ * the model, and GTK.
+ *
+ * Distances are compared in TIME, but the threshold is in PIXELS: a
+ * band that feels constant on screen must widen in microseconds as
+ * the view zooms out. px_per_us does that conversion.
+ */
+typedef struct
+{
+  gboolean enabled;         /* session toggle; FALSE = raw candidate */
+  gdouble threshold_px;     /* magnetism band, ~6–10 px */
+  gdouble px_per_us;        /* current zoom (pixels per µs) */
+  gint64 playhead_us;       /* live playhead position (target) */
+  gint64 frame_interval_us; /* 1000000 / frame_rate; 0 = grid off */
+
+  /* Same-track neighbour clip edges, pre-collected: both edges of
+   * every other clip on the dragged clip's track. The snap core never
+   * touches the model — the widget owns the collection. */
+  const gint64 *edges_us;
+  gsize n_edges;
+} OeSnapContext;
 
 typedef enum
 {
@@ -73,9 +103,25 @@ gint oe_timeline_track_index_for_y (const OeTimelineGeometry *geometry, gdouble 
 OeTimelineHit oe_timeline_hit_test (const OeTimelineGeometry *geometry, const OeSequence *sequence,
                                     gdouble x, gdouble y);
 
+/* Phase 7: returns the snapped time for a drag candidate, or
+ * @candidate_us unchanged when snapping is disabled or no target lies
+ * within the threshold band. Targets: the same-track neighbour clip
+ * edges in @edges_us, the playhead, zero, and the frame grid
+ * (frame_interval_us == 0 disables the grid). Nearest target wins;
+ * ties go to the earlier time. Pure: no widget, no model, no
+ * allocation. Overflow-safe: distances saturate instead of wrapping. */
+gint64 oe_timeline_snap_time (const OeSnapContext *ctx, gint64 candidate_us);
+
 /* Drag bounds for a move: the nearest legal position at or around
  * @wanted_position on the clip's own track — snapped against every
- * neighbour, never negative, never overlapping. Adjacency is legal. */
+ * neighbour, never negative, never overlapping. Adjacency is legal.
+ *
+ * Phase 7 splits the two jobs this function used to fuse: legality
+ * recovery stays here (an infeasible wanted position recovers to the
+ * nearest legal floor or neighbour contact), while magnetism moved to
+ * oe_timeline_snap_time() — which the widget applies BEFORE calling
+ * this, so an on-band release locks flush but an off-band release
+ * keeps its raw position. */
 gint64 oe_timeline_clamp_move_position (const OeSequence *sequence, guint track_index,
                                         guint clip_index, gint64 wanted_position);
 

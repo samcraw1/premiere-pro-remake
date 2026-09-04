@@ -331,3 +331,33 @@ test_undo_stack = executable('test_undo_stack',
 test('undo-stack', test_undo_stack,
   timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
   env: ['SDL_AUDIODRIVER=dummy'])
+
+# Phase 7 snapping and the composite ripple record: the pure snap
+# decision (targets, px-scaled threshold, tie-break, zoom scaling, the
+# disabled pass-through, and the snap-then-clamp preview pipeline),
+# plus the ripple-delete recorder — one composite record per action,
+# suffix shifts, JSON v1 round-trips, depth accounting, redo-branch
+# invalidation, and the record-vs-history auto-pause split on a
+# virtual clock. Links the layout core, the model, the stack, the
+# persistence module, and the playback session; no GTK. The auto-pause
+# case opens SDL's dummy driver, hence the env.
+test_snap_ripple = executable('test_snap_ripple',
+  [
+    'tests/test_snap_ripple.c',
+    'src/ui/oe_timeline_layout.c',
+    'src/app/oe_undo_stack.c',
+    'src/app/oe_playback_session.c',
+    'src/media/oe_media_playback.c',
+    'src/playback/oe_audio_output.c',
+    'src/core/oe_project.c',
+    'src/core/oe_project_format.c',
+    'src/core/oe_time.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps + [json_glib_dep],
+)
+
+test('snap-ripple', test_snap_ripple,
+  timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
+  env: ['SDL_AUDIODRIVER=dummy'])

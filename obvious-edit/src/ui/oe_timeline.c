@@ -79,6 +79,10 @@ struct _OeTimeline
   gint selected_clip;
   gint64 playhead_us;
 
+  /* Phase 7: session snapping toggle (default ON). Session-only — no
+   * model field, no serialization. Gates the preview path only. */
+  gboolean snapping_enabled;
+
   OeTimelineResolveFunc resolve_func;
   gpointer resolve_data;
   OeTimelineReportFunc report_func;
@@ -305,6 +309,21 @@ oe_timeline_set_undo_stack (OeTimeline *self, OeUndoStack *stack)
 {
   g_return_if_fail (OE_IS_TIMELINE (self));
   self->undo_stack = stack; /* weak: the window owns the stack */
+}
+
+void
+oe_timeline_set_snapping (OeTimeline *self, gboolean enabled)
+{
+  g_return_if_fail (OE_IS_TIMELINE (self));
+  self->snapping_enabled = enabled;
+}
+
+gboolean
+oe_timeline_get_snapping (OeTimeline *self)
+{
+  g_return_val_if_fail (OE_IS_TIMELINE (self), FALSE);
+
+  return self->snapping_enabled;
 }
 
 static void
@@ -753,6 +772,87 @@ arm_drag (OeTimeline *self, gdouble x, gdouble y)
     }
 }
 
+/* Phase 7 helpers: the widget owns target collection, the layout core
+ * owns the snap decision. */
+
+/* Saturated footprint end for a neighbour (same rule as the layout
+ * core's clip_end_us). */
+static gint64
+neighbour_end_us (const OeClip *clip)
+{
+  gint64 duration = clip->source_out_us - clip->source_in_us;
+
+  if (clip->position_us > G_MAXINT64 - duration)
+    return G_MAXINT64;
+
+  return clip->position_us + duration;
+}
+
+/* Both edges of every other clip on the dragged clip's own track, in
+ * ascending clip order. Grows @edges; the caller owns the array. */
+static void
+collect_neighbour_edges (const OeSequence *sequence, guint track_index, guint skip_clip_index,
+                         GArray *edges)
+{
+  g_array_set_size (edges, 0);
+
+  if (track_index >= sequence->tracks->len)
+    return;
+
+  OeTrack *track = g_ptr_array_index (sequence->tracks, track_index);
+
+  for (guint i = 0; i < track->clips->len; i++)
+    {
+      if (i == skip_clip_index)
+        continue;
+
+      OeClip *clip = g_ptr_array_index (track->clips, i);
+      gint64 start = clip->position_us;
+      gint64 end = neighbour_end_us (clip);
+
+      g_array_append_vals (edges, (const gint64[]) { start }, 1);
+      g_array_append_vals (edges, (const gint64[]) { end }, 1);
+    }
+}
+
+/* Microseconds per frame from the sequence's rational frame rate; 0
+ * disables the grid target (no valid rate in the snapshot). */
+static gint64
+frame_interval_us (const OeSequence *sequence)
+{
+  if (sequence->frame_rate.num <= 0 || sequence->frame_rate.den <= 0)
+    return 0;
+
+  gdouble interval
+      = 1000000.0 * (gdouble) sequence->frame_rate.den / (gdouble) sequence->frame_rate.num;
+
+  if (interval < 1.0)
+    return 1; /* absurd rates still answer a total value */
+
+  return (gint64) (interval + 0.5);
+}
+
+/* Snap context for a preview on @track_index (skipping the dragged
+ * clip in @skip_clip_index). @edges is scratch owned by the caller. */
+static OeSnapContext
+build_snap_context (OeTimeline *self, guint track_index, guint skip_clip_index, GArray *edges)
+{
+  OeSnapContext ctx;
+
+  ctx.enabled = self->snapping_enabled;
+  ctx.threshold_px = OE_TIMELINE_SNAP_THRESHOLD_PX;
+  ctx.px_per_us = self->geometry.px_per_us;
+  ctx.playhead_us = self->playhead_us;
+  ctx.frame_interval_us = frame_interval_us (&self->sequence);
+
+  collect_neighbour_edges (&self->sequence, track_index, skip_clip_index, edges);
+
+  ctx.edges_us = edges->len > 0 ? (const gint64 *) edges->data : NULL;
+  ctx.n_edges = edges->len;
+
+  return ctx;
+}
+
 /* Motion: preview the clamped candidate (never writes the model). */
 static void
 update_drag (OeTimeline *self, gdouble x)
@@ -776,6 +876,12 @@ update_drag (OeTimeline *self, gdouble x)
           }
 
         gint64 wanted = oe_timeline_us_for_x (&self->geometry, x) - self->drag.grab_offset_us;
+
+        g_autoptr (GArray) edges = g_array_sized_new (FALSE, FALSE, sizeof (gint64), 8);
+        OeSnapContext snap
+            = build_snap_context (self, self->drag.track_index, self->drag.clip_index, edges);
+
+        wanted = oe_timeline_snap_time (&snap, wanted);
 
         self->drag.preview_position_us = oe_timeline_clamp_move_position (
             &self->sequence, self->drag.track_index, self->drag.clip_index, wanted);
@@ -812,6 +918,12 @@ update_drag (OeTimeline *self, gdouble x)
         oe_timeline_trim_bounds (&clip, max_source_us, &min_in, &max_in, &min_out, &max_out);
 
         gint64 wanted = oe_timeline_us_for_x (&self->geometry, x);
+
+        g_autoptr (GArray) edges = g_array_sized_new (FALSE, FALSE, sizeof (gint64), 8);
+        OeSnapContext snap
+            = build_snap_context (self, self->drag.track_index, self->drag.clip_index, edges);
+
+        wanted = oe_timeline_snap_time (&snap, wanted);
 
         if (self->drag.kind == DRAG_TRIM_IN)
           self->drag.preview_source_in_us = CLAMP (wanted, min_in, max_in);
@@ -1002,6 +1114,7 @@ oe_timeline_init (OeTimeline *self)
   self->drag.kind = DRAG_NONE;
   self->selected_track = -1;
   self->selected_clip = -1;
+  self->snapping_enabled = TRUE;
 
   gtk_widget_add_css_class (GTK_WIDGET (self), "timeline");
   gtk_widget_set_focusable (GTK_WIDGET (self), TRUE);

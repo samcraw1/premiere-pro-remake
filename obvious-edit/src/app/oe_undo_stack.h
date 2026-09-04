@@ -86,8 +86,10 @@ typedef enum
 #define OE_UNDO_STACK_MAX_DEPTH 100
 
 /**
- * OeUndoOpKind: the four scoped edit operations. Every kind maps 1:1
- * onto an existing project mutator, in both directions.
+ * OeUndoOpKind: the scoped edit operations. Every kind maps 1:1 onto
+ * an existing project mutator, in both directions — except the
+ * composite ripple record, which replays a fixed sequence of existing
+ * mutator calls (see oe_edit_ripple_remove_clip).
  *
  * @OE_UNDO_OP_INSERT: a clip was added at (track, index); undo removes
  *     it, redo re-inserts the stored copy.
@@ -97,6 +99,13 @@ typedef enum
  *     and forth (@old_a_us / @new_a_us). @old_b_us / @new_b_us unused.
  * @OE_UNDO_OP_TRIM: a clip's source range changed; undo/redo trim back
  *     to @old_a_us/@old_b_us and @new_a_us/@new_b_us (in/out).
+ * @OE_UNDO_OP_RIPPLE_DELETE: a clip was removed AND its same-track
+ *     downstream suffix shifted left by the removed clip's duration,
+ *     recorded as ONE composite record (one user action = one undo
+ *     step). Undo restores the suffix (descending index order) and
+ *     re-inserts the primary; redo removes the primary and re-shifts
+ *     (ascending index order). The sub-step orderings keep every
+ *     intermediate state inside the model's typed validation.
  */
 typedef enum
 {
@@ -104,7 +113,23 @@ typedef enum
   OE_UNDO_OP_DELETE,
   OE_UNDO_OP_MOVE,
   OE_UNDO_OP_TRIM,
+  OE_UNDO_OP_RIPPLE_DELETE,
 } OeUndoOpKind;
+
+/**
+ * OeRippleShift: one suffix clip's pre/post identity inside a
+ * composite #OE_UNDO_OP_RIPPLE_DELETE record. Both index generations
+ * are stored explicitly because oe_project_remove_clip() renumbers
+ * downstream clips: @pre_* is the identity at record time, @post_* the
+ * identity after the primary removal and shift.
+ */
+typedef struct
+{
+  gint64 pre_position_us;
+  gint64 post_position_us;
+  guint pre_index;
+  guint post_index;
+} OeRippleShift;
 
 /**
  * OeUndoRecord: one immutable command object, owned by the stack.
@@ -124,6 +149,12 @@ typedef struct
   gint64 old_b_us;
   gint64 new_a_us;
   gint64 new_b_us;
+
+  /* RIPPLE_DELETE only: owned array of OeRippleShift, one entry per
+   * shifted suffix clip ordered by pre_index ascending; NULL for every
+   * other kind. An empty array is a degenerate ripple (no downstream
+   * clips) — undo/redo reduce to the plain delete/insert pair. */
+  GArray *ripple_shifts;
 } OeUndoRecord;
 
 /**
@@ -192,6 +223,24 @@ gboolean oe_edit_insert_clip (OeProject *project, OeUndoStack *stack, guint trac
 /** Removes through oe_project_remove_clip(), recording the clip copy. */
 gboolean oe_edit_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index,
                               guint clip_index, GError **error);
+
+/**
+ * oe_edit_ripple_remove_clip: ripple delete (Phase 7).
+ *
+ * Removes the clip at (@track_index, @clip_index) and shifts every
+ * same-track downstream clip left by the removed clip's duration —
+ * the removed clip's footprint is exactly the freed gap, so the suffix
+ * lands flush where the deleted clip sat. Every sub-step goes through
+ * the model's own validated mutators (remove, then move per suffix
+ * clip, ascending index order); the whole action pushes ONE composite
+ * #OE_UNDO_OP_RIPPLE_DELETE record, so one undo restores the exact
+ * pre-state and one redo reproduces the post-state. With no downstream
+ * clips the record degenerates to the plain delete payload. @stack may
+ * be NULL to edit without recording (the physical ripple still
+ * happens).
+ */
+gboolean oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index,
+                                     guint clip_index, GError **error);
 
 /** Moves through oe_project_move_clip(), recording old/new positions. */
 gboolean oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_index,

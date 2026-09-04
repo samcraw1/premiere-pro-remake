@@ -1,4 +1,4 @@
-# Architecture (Phases 1–3)
+# Architecture (Phases 1–7)
 
 ## The shape of the system
 
@@ -188,9 +188,10 @@ observed half-applied.
 
 **Geometry is GTK-free.** `src/ui/oe_timeline_layout.[ch]` owns the
 zoom state (`px_per_us`), microsecond↔pixel round-trips, lane
-mapping, edge-band hit-testing, and the pure move/trim clamp math.
-It links GLib only, so all of it is unit-tested headlessly in
-`test_timeline_layout` — the widget just feeds it pixels.
+mapping, edge-band hit-testing, the pure move/trim clamp math, and
+— since Phase 7 — the pure snap decision. It links GLib only, so
+all of it is unit-tested headlessly in `test_timeline_layout` and
+`test_snap_ripple` — the widget just feeds it pixels.
 
 **One drag state machine, model mutators commit.** The gesture
 controllers share a single state: press arms `move`, `trim-in`,
@@ -294,10 +295,54 @@ the next play re-copies the mutated project, so playback never
 holds a stale snapshot. `reset_session` clears the stack on open
 and new: history never crosses a project boundary.
 
+## Snapping and ripple (Phase 7)
+
+Two editing affordances land on top of the Phase 4 widget and the
+Phase 6 history, both GTK-free at their core:
+
+**The snap decision is pure math.** `oe_timeline_layout` owns
+`OeSnapContext` — an enabled flag, a threshold in pixels, the zoom
+(`px_per_us`), optional playhead and frame-grid targets, and the
+same-track neighbour edges — plus `oe_timeline_snap_time`, which
+returns the snapped candidate or the candidate unchanged. Targets
+are same-track clip edges, the playhead, zero, and frame
+boundaries; the nearest target wins and ties go to the earlier
+time. The threshold (default 8 px) lives in screen space and
+scales through `px_per_us`, so snapping feels constant at any
+zoom. A disabled context is a pass-through, and the widget applies
+snapping for move, trim-in, and trim-out BEFORE the legality
+clamp — the clamp stays authoritative: snap proposes, clamp
+disposes, and `commit_drag` keeps trusting the preview verbatim.
+The decision is unit-tested in `test_snap_ripple` without a
+display.
+
+**The toggle is a wired command, not a setting.** `edit.snap-toggle`
+(accel `s`) flips the widget's session flag through the
+`oe_timeline_set/get_snapping` seam; the Edit menu renders it as a
+stateful check action so the checkbox always reflects the widget's
+truth, and the status bar reports "Snapping on/off" through the
+existing status seam.
+
+**Ripple delete is one action, one undo step.**
+`oe_edit_ripple_remove_clip` removes the primary clip and shifts
+every later clip on the same track left by the primary's duration —
+rigidly, gaps preserved — all through the existing typed mutators.
+It pushes ONE composite record (`OE_UNDO_OP_RIPPLE_DELETE`) that
+carries the primary's owned copy plus each suffix clip's pre/post
+positions and indices (the removal renumbers downstream indices,
+so both generations are recorded). Undo and redo replay through
+the same mutators — descending for undo, ascending for redo — so
+every intermediate state stays typed-valid, the stack keeps its
+strict-LIFO depth accounting (one composite record = one depth
+unit), and a fresh edit after undo still discards the redo branch.
+Record-time ripple while PLAYING leaves the session alone (move/
+trim semantics); history application pauses first, exactly like
+undo/redo.
+
 ## What comes later
 
-Snapping, ripple edits, and export arrive in later phases; `src/core/`
-is the foundation they all build on, and the adapter seams in
-`src/media/` and `src/playback/` are where media and audio plug in.
-See `docs/learning/phase-0.md` through `phase-6.md` for guided
+Export arrives in later phases; `src/core/` is the foundation
+they all build on, and the adapter seams in `src/media/` and
+`src/playback/` are where media and audio plug in. See
+`docs/learning/phase-0.md` through `phase-7.md` for guided
 walkthroughs of each phase.

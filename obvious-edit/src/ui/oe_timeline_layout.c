@@ -2,12 +2,20 @@
  *
  * All math lives here so the widget stays a thin event loop: this file
  * is GTK-free, total over its inputs, and unit-tested against real
- * project-model copies (see test_timeline_layout).
+ * project-model copies (see test_timeline_layout, test_snap_ripple).
+ *
+ * Phase 7: magnetism is a separate pure decision
+ * (oe_timeline_snap_time) consumed by the widget's preview path
+ * BEFORE legality clamping. The clamp keeps one job — recovering an
+ * infeasible candidate to a legal position — and never moves an
+ * already-legal candidate, so an on-band release locks flush while an
+ * off-band release keeps the raw pointer position.
  */
 
 #include "oe_timeline_layout.h"
 
 #include <math.h>
+
 /* Footprint end, saturated: a still grown to absurd duration is still
  * answerable without overflow. */
 static gint64
@@ -44,6 +52,114 @@ static gint64
 abs_diff_us (gint64 a, gint64 b)
 {
   return a >= b ? a - b : b - a;
+}
+
+/* Saturated |a - b|: distances near G_MAXINT64 saturate instead of
+ * wrapping, so a far target can never win by overflow. */
+static gint64
+snap_distance_us (gint64 a, gint64 b)
+{
+  if (a >= b)
+    return a - b;
+
+  return b - a;
+}
+
+/* Threshold band in microseconds, scaled by the current zoom: a band
+ * that feels constant on screen widens in time as the view zooms
+ * out. */
+static gint64
+snap_threshold_us (const OeSnapContext *ctx)
+{
+  if (ctx->px_per_us <= 0.0)
+    return 0;
+
+  gdouble band = ctx->threshold_px / ctx->px_per_us;
+
+  if (band >= (gdouble) G_MAXINT64)
+    return G_MAXINT64;
+
+  return (gint64) (band + 0.5);
+}
+
+/* Nearest-target bookkeeping: a new candidate replaces the incumbent
+ * when strictly closer, or equally close and earlier (deterministic
+ * tie-break for targets that coincide, e.g. an edge on a frame
+ * boundary). */
+typedef struct
+{
+  gint64 best;
+  gint64 best_distance;
+  gboolean have_best;
+} SnapBest;
+
+static void
+snap_offer (SnapBest *best, gint64 target, gint64 candidate, gint64 threshold)
+{
+  gint64 distance = snap_distance_us (target, candidate);
+
+  if (distance > threshold)
+    return;
+
+  if (!best->have_best || distance < best->best_distance
+      || (distance == best->best_distance && target < best->best))
+    {
+      best->best = target;
+      best->best_distance = distance;
+      best->have_best = TRUE;
+    }
+}
+
+gint64
+oe_timeline_snap_time (const OeSnapContext *ctx, gint64 candidate_us)
+{
+  g_return_val_if_fail (ctx != NULL, candidate_us);
+
+  if (!ctx->enabled || candidate_us < 0)
+    return candidate_us;
+
+  gint64 threshold = snap_threshold_us (ctx);
+
+  if (threshold <= 0)
+    return candidate_us;
+
+  SnapBest best = { 0, 0, FALSE };
+
+  /* Zero: the timeline's left wall. */
+  snap_offer (&best, 0, candidate_us, threshold);
+
+  /* Frame grid: the nearest frame boundary, when the sequence has a
+   * frame rate. */
+  if (ctx->frame_interval_us > 0)
+    {
+      gint64 frame = candidate_us / ctx->frame_interval_us;
+      gint64 floor_target = frame * ctx->frame_interval_us;
+      gint64 ceil_target = floor_target;
+
+      if (floor_target < candidate_us && floor_target <= G_MAXINT64 - ctx->frame_interval_us)
+        ceil_target = floor_target + ctx->frame_interval_us;
+
+      snap_offer (&best, floor_target, candidate_us, threshold);
+      snap_offer (&best, ceil_target, candidate_us, threshold);
+    }
+
+  /* Live playhead. */
+  if (ctx->playhead_us >= 0)
+    snap_offer (&best, ctx->playhead_us, candidate_us, threshold);
+
+  /* Same-track neighbour clip edges, pre-collected by the widget. */
+  for (gsize i = 0; i < ctx->n_edges; i++)
+    {
+      gint64 edge = ctx->edges_us[i];
+
+      if (edge >= 0)
+        snap_offer (&best, edge, candidate_us, threshold);
+    }
+
+  if (!best.have_best)
+    return candidate_us;
+
+  return best.best;
 }
 
 static OeTimelineHit
@@ -170,14 +286,19 @@ oe_timeline_clamp_move_position (const OeSequence *sequence, guint track_index, 
   OeClip *clip = g_ptr_array_index (track->clips, clip_index);
   gint64 duration = clip->source_out_us - clip->source_in_us;
 
+  /* Legality only: a wanted position that already fits passes through
+   * unchanged — magnetism is oe_timeline_snap_time()'s job now. An
+   * infeasible wanted position recovers to the nearest legal contact:
+   * the hard-left floor, or whichever neighbour edge (its end, or its
+   * start minus the mover's duration) is closest to what was asked.
+   * Ties prefer the smaller position. */
+  if (wanted_position >= 0 && position_fits (track, clip, wanted_position, duration))
+    return wanted_position;
+
   gint64 best = 0;
   gint64 best_distance = G_MAXINT64;
   gboolean have_best = FALSE;
 
-  /* Candidates: the wanted spot, the hard-left floor, and both edges
-   * of every neighbour (snap right onto its end, snap left onto its
-   * start minus the mover's duration). The nearest legal candidate
-   * wins; ties prefer the smaller position. */
   for (guint pass = 0; pass < 2; pass++)
     {
       gint64 candidate = pass == 0 ? wanted_position : 0;

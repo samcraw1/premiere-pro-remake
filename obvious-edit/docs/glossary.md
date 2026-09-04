@@ -293,6 +293,44 @@ frame interval at the sequence rate); the window schedules its GSource
 at exactly that deadline instead of guessing an interval, so ticks
 stay anchored even when a draw runs late.
 
+
+## Editing terms (Phase 7)
+
+**Snapping** — the editor's habit of quietly correcting a drag to
+land on a meaningful time. A candidate microseconds from a clip
+edge, the playhead, zero, or a frame boundary becomes that target
+exactly; anything farther than the [threshold](#editing-terms-phase-7)
+keeps its raw position. The decision lives in the GTK-free
+`oe_timeline_snap_time` over an `OeSnapContext`, so the same rule
+governs moves and trims and is unit-tested without a display.
+
+**Snap threshold** — how many screen pixels of "close enough" a
+drag forgives. It is a distance in pixels, not in time: through
+`px_per_us` the same 8 px band widens as you zoom out and narrows
+as you zoom in, so the magnetic feel is constant across zoom
+levels. The band is inclusive at exactly the threshold.
+
+**Frame grid** — the sequence's frame boundaries (from the
+sequence rate) as snap targets, so a dragged clip can always land
+frame-aligned even when no other clip is near.
+
+**Tie-break** — when two targets are equally near a candidate, the
+earlier time wins. Deterministic ties keep a drag from flickering
+between two equally good answers.
+
+**Ripple edit** — an edit whose effect flows sideways to keep the
+rest of the track in step. Phase 7 ships one: **ripple delete**, where
+removing a clip shifts every later clip on the same track left by
+the removed clip's duration — rigidly, so the gaps between the
+survivors survive. Clips on other tracks never move.
+
+**Composite record** — one history record that stands for a
+multi-step edit. The ripple delete records the primary clip's owned
+copy plus each shifted neighbour's pre/post positions and indices
+(removal renumbers downstream indices, so both generations are
+recorded); undo and redo replay it through the ordinary typed
+mutators. One action, one undo step, one depth unit in the stack.
+
 ## Project-specific terms
 
 **Adapter** — a thin module wrapping one external library's global

@@ -53,7 +53,7 @@ editing. History is per-project session state, never serialized:
 | `src/ui/oe_main_window.c` (changed) | `edit.undo` / `edit.redo` handlers (status reports, selection clearing, auto-pause through the session, playhead untouched); every history transition drives `oe_command_set_enabled`; bin-insert paths (toolbar + DnD) and selection delete use the recorder; `reset_session` clears the stack at open/new; dispose clears the stack mirror. |
 | `src/app/oe_command.h` (comment fix) | Undo/redo entries move from "reserved" to "wired in Phase 6"; shuttle/marks stay deferred to later phases (they never owned this one). |
 | `tests/test_undo_stack.c` | Fourteen GTK-free cases linking only the modules under test; audio adapter init/shutdown around the run for the auto-pause case; `SDL_AUDIODRIVER=dummy` via the meson env. |
-| `meson.build` | New sources in the executable list; one new test target (14 suites total) with a 300 s timeout and the dummy-driver env. |
+| `meson.build` | New sources in the executable list; one new test target (14 suites at the time — 15 as of Phase 7's `test_snap_ripple`) with a 300 s timeout and the dummy-driver env. |
 | `docs/*` | Architecture "The command-object history (Phase 6)" section, code-map rows (plus Phase 5 tree/table drift fixes), glossary history terms, this file. |
 
 ## 3. Block-by-block build walkthrough

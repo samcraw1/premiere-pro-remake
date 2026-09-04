@@ -1217,7 +1217,34 @@ edit_redo_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GN
   set_status_message (self, msg);
 }
 
-/* Fulfills the Phase 1 registry promise for selection.delete. */
+gboolean
+oe_main_window_get_snapping (OeMainWindow *window)
+{
+  g_return_val_if_fail (OE_IS_MAIN_WINDOW (window), FALSE);
+
+  return oe_timeline_get_snapping (OE_TIMELINE (window->timeline));
+}
+
+/* Fulfills the Phase 7 registry promise for edit.snap-toggle: flips
+ * the timeline's session snapping flag and reports the new state.
+ * Session-only — nothing here touches the model or persistence. */
+static void
+edit_snap_toggle_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  OeTimeline *timeline = OE_TIMELINE (self->timeline);
+
+  oe_timeline_set_snapping (timeline, !oe_timeline_get_snapping (timeline));
+  set_status_message (self, oe_timeline_get_snapping (timeline) ? "Snapping on" : "Snapping off");
+}
+
+/* Fulfills the Phase 1 registry promise for selection.delete, routed
+ * through the Phase 7 ripple helper: the deletion closes the gap on
+ * its own track in the same user action, recorded as one composite
+ * history record. */
 static void
 selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
 {
@@ -1236,7 +1263,8 @@ selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_da
 
   GError *error = NULL;
 
-  if (!oe_edit_remove_clip (self->project, self->undo_stack, track_index, clip_index, &error))
+  if (!oe_edit_ripple_remove_clip (self->project, self->undo_stack, track_index, clip_index,
+                                   &error))
     {
       g_autofree gchar *msg = g_strdup_printf ("Delete rejected: %s", error->message);
 
@@ -1500,6 +1528,7 @@ build_menu_bar (void)
   menu_add_command (edit, "Redo", "edit.redo");
   menu_add_command (edit, "Insert from Bin (Ctrl+E)", "media.insert-from-bin");
   menu_add_command (edit, "Delete Selection", "selection.delete");
+  menu_add_command (edit, "Snapping (S)", "edit.snap-toggle");
   menu_add_command (edit, "Select Tool (V)", "tool.select");
   menu_add_command (edit, "Razor Tool (C)", "tool.razor");
 
@@ -1726,6 +1755,7 @@ oe_main_window_dispose (GObject *object)
   oe_command_set_handler (OE_CMD_STOP, NULL);
   oe_command_set_handler (OE_CMD_UNDO, NULL);
   oe_command_set_handler (OE_CMD_REDO, NULL);
+  oe_command_set_handler (OE_CMD_SNAP_TOGGLE, NULL);
   command_owner = NULL;
 
   /* Free the worker first: it drains, joins, and flushes pending
@@ -1917,6 +1947,7 @@ oe_main_window_constructed (GObject *object)
   oe_command_set_handler (OE_CMD_STOP, transport_stop_command_handler);
   oe_command_set_handler (OE_CMD_UNDO, edit_undo_command_handler);
   oe_command_set_handler (OE_CMD_REDO, edit_redo_command_handler);
+  oe_command_set_handler (OE_CMD_SNAP_TOGGLE, edit_snap_toggle_command_handler);
 
   g_signal_connect (self, "map", G_CALLBACK (on_map_apply_positions), NULL);
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);
