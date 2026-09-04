@@ -121,7 +121,7 @@ stack_push (OeUndoStack *self, OeUndoRecord *rec)
   g_ptr_array_add (self->records, rec);
 
   if (self->records->len > OE_UNDO_STACK_MAX_DEPTH)
-    g_ptr_array_remove (self->records, 0);
+    g_ptr_array_remove_index (self->records, 0);
 
   self->cursor = self->records->len;
   fire_changed (self);
