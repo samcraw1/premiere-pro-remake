@@ -198,6 +198,30 @@ void oe_project_set_name (OeProject *project, const gchar *name);
 void oe_project_get_sequence (OeProject *project, OeSequence *out);
 
 /**
+ * oe_project_get_clip_count:
+ * @track_index: track to count
+ *
+ * Read-only view over the live track (no copy): the clip count, in
+ * position order. 0 when @track_index is out of range.
+ *
+ * Returns: the number of clips on the track.
+ */
+guint oe_project_get_clip_count (OeProject *project, guint track_index);
+
+/**
+ * oe_project_get_clip:
+ * @out: receives a value copy of the clip (OeClip owns no memory, so
+ *     the struct copy IS the deep copy)
+ *
+ * Single-clip deep-copy getter: reads one clip's exact fields without
+ * copying the whole sequence — the undo recorder captures pre-edit
+ * state with it (oe_undo_stack.h).
+ *
+ * Returns: TRUE when both indices are in range.
+ */
+gboolean oe_project_get_clip (OeProject *project, guint track_index, guint clip_index, OeClip *out);
+
+/**
  * oe_project_add_track:
  *
  * Appends an empty track of @kind (index = count before the call) and

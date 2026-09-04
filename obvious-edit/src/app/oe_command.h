@@ -37,10 +37,10 @@ G_BEGIN_DECLS
  * @OE_CMD_TOOL_SELECT: select tool (V).
  * @OE_CMD_TOOL_RAZOR: razor tool (C).
  * @OE_CMD_DELETE_SELECTION: delete the current selection (Delete).
- * @OE_CMD_UNDO: reserved — not implemented; undo/redo arrive after the
- *   playback clock (roadmap order).
- * @OE_CMD_REDO: reserved — not implemented; undo/redo arrive after the
- *   playback clock (roadmap order).
+ * @OE_CMD_UNDO: undo the last edit (Ctrl+Z) — wired in Phase 6; the
+ *   enabled state tracks the session history stack.
+ * @OE_CMD_REDO: redo the last undone edit (Ctrl+Shift+Z) — wired in
+ *   Phase 6; the enabled state tracks the session history stack.
  * @OE_CMD_IMPORT_MEDIA: media import (wired in Phase 2).
  * @OE_CMD_NEW_PROJECT: project lifecycle (wired in Phase 3).
  * @OE_CMD_OPEN_PROJECT: project lifecycle (wired in Phase 3).

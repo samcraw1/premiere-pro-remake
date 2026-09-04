@@ -34,10 +34,11 @@ Concretely, five things appear:
   `transport.stop`.
 
 What Phase 5 deliberately does **not** add: shuttle/multi-speed and
-reverse (multi-speed needs a rate knob on the clock — the owning-phase
-comments now say Phase 6+), mark-in/mark-out range playback, looping,
-source-monitor playback, and sample-accurate A/V sync — the honest
-limits of a dummy-driver CI environment.
+reverse (multi-speed needs a rate knob on the clock), mark-in/mark-out
+range playback, looping, source-monitor playback, and sample-accurate
+A/V sync — the honest limits of a dummy-driver CI environment. Shuttle
+and marks do not own Phase 6, which delivers undo/redo; their
+owning-phase comments say "a later phase".
 
 ## 2. Per-file explanations
 
@@ -49,7 +50,7 @@ limits of a dummy-driver CI environment.
 | `src/ui/oe_program_monitor.[ch]` | `OeProgramMonitor` over `GtkDrawingArea`: owns delivered frames, zero-copy Cairo blits (BGRA ↔ ARGB32 compatible byte order), empty state, missing-media hatch. |
 | `src/ui/oe_timeline.[ch]` (extended) | Playhead-changed callback mirroring the resolve/report seams; programmatic `set_playhead` never re-fires it (no loops). |
 | `src/ui/oe_main_window.c` (changed) | Session lifecycle (create, feed, teardown before the project), tick GSource, transport handlers with status-bar reports, session recreation on project replace, monitor + observer wiring. |
-| `src/app/oe_command.h` (comment fix) | Corrected owning-phase notes: shuttle and marks are Phase 6+, the keymap note now matches the real table. |
+| `src/app/oe_command.h` (comment fix) | Corrected owning-phase notes: shuttle and marks are deferred to later phases (not Phase 6 — that delivers undo/redo), the keymap note now matches the real table. |
 | `tests/test_playback_clock.c` | Ten headless cases: mapping (topmost, half-open, clamping), deadlines, empty sequence, end-of-sequence, pause/resume drift, stop parking, seek clamping and live seek, missing-media reporting. |
 | `tests/test_audio_output.c` | Seven adapter-contract cases under SDL's dummy driver: init edges, open reporting, queue depth, flush, pause/resume preservation, NULL tolerance. |
 | `meson.build` | New sources in the executable list; two new test targets (13 suites total) with `SDL_AUDIODRIVER=dummy`. |

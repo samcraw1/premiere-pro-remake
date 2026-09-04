@@ -33,6 +33,7 @@
 #include "../app/oe_log.h"
 #include "../app/oe_media_library.h"
 #include "../app/oe_playback_session.h"
+#include "../app/oe_undo_stack.h"
 #include "../core/oe_project.h"
 #include "../core/oe_project_format.h"
 #include "oe_media_bin.h"
@@ -78,6 +79,13 @@ struct _OeMainWindow
   OePlaybackSession *playback;
   GtkWidget *program_monitor;
   guint playback_tick_source;
+
+  /* Phase 6: the GTK-free edit history for the current session. The
+   * timeline holds a weak pointer to it and records moves/trims
+   * through the oe_edit_* recorder helpers; reset_session clears it
+   * whenever the project is replaced — history never crosses a
+   * project boundary. */
+  OeUndoStack *undo_stack;
 
   /* TRUE while the current import batch belongs to a project open: the
    * generic "Imported N file(s)" summary would bury the Loaded
@@ -780,6 +788,11 @@ reset_session (OeMainWindow *self, OeProject *project)
   g_clear_object (&self->project);
   g_clear_pointer (&self->media_library, oe_media_library_free);
 
+  /* History never crosses a project boundary: the outgoing session's
+   * records reference track/clip indices that mean nothing in the
+   * replacement project. */
+  oe_undo_stack_clear (self->undo_stack);
+
   self->media_library = oe_media_library_new ();
   oe_media_library_set_observer (self->media_library, on_library_changed, self);
   oe_media_bin_set_library (OE_MEDIA_BIN (self->media_bin), self->media_library);
@@ -1134,6 +1147,76 @@ view_zoom_out_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data 
   oe_timeline_zoom_out (OE_TIMELINE (command_owner->timeline));
 }
 
+/* History enablement rides the stack's changed seam: every transition
+ * (record, undo, redo, clear) re-syncs the two command entries — the
+ * disabled state reports "is disabled" on dispatch instead of
+ * failing. */
+static void
+on_undo_stack_changed (gboolean can_undo, gboolean can_redo, gpointer user_data G_GNUC_UNUSED)
+{
+  oe_command_set_enabled (OE_CMD_UNDO, can_undo);
+  oe_command_set_enabled (OE_CMD_REDO, can_redo);
+}
+
+static void
+edit_undo_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  const OeUndoRecord *record = NULL;
+  GError *error = NULL;
+
+  /* Session-aware apply: while playing, the stack pauses the session
+   * first — the playing copy is stale the moment the model mutates,
+   * and the next play re-copies the mutated project. */
+  if (!oe_undo_stack_undo_with_session (self->undo_stack, self->project, self->playback, &record,
+                                        &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Undo failed: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  /* The selection may point at a clip the undo just removed (or
+     re-created elsewhere); drop it rather than keep a stale index. */
+  oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
+
+  g_autofree gchar *msg = g_strdup_printf ("Undo: %s", record->label);
+
+  set_status_message (self, msg);
+}
+
+static void
+edit_redo_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  const OeUndoRecord *record = NULL;
+  GError *error = NULL;
+
+  if (!oe_undo_stack_redo_with_session (self->undo_stack, self->project, self->playback, &record,
+                                        &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Redo failed: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
+
+  g_autofree gchar *msg = g_strdup_printf ("Redo: %s", record->label);
+
+  set_status_message (self, msg);
+}
+
 /* Fulfills the Phase 1 registry promise for selection.delete. */
 static void
 selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
@@ -1153,7 +1236,7 @@ selection_delete_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_da
 
   GError *error = NULL;
 
-  if (!oe_project_remove_clip (self->project, track_index, clip_index, &error))
+  if (!oe_edit_remove_clip (self->project, self->undo_stack, track_index, clip_index, &error))
     {
       g_autofree gchar *msg = g_strdup_printf ("Delete rejected: %s", error->message);
 
@@ -1256,9 +1339,14 @@ insert_ready_asset (OeMainWindow *self, guint asset_id)
 
   const gint64 playhead_us = oe_timeline_get_playhead (OE_TIMELINE (self->timeline));
   GError *error = NULL;
+  const OeClip clip = {
+    .media_ref = media_ref,
+    .position_us = playhead_us,
+    .source_in_us = 0,
+    .source_out_us = duration_us,
+  };
 
-  if (!oe_project_insert_clip (self->project, track_index, media_ref, playhead_us, 0, duration_us,
-                               &error))
+  if (!oe_edit_insert_clip (self->project, self->undo_stack, track_index, &clip, &error))
     {
       g_autofree gchar *msg = g_strdup_printf ("Insert rejected: %s", error->message);
 
@@ -1636,6 +1724,8 @@ oe_main_window_dispose (GObject *object)
   oe_command_set_handler (OE_CMD_ZOOM_OUT, NULL);
   oe_command_set_handler (OE_CMD_PLAY_PAUSE, NULL);
   oe_command_set_handler (OE_CMD_STOP, NULL);
+  oe_command_set_handler (OE_CMD_UNDO, NULL);
+  oe_command_set_handler (OE_CMD_REDO, NULL);
   command_owner = NULL;
 
   /* Free the worker first: it drains, joins, and flushes pending
@@ -1647,6 +1737,10 @@ oe_main_window_dispose (GObject *object)
    * before-oe_ffmpeg_shutdown ordering as the import worker. */
   cancel_tick (self);
   g_clear_pointer (&self->playback, oe_playback_session_free);
+
+  /* The history is GTK-free and owns its records: free it while the
+     timeline that holds a weak pointer to it is still alive. */
+  g_clear_pointer (&self->undo_stack, oe_undo_stack_free);
 
   g_clear_pointer (&self->import_worker, oe_import_worker_free);
   g_clear_pointer (&self->media_library, oe_media_library_free);
@@ -1782,6 +1876,17 @@ oe_main_window_constructed (GObject *object)
   playback_attach (self, self->project);
   oe_timeline_set_playhead_func (OE_TIMELINE (self->timeline), on_timeline_playhead, self);
 
+  /* Phase 6: the session's edit history — the timeline records
+   * moves/trims through it, and the changed seam keeps the two command
+   * entries' enabled state in sync on every history transition. The
+   * stack starts empty: sync the commands once here, then let the
+   * seam drive them. */
+  self->undo_stack = oe_undo_stack_new ();
+  oe_undo_stack_set_changed_func (self->undo_stack, on_undo_stack_changed, self);
+  oe_timeline_set_undo_stack (OE_TIMELINE (self->timeline), self->undo_stack);
+  on_undo_stack_changed (oe_undo_stack_can_undo (self->undo_stack),
+                         oe_undo_stack_can_redo (self->undo_stack), self);
+
   gtk_paned_set_end_child (GTK_PANED (self->bin_paned), self->timeline_paned);
   gtk_box_append (GTK_BOX (root), self->bin_paned);
 
@@ -1810,6 +1915,8 @@ oe_main_window_constructed (GObject *object)
   oe_command_set_handler (OE_CMD_ZOOM_OUT, view_zoom_out_command_handler);
   oe_command_set_handler (OE_CMD_PLAY_PAUSE, transport_play_pause_command_handler);
   oe_command_set_handler (OE_CMD_STOP, transport_stop_command_handler);
+  oe_command_set_handler (OE_CMD_UNDO, edit_undo_command_handler);
+  oe_command_set_handler (OE_CMD_REDO, edit_redo_command_handler);
 
   g_signal_connect (self, "map", G_CALLBACK (on_map_apply_positions), NULL);
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);

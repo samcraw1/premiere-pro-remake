@@ -28,6 +28,10 @@
 
 #include "../core/oe_project.h"
 
+/* Forward reference: the Phase 6 edit recorder (src/app). The widget
+ * holds a weak pointer — the window owns the stack. */
+typedef struct _OeUndoStack OeUndoStack;
+
 G_BEGIN_DECLS
 
 #define OE_TYPE_TIMELINE (oe_timeline_get_type ())
@@ -99,6 +103,17 @@ typedef void (*OeTimelinePlayheadFunc) (gint64 playhead_us, gpointer user_data);
 
 void oe_timeline_set_playhead_func (OeTimeline *timeline, OeTimelinePlayheadFunc func,
                                     gpointer user_data);
+
+/**
+ * oe_timeline_set_undo_stack:
+ * @stack: (transfer none) or NULL to detach
+ *
+ * Weak pointer to the session's edit history (the window owns the
+ * stack). Drag commits then run through the oe_edit_* recorder helpers
+ * so every accepted move/trim lands in history; NULL keeps the widget
+ * editing through the model unrecorded.
+ */
+void oe_timeline_set_undo_stack (OeTimeline *timeline, OeUndoStack *stack);
 
 /** Selected clip indices; FALSE when the selection is empty. */
 gboolean oe_timeline_get_selection (OeTimeline *timeline, guint *track_index, guint *clip_index);

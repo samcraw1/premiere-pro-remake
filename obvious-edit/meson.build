@@ -63,6 +63,7 @@ executable('obvious-edit',
     'src/app/oe_application.c',
     'src/app/oe_command.c',
     'src/app/oe_log.c',
+    'src/app/oe_undo_stack.c',
     'src/app/oe_media_cache.c',
     'src/app/oe_media_library.c',
     'src/app/oe_import_worker.c',
@@ -302,4 +303,31 @@ test_audio_output = executable('test_audio_output',
 )
 
 test('audio-output', test_audio_output,
+  env: ['SDL_AUDIODRIVER=dummy'])
+
+# Undo/redo history: the command-object stack over the project model —
+# per-op inverse correctness, record/apply-time typed rejections, depth
+# eviction, redo invalidation, JSON v1 round-trips, and the auto-pause
+# interplay on a virtual clock. Links the stack, the model, the
+# persistence module (json-glib is an explicit dependency, like the
+# project-format suite), and the playback session; no GTK. The session
+# opens SDL's dummy driver, hence the env.
+test_undo_stack = executable('test_undo_stack',
+  [
+    'tests/test_undo_stack.c',
+    'src/app/oe_undo_stack.c',
+    'src/app/oe_playback_session.c',
+    'src/media/oe_media_playback.c',
+    'src/playback/oe_audio_output.c',
+    'src/core/oe_project.c',
+    'src/core/oe_project_format.c',
+    'src/core/oe_time.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps + [json_glib_dep],
+)
+
+test('undo-stack', test_undo_stack,
+  timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
   env: ['SDL_AUDIODRIVER=dummy'])

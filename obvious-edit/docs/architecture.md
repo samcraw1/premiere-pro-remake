@@ -259,10 +259,45 @@ bar) and hatched in the monitor while the transport continues; an
 empty sequence reports "nothing to play"; reaching the end stops
 with the playhead parked on the final position.
 
+## The command-object history (Phase 6)
+
+Undo/redo is a command-object history over the project model — every
+edit becomes a record whose inverse applies only through the same
+typed mutators that created it:
+
+**The stack owns history; the model owns validity.** `src/app/
+oe_undo_stack.[ch]` is GTK-free and holds `OeUndoRecord` command
+objects: insert/delete carry a deep-copied `OeClip`, move/trim carry
+old and new µs bounds. The stack is strict LIFO, capped at depth 100
+(oldest dropped), and any newly recorded edit discards the redo
+branch — linear history, no trees. Undo/redo apply inverses ONLY
+through `oe_project_*` mutators with typed `GError`s; a rejected
+inverse propagates its error and leaves the stack position
+untouched, so a failed undo can be retried after the interfering
+edit is cleared. The module header states the sole-path invariant:
+all edits that should be undoable go through the recorder helpers
+(`oe_edit_insert_clip`, `oe_edit_remove_clip`, `oe_edit_move_clip`,
+`oe_edit_trim_clip`), which perform the mutator call and push a
+record only on success — typed rejections record nothing. The
+documented escape hatch for future hard-to-invert mutators is a
+full-model snapshot record.
+
+**The UI is a thin hand on the seam.** `edit.undo` / `edit.redo`
+actions call the stack; the `OeUndoChangedFunc` seam fires on every
+history transition and drives command enablement via
+`oe_command_set_enabled` — the buttons never poll. Each applied
+step reports "Undo: <label>" / "Redo: <label>" (or "Nothing to
+undo/redo") through the existing status-reporter seam, selection
+clears after the jump, and history never rewinds the playhead.
+When the session is PLAYING, undo/redo pauses first, then applies —
+the next play re-copies the mutated project, so playback never
+holds a stale snapshot. `reset_session` clears the stack on open
+and new: history never crosses a project boundary.
+
 ## What comes later
 
-Undo/redo, snapping, ripple edits, and export arrive in later
-phases; `src/core/` is the foundation they all build on, and the
-adapter seams in `src/media/` and `src/playback/` are where media and
-audio plug in. See `docs/learning/phase-0.md` through `phase-5.md`
-for guided walkthroughs of each phase.
+Snapping, ripple edits, and export arrive in later phases; `src/core/`
+is the foundation they all build on, and the adapter seams in
+`src/media/` and `src/playback/` are where media and audio plug in.
+See `docs/learning/phase-0.md` through `phase-6.md` for guided
+walkthroughs of each phase.
