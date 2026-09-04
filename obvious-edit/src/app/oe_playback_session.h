@@ -11,6 +11,10 @@
  *   - tick(): advances the clock, feeds audio, decodes video, fires the
  *     observer, and returns the next deadline in monotonic µs so the
  *     owner schedules pacing with a plain GSource at that deadline;
+ *   - an injectable time source: production leaves it unset and reads
+ *     g_get_monotonic_time(); tests install a virtual clock through
+ *     oe_playback_session_set_time_source() so deadline and drift
+ *     assertions are deterministic, fast, and Valgrind-clean.
  *   - end-of-sequence stop computed from a deep copy of the project's
  *     sequence (max clip end), never from live widgets.
  *
@@ -63,6 +67,14 @@ typedef enum
 } OePlaybackEvent;
 
 typedef struct _OePlaybackSession OePlaybackSession;
+
+/**
+ * OePlaybackTimeSourceFunc: reads the current time on a monotonic scale,
+ * in integer µs. Production sessions leave the time source unset — the
+ * session then uses g_get_monotonic_time(). Tests install a virtual
+ * clock so wall-cadence assertions never depend on real sleeps.
+ */
+typedef gint64 (*OePlaybackTimeSourceFunc) (gpointer user_data);
 
 /**
  * OePlaybackNotifyFunc: observer fired on the main context after each
@@ -141,6 +153,18 @@ void oe_playback_session_set_frame_func (OePlaybackSession *session, OePlaybackF
                                          gpointer user_data);
 void oe_playback_session_set_event_func (OePlaybackSession *session, OePlaybackEventFunc event_func,
                                          gpointer user_data);
+
+/**
+ * oe_playback_session_set_time_source:
+ * @time_func: the monotonic µs reader, or NULL to restore the production
+ *     default (g_get_monotonic_time())
+ * @user_data: passed to @time_func
+ *
+ * Swaps where the session reads "now". The wall-clock-anchored design is
+ * unchanged — only the source of the monotonic reading is injectable.
+ */
+void oe_playback_session_set_time_source (OePlaybackSession *session,
+                                          OePlaybackTimeSourceFunc time_func, gpointer user_data);
 
 /**
  * oe_playback_session_play:
