@@ -56,6 +56,7 @@ executable('obvious-edit',
   [
     oe_resources,
     'src/main.c',
+    'src/core/oe_time.c',
     'src/app/oe_application.c',
     'src/app/oe_command.c',
     'src/app/oe_log.c',
