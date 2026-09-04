@@ -1,4 +1,4 @@
-# Code map (Phases 1–6)
+# Code map (Phases 1–7)
 
 What lives where, and why it lives there.
 
@@ -38,7 +38,7 @@ premiere-pro-remake/
     │       ├── oe_main_window.[ch]  # the editor shell: panels, status bar
     │       ├── oe_media_bin.[ch]    # the media bin: rows, badges, DnD
     │       ├── oe_program_monitor.[ch] # the program monitor: frame blits
-    │       ├── oe_timeline_layout.[ch] # GTK-free zoom/geometry/hit-test math
+    │       ├── oe_timeline_layout.[ch] # GTK-free zoom/geometry/hit-test/snap math
     │       ├── oe_timeline.[ch]      # the timeline widget: Cairo drawing + drags
     │       ├── oe_shell_layout.[ch] # GTK-free layout persistence (GKeyFile)
     │       ├── oe_theme.[ch]        # GtkCssProvider loader (GResource CSS)
@@ -58,6 +58,7 @@ premiere-pro-remake/
     │   ├── test_timeline_layout.c # zoom conversions, hit-test, drag clamps
     │   ├── test_playback_clock.c  # session clock on a virtual time source
     │   ├── test_undo_stack.c      # undo/redo: inverses, rejection, depth
+    │   ├── test_snap_ripple.c     # snapping + ripple: targets, bands, composite records
     │   ├── test_audio_output.c    # SDL dummy-driver adapter contract
     │   ├── fixture_media.[ch]     # runtime media fixtures (WAV/AVI/PNG)
     │   └── valgrind.supp          # GLib/GObject-only suppressions
@@ -73,7 +74,8 @@ premiere-pro-remake/
             ├── phase-3.md         # guided Phase 3 walkthrough
             ├── phase-4.md         # guided Phase 4 walkthrough
             ├── phase-5.md         # guided Phase 5 walkthrough
-            └── phase-6.md         # guided Phase 6 walkthrough
+            ├── phase-6.md         # guided Phase 6 walkthrough
+            └── phase-7.md         # guided Phase 7 walkthrough
 ```
 
 ## File-by-file responsibilities
@@ -96,12 +98,12 @@ premiere-pro-remake/
 | `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit + the push-model device stream (queue, depth, flush, pause/resume) | `oe_audio_output_init`, `oe_audio_output_open_stream`, `oe_audio_output_queue`, `oe_audio_output_shutdown` |
 | `src/media/oe_media_playback.c` | Playback decode: audio decode-ahead worker (owned f32 chunks, main-context delivery) + frame-at-time BGRA video | `oe_media_playback_request_audio`, `oe_media_playback_video_open`, `oe_media_playback_video_get_frame` |
 | `src/app/oe_playback_session.c` | The GTK-free playback clock: stopped/paused/playing, wall-anchor, drift accounting, clip→source mapping, injectable time source (tests install a virtual clock), events | `oe_playback_session_play`, `oe_playback_session_tick`, `oe_playback_session_seek`, `oe_playback_session_set_time_source`, `oe_playback_session_map` |
-| `src/app/oe_undo_stack.c` | GTK-free command-object history: strict-LIFO records (depth 100, redo branch cleared on new edits), recorder helpers that mutate-then-record, undo/redo applied only through typed model mutators, changed-state seam, auto-pause entry point | `oe_undo_stack_undo`, `oe_undo_stack_redo`, `oe_edit_insert_clip`, `oe_undo_stack_set_changed_func` |
+| `src/app/oe_undo_stack.c` | GTK-free command-object history: strict-LIFO records (depth 100, redo branch cleared on new edits), recorder helpers that mutate-then-record, composite ripple-delete records (primary copy + suffix pre/post positions and indices), undo/redo applied only through typed model mutators, changed-state seam, auto-pause entry point | `oe_undo_stack_undo`, `oe_undo_stack_redo`, `oe_edit_insert_clip`, `oe_edit_ripple_remove_clip`, `oe_undo_stack_set_changed_func` |
 | `src/ui/oe_program_monitor.c` | The program monitor: owned-frame Cairo blits, empty state, missing-media hatch | `oe_program_monitor_new`, `oe_program_monitor_show_frame`, `oe_program_monitor_set_empty_state` |
 | `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector | `oe_main_window_new` |
 | `src/ui/oe_media_bin.c` | The bin panel: row projection, badges, DnD, selection | `oe_media_bin_new`, `oe_media_bin_refresh` |
-| `src/ui/oe_timeline_layout.c` | GTK-free timeline math: zoom round-trips, lane mapping, edge-band hit-test, move/trim clamps | `oe_timeline_x_for_us`, `oe_timeline_hit_test`, `oe_timeline_clamp_move_position`, `oe_timeline_trim_bounds` |
-| `src/ui/oe_timeline.c` | The timeline widget: observer snapshots, Cairo painting, one drag state machine → model mutators | `oe_timeline_new`, `oe_timeline_set_project`, `oe_timeline_get_selection`, `oe_timeline_zoom_in/out` |
+| `src/ui/oe_timeline_layout.c` | GTK-free timeline math: zoom round-trips, lane mapping, edge-band hit-test, move/trim clamps, the pure snap decision (`OeSnapContext`: px-scaled threshold, edges/playhead/zero/frame-grid targets, nearest-wins earlier-tie-break) | `oe_timeline_x_for_us`, `oe_timeline_hit_test`, `oe_timeline_clamp_move_position`, `oe_timeline_trim_bounds`, `oe_timeline_snap_time` |
+| `src/ui/oe_timeline.c` | The timeline widget: observer snapshots, Cairo painting, one drag state machine → model mutators, snap-then-clamp drag previews, snapping session flag (`_set/get_snapping`) | `oe_timeline_new`, `oe_timeline_set_project`, `oe_timeline_get_selection`, `oe_timeline_set_snapping`, `oe_timeline_zoom_in/out` |
 | `src/ui/oe_shell_layout.c` | Layout struct, GKeyFile save/load | `oe_shell_layout_defaults`, `oe_shell_layout_save`, `oe_shell_layout_load` |
 | `src/ui/oe_theme.c` | Theme loading from GResource | `oe_theme_init` |
 | `tests/test_lifecycle.c` | Adapter + logging contracts | `/lifecycle/*`, `/log/*` |
@@ -117,6 +119,7 @@ premiere-pro-remake/
 | `tests/test_timeline_layout.c` | Pure timeline math: zoom, lanes, hit-test bands, drag clamps | `/timeline-layout/*` |
 | `tests/test_playback_clock.c` | Session clock on a virtual time source: mapping, deadlines, drift, seek, end-of-sequence | `/clock/*` |
 | `tests/test_undo_stack.c` | Per-op inverses, typed rejection at record/apply time, depth eviction, redo clearing, JSON round trips, auto-pause | `/undo/*` |
+| `tests/test_snap_ripple.c` | Pure snap decision (targets, band boundaries, tie-break, zoom scaling, disabled pass-through, snap-then-clamp) + composite ripple records (first/middle/last deletes, typed rejection, JSON round trips, depth, redo clearing, auto-pause) | `/snap-ripple/*` |
 | `tests/test_audio_output.c` | Adapter contract on SDL's dummy driver: init, open, queue depth, pause/resume | `/audio-output/*` |
 | `tests/fixture_media.c` | Runtime WAV/AVI/PNG/text fixture generator | `oe_fixture_media_create`, `oe_fixture_media_free` |
 
