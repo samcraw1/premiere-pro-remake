@@ -51,6 +51,80 @@ G_DEFINE_QUARK (oe - project - error, oe_project_error)
 /* Model value types: init / clear / copy (deep).                      */
 /* ------------------------------------------------------------------ */
 
+OeClipVisual
+oe_clip_visual_identity (void)
+{
+  OeClipVisual visual;
+
+  memset (&visual, 0, sizeof (visual));
+  visual.scale_permille = 1000;
+  visual.opacity = 255;
+  return visual;
+}
+
+void
+oe_clip_visual_clear (OeClipVisual *visual)
+{
+  g_return_if_fail (visual != NULL);
+
+  /* Wave A invariant: the keyframe store is always NULL — enforced in
+   * every construction, copy, and undo-record path so Wave B can add
+   * real ownership without auditing a second aliasing story. */
+  g_assert_null (visual->keyframes);
+  memset (visual, 0, sizeof (*visual));
+}
+
+void
+oe_clip_visual_copy (OeClipVisual *dst, const OeClipVisual *src)
+{
+  g_return_if_fail (dst != NULL);
+  g_return_if_fail (src != NULL);
+
+  g_assert_null (dst->keyframes);
+  g_assert_null (src->keyframes);
+  *dst = *src;
+}
+
+gboolean
+oe_clip_visual_equal (const OeClipVisual *a, const OeClipVisual *b)
+{
+  g_return_val_if_fail (a != NULL, FALSE);
+  g_return_val_if_fail (b != NULL, FALSE);
+  g_return_val_if_fail (a->keyframes == NULL && b->keyframes == NULL, FALSE);
+
+  return memcmp (a, b, sizeof (*a)) == 0;
+}
+
+gboolean
+oe_clip_visual_is_default (const OeClipVisual *visual)
+{
+  OeClipVisual identity;
+
+  g_return_val_if_fail (visual != NULL, FALSE);
+
+  identity = oe_clip_visual_identity ();
+  return oe_clip_visual_equal (visual, &identity);
+}
+
+gboolean
+oe_clip_visual_is_valid (const OeClipVisual *visual)
+{
+  g_return_val_if_fail (visual != NULL, FALSE);
+
+  if (visual->keyframes != NULL)
+    return FALSE;
+  if (visual->scale_permille < 1 || visual->scale_permille > 32000)
+    return FALSE;
+  if (visual->rotation_cdeg < -36000 || visual->rotation_cdeg > 36000)
+    return FALSE;
+  if (visual->crop_l > G_MAXINT || visual->crop_t > G_MAXINT || visual->crop_r > G_MAXINT
+      || visual->crop_b > G_MAXINT)
+    return FALSE;
+  if (visual->fade_in_us > (guint64) G_MAXINT64 || visual->fade_out_us > (guint64) G_MAXINT64)
+    return FALSE;
+  return TRUE; /* opacity: guint8 covers the full 0-255 domain */
+}
+
 static OeClip *
 clip_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint media_ref)
 {
@@ -60,13 +134,17 @@ clip_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint m
   clip->source_in_us = source_in_us;
   clip->source_out_us = source_out_us;
   clip->media_ref = media_ref;
+  clip->visual = oe_clip_visual_identity ();
   return clip;
 }
 
 static void
 clip_free (gpointer data)
 {
-  g_free (data);
+  OeClip *clip = data;
+
+  oe_clip_visual_clear (&clip->visual);
+  g_free (clip);
 }
 
 static gint
@@ -109,9 +187,13 @@ oe_track_copy (OeTrack *dst, const OeTrack *src)
   for (guint i = 0; i < src->clips->len; i++)
     {
       const OeClip *clip = g_ptr_array_index (src->clips, i);
+      OeClip *copy = clip_new (clip->position_us, clip->source_in_us, clip->source_out_us,
+                               clip->media_ref);
 
-      g_ptr_array_add (dst->clips, clip_new (clip->position_us, clip->source_in_us,
-                                             clip->source_out_us, clip->media_ref));
+      /* Deep-copy the owned visual too: track copies must never alias
+       * clip state (sequence snapshots hand these to the renderer). */
+      oe_clip_visual_copy (&copy->visual, &clip->visual);
+      g_ptr_array_add (dst->clips, copy);
     }
 }
 
@@ -409,6 +491,51 @@ oe_project_get_clip (OeProject *self, guint track_index, guint clip_index, OeCli
     return FALSE;
 
   *out = *(const OeClip *) g_ptr_array_index (track->clips, clip_index);
+  return TRUE;
+}
+
+gboolean
+oe_project_set_clip_visual (OeProject *self, guint track_index, guint clip_index,
+                            const OeClipVisual *visual, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (visual != NULL, FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip index %u out of range on track %u", clip_index, track_index);
+      return FALSE;
+    }
+
+  if (!oe_clip_visual_is_valid (visual))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_VISUAL,
+                   "clip visual out of domain (scale %u permille, rotation %d cdeg, "
+                   "opacity %u)",
+                   visual->scale_permille, visual->rotation_cdeg, visual->opacity);
+      return FALSE;
+    }
+
+  /* Validate first, deep-copy second, swap last: a rejected call never
+   * mutates the model. */
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+  OeClipVisual copy;
+
+  oe_clip_visual_copy (&copy, visual);
+  oe_clip_visual_clear (&clip->visual);
+  clip->visual = copy;
+
+  notify (self);
   return TRUE;
 }
 
