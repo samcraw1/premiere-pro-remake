@@ -31,8 +31,8 @@ static OeCommandEntry command_table[OE_CMD_COUNT] = {
   { OE_CMD_OPEN_PROJECT, "project.open", NULL, TRUE },
   { OE_CMD_SAVE_PROJECT, "project.save", NULL, TRUE },
   { OE_CMD_IMPORT_FROM_BIN, "media.insert-from-bin", "<Control>e", TRUE },
-  { OE_CMD_ZOOM_IN, "view.zoom-in", "<Control>=", TRUE },
-  { OE_CMD_ZOOM_OUT, "view.zoom-out", "<Control>-", TRUE },
+  { OE_CMD_ZOOM_IN, "view.zoom-in", "<Control>equal", TRUE },
+  { OE_CMD_ZOOM_OUT, "view.zoom-out", "<Control>minus", TRUE },
   { OE_CMD_SHOW_ABOUT, "help.about", NULL, TRUE },
 };
 
@@ -63,9 +63,38 @@ static const gchar *modifier_tokens[] = {
 /* Named key tokens GTK accepts as the key part. Names mirror gdk keyval
  * names; the validator accepts the ASCII spellings case-insensitively. */
 static const gchar *named_key_tokens[] = {
-  "space", "tab",  "return", "enter", "escape", "backspace", "delete", "insert", "home", "end",
-  "up",    "down", "left",   "right", "pageup", "pagedown",  "f1",     "f2",     "f3",   "f4",
-  "f5",    "f6",   "f7",     "f8",    "f9",     "f10",       "f11",    "f12",
+  "space",
+  "tab",
+  "return",
+  "enter",
+  "escape",
+  "backspace",
+  "delete",
+  "insert",
+  "home",
+  "end",
+  "up",
+  "down",
+  "left",
+  "right",
+  "pageup",
+  "pagedown",
+  "f1",
+  "f2",
+  "f3",
+  "f4",
+  "f5",
+  "f6",
+  "f7",
+  "f8",
+  "f9",
+  "f10",
+  "f11",
+  "f12",
+  /* Named punctuation keysyms GTK parses (Ctrl+= / Ctrl+- zoom). */
+  "equal",
+  "minus",
+  "plus",
 };
 
 static gboolean

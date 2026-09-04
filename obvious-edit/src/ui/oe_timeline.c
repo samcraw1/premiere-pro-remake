@@ -208,7 +208,10 @@ refresh_snapshot (OeTimeline *self)
 
   if (self->project != NULL)
     {
-      oe_sequence_init (&self->sequence);
+      /* get_sequence hands over whole-sequence storage; the struct is
+       * zeroed here by invalidate_snapshot (or GObject init), which is
+       * what its contract requires — pre-initializing would leak the
+       * init array on every observer fire. */
       oe_project_get_sequence (self->project, &self->sequence);
       self->sequence_valid = TRUE;
     }

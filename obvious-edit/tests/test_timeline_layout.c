@@ -97,9 +97,8 @@ static void
 test_hit_test (void)
 {
   OeProject *project = build_hit_fixture ();
-  OeSequence sequence;
+  OeSequence sequence = { 0 }; /* zeroed storage per get_sequence contract */
 
-  oe_sequence_init (&sequence);
   oe_project_get_sequence (project, &sequence);
 
   OeTimelineGeometry geometry = geometry_100px (1);
@@ -145,9 +144,8 @@ static void
 test_clamp_move (void)
 {
   OeProject *project = build_hit_fixture ();
-  OeSequence sequence;
+  OeSequence sequence = { 0 }; /* zeroed storage per get_sequence contract */
 
-  oe_sequence_init (&sequence);
   oe_project_get_sequence (project, &sequence);
 
   /* Move clip B [3 s, 4 s): wanted inside C (overlap) snaps to C's
@@ -171,9 +169,8 @@ static void
 test_trim_bounds (void)
 {
   OeProject *project = build_hit_fixture ();
-  OeSequence sequence;
+  OeSequence sequence = { 0 }; /* zeroed storage per get_sequence contract */
 
-  oe_sequence_init (&sequence);
   oe_project_get_sequence (project, &sequence);
 
   OeTrack *track = g_ptr_array_index (sequence.tracks, 0);

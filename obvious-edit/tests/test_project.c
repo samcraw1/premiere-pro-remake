@@ -404,6 +404,8 @@ test_media_refs (void)
   g_assert_false (oe_project_insert_clip (project, 0, 99, 0, 0, 1000, &error));
   g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_UNKNOWN_MEDIA);
   g_clear_error (&error);
+
+  g_clear_object (&project);
 }
 
 /* --- trims ------------------------------------------------------------------ */
