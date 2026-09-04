@@ -101,7 +101,7 @@ Three new seams extend the frame. All follow the same rule: GTK-free
 logic, unit-tested headlessly, with widgets as thin adapters.
 
 **Command routing (`src/app/oe_command.[ch]`).** A GTK-free registry of
-16 commands — stable `OeCommandId` enum plus permanent dotted names
+19 commands — stable `OeCommandId` enum plus permanent dotted names
 (`transport.play-pause`, `edit.undo`, …) and default accelerators
 (Space, J/K/L, I/O, V, C, Delete; Ctrl+Z / Ctrl+Shift+Z reserved for
 Undo/Redo). The application layer installs one `GSimpleAction` per
@@ -207,11 +207,62 @@ is view state only. Missing media is resolved through a window-supplied
 callback backed by the session library — hatched rendering, no
 probing during draws — and missing media refuses trims.
 
+## The playback clock (Phase 5)
+
+Playback introduces the strictest ownership rules yet and a second
+look at the editor's first clock discipline — integer microseconds:
+
+**The session owns time; GTK owns nothing.** `src/app/
+oe_playback_session.[ch]` is a GTK-free state machine over a project
+snapshot: stopped / paused / playing, a wall-clock-anchored position
+(integer µs), `tick()` returning the next frame deadline in monotonic
+µs, and pause/resume/seek re-anchoring — drift accounting resets at
+every transition. Every position a caller sees (observer callback,
+`get_position`) is computed from the anchor, never accumulated, so
+slow UI ticks cannot make the transport drift. End-of-sequence is
+computed from a fresh `oe_project_get_sequence()` deep copy: a trim
+that lands mid-playback changes when playback stops.
+
+**Mapping is pure.** `oe_playback_session_map()` answers "what plays
+here": topmost video track wins, spans are half-open, source µs is
+clamped into the clip's source range. The session uses it per tick;
+headless tests use it directly — the same function, no GTK.
+
+**Decode-ahead audio, frame-at-time video.** `src/media/
+oe_media_playback.[ch]` adds full-resolution decode: a worker thread
+(GThread + GAsyncQueue) decodes interleaved f32 chunks ahead of the
+transport and delivers them with `g_main_context_invoke` — the same
+main-context discipline as the import worker, drained and joined
+before `oe_ffmpeg_shutdown` — while video decodes frame-at-time to
+packed BGRA at monitor resolution, sized so Cairo's ARGB32 surface
+blits it without a per-frame channel swap. Requests carry a
+generation token; a seek supersedes the in-flight request instead of
+queueing behind it.
+
+**SDL3 push audio behind the adapter.** `oe_audio_output` grows the
+push-model device stream: open once on the default playback device,
+queue interleaved f32, report queue depth, flush (the seek discipline:
+flush the device, then re-anchor what plays next), pause/resume the
+device, close before shutdown. The adapter stays the only SDL surface
+the session sees, and the no-device path is a typed error — playback
+continues wall-clock only, with `is_dummy` telling the session
+whether queue depth is real.
+
+**The UI is a viewport, not a clock.** The window installs one
+GSource scheduled at the session's next deadline; `tick()` advances
+the clock and pushes the playhead into the timeline, while the
+program monitor (`oe_program_monitor`) blits the newest owned frame.
+The widget never owns or computes time; dragging the playhead feeds a
+seek back into the session through the timeline's playhead-changed
+callback. Missing media is reported once per run (event + status
+bar) and hatched in the monitor while the transport continues; an
+empty sequence reports "nothing to play"; reaching the end stops
+with the playhead parked on the final position.
+
 ## What comes later
 
-The playback clock with audio output wiring (Phase 5), undo/redo
-(after the playback clock), snapping, ripple edits, and export arrive
-in later phases; `src/core/` is the foundation they all build on, and
-the adapter seams in `src/media/` and `src/playback/` are where media
-and audio plug in. See `docs/learning/phase-0.md` through `phase-4.md`
+Undo/redo, snapping, ripple edits, and export arrive in later
+phases; `src/core/` is the foundation they all build on, and the
+adapter seams in `src/media/` and `src/playback/` are where media and
+audio plug in. See `docs/learning/phase-0.md` through `phase-5.md`
 for guided walkthroughs of each phase.
