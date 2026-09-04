@@ -103,8 +103,8 @@ serialize_project (OeProject *project)
 
   g_string_append (out, "{\n  \"" ROOT_KEY "\": {\n");
 
-  /* Version first, then name, frame-rate, media, tracks — the schema
-   * order. Integers only, rates as num/den pairs. */
+  /* Version first, then name, frame-rate, size, media, tracks — the
+   * schema order. Integers only, rates as num/den pairs. */
   g_string_append_printf (out, "    \"format-version\": %d,\n", OE_PROJECT_FORMAT_VERSION);
 
   g_string_append (out, "    \"name\": ");
@@ -116,6 +116,14 @@ serialize_project (OeProject *project)
   g_string_append (out, ", \"den\": ");
   append_int (out, seq.frame_rate.den);
   g_string_append (out, " },\n");
+
+  /* Sequence size (Phase 8): written always; readers backfill the
+   * defaults when a pre-Phase-8 file omits them. */
+  g_string_append (out, "    \"width\": ");
+  append_int (out, seq.width);
+  g_string_append (out, ",\n    \"height\": ");
+  append_int (out, seq.height);
+  g_string_append (out, ",\n");
 
   g_string_append (out, "    \"media\": [");
   for (guint i = 0; i < media_count; i++)
@@ -792,7 +800,7 @@ oe_project_format_load (const gchar *path, GError **error)
   doc = json_node_get_object (doc_node);
 
   static const gchar *const doc_members[]
-      = { "format-version", "name", "frame-rate", "media", "tracks" };
+      = { "format-version", "name", "frame-rate", "width", "height", "media", "tracks" };
 
   if (!check_members (doc, doc_members, G_N_ELEMENTS (doc_members), ROOT_KEY, error))
     goto out;
@@ -883,6 +891,46 @@ oe_project_format_load (const gchar *path, GError **error)
       goto out;
     }
 
+  /* Optional sequence size (Phase 8): written always since the fields
+   * exist, tolerated absent for files written before them — older
+   * documents backfill to the defaults. Present values must be
+   * positive even integers (yuv420p export compatibility). */
+  gint width = OE_SEQUENCE_DEFAULT_WIDTH;
+  gint height = OE_SEQUENCE_DEFAULT_HEIGHT;
+  JsonNode *size_node;
+
+  size_node = json_object_get_member (doc, "width");
+  if (size_node != NULL)
+    {
+      gint64 value = 0;
+
+      if (!node_get_int (size_node, ROOT_KEY, "width", &value, error))
+        goto out;
+      if (value <= 0 || value % 2 != 0 || value > G_MAXINT32)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "width: must be a positive even integer");
+          goto out;
+        }
+      width = (gint) value;
+    }
+
+  size_node = json_object_get_member (doc, "height");
+  if (size_node != NULL)
+    {
+      gint64 value = 0;
+
+      if (!node_get_int (size_node, ROOT_KEY, "height", &value, error))
+        goto out;
+      if (value <= 0 || value % 2 != 0 || value > G_MAXINT32)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "height: must be a positive even integer");
+          goto out;
+        }
+      height = (gint) value;
+    }
+
   if (!parse_media (media_node, media, error))
     goto out;
 
@@ -902,6 +950,18 @@ oe_project_format_load (const gchar *path, GError **error)
     }
 
   oe_project_set_name (project, name);
+
+  /* Pre-validated above; failure here is a defensive guard. */
+  GError *size_error = NULL;
+
+  if (!oe_project_set_sequence_size (project, width, height, &size_error))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE, "size: %s",
+                   size_error->message);
+      g_error_free (size_error);
+      g_clear_object (&project);
+      goto out;
+    }
 
   for (guint i = 0; i < media->len; i++)
     {

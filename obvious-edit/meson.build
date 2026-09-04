@@ -72,6 +72,8 @@ executable('obvious-edit',
     'src/media/oe_probe.c',
     'src/media/oe_media_jobs.c',
     'src/media/oe_media_playback.c',
+    'src/media/oe_render.c',
+    'src/media/oe_export.c',
     'src/playback/oe_audio_output.c',
     'src/ui/oe_main_window.c',
     'src/ui/oe_media_bin.c',
@@ -359,5 +361,30 @@ test_snap_ripple = executable('test_snap_ripple',
 )
 
 test('snap-ripple', test_snap_ripple,
+  timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
+  env: ['SDL_AUDIODRIVER=dummy'])
+
+# Export job: render-seam parity, container truth, content round-trip,
+# mixdown sums, cancellation, and the atomic-failure contract — GTK-free,
+# synthetic in-process fixtures only, structural assertions.
+test_export = executable('test_export',
+  [
+    'tests/test_export.c',
+    'tests/fixture_media.c',
+    'src/media/oe_render.c',
+    'src/media/oe_export.c',
+    'src/media/oe_probe.c',
+    'src/media/oe_media_playback.c',
+    'src/app/oe_playback_session.c',
+    'src/playback/oe_audio_output.c',
+    'src/core/oe_project.c',
+    'src/core/oe_time.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps,
+)
+
+test('export', test_export,
   timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
   env: ['SDL_AUDIODRIVER=dummy'])

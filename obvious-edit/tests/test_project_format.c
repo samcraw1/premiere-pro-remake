@@ -13,6 +13,9 @@
  *   /format/bad-values            out-of-domain values fail with VALUE.
  *   /format/atomic-failure        a failed save leaves any pre-existing
  *                                 file byte-identical and no residue.
+ *   /format/sequence-size         doc-level width/height written always;
+ *                                 absent fields backfill defaults, bad
+ *                                 values fail typed (additive v1).
  */
 
 #include <glib.h>
@@ -619,6 +622,132 @@ test_atomic_failure (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
   g_clear_object (&project);
 }
 
+/* --- sequence size -------------------------------------------------------------------- */
+
+static void
+test_sequence_size (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  /* The size is a model mutation; save emits it as doc-level v1 fields. */
+  OeProject *project = build_round_trip_project ();
+
+  g_assert_true (oe_project_set_sequence_size (project, 640, 480, NULL));
+
+  gchar *path = g_build_filename (fx->dir, "sized.oe", NULL);
+
+  g_assert_true (oe_project_format_save (project, path, &error));
+  g_assert_no_error (error);
+
+  gsize length = 0;
+  gchar *saved = read_all (path, &length);
+
+  g_assert_nonnull (strstr (saved, "\"width\": 640"));
+  g_assert_nonnull (strstr (saved, "\"height\": 480"));
+
+  OeProject *loaded = oe_project_format_load (path, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (loaded);
+
+  OeSequence sequence;
+
+  oe_project_get_sequence (loaded, &sequence);
+  g_assert_cmpint (sequence.width, ==, 640);
+  g_assert_cmpint (sequence.height, ==, 480);
+  oe_sequence_clear (&sequence);
+
+  g_free (saved);
+  g_free (path);
+  g_clear_object (&loaded);
+  g_clear_object (&project);
+}
+
+static void
+test_sequence_size_backfill (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  /* Files written before the size fields existed load with the
+   * documented defaults (additive v1, no version bump). */
+  gchar *path = write_doc (fx, MINIMAL_DOC);
+
+  OeProject *loaded = oe_project_format_load (path, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (loaded);
+
+  OeSequence sequence;
+
+  oe_project_get_sequence (loaded, &sequence);
+  g_assert_cmpint (sequence.width, ==, OE_SEQUENCE_DEFAULT_WIDTH);
+  g_assert_cmpint (sequence.height, ==, OE_SEQUENCE_DEFAULT_HEIGHT);
+  oe_sequence_clear (&sequence);
+
+  g_free (path);
+  g_clear_object (&loaded);
+}
+
+static void
+test_sequence_size_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  static const struct
+  {
+    const gchar *body;
+  } bad[] = {
+    { "\"width\": 641,\n    \"height\": 480," },  /* odd width  */
+    { "\"width\": 640,\n    \"height\": 481," },  /* odd height */
+    { "\"width\": 0,\n    \"height\": 480," },    /* zero       */
+    { "\"width\": -640,\n    \"height\": 480," }, /* negative   */
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (bad); i++)
+    {
+      gchar *body = g_strdup_printf ("{\n"
+                                     "  \"obvious-edit-project\": {\n"
+                                     "    \"format-version\": 1,\n"
+                                     "    \"name\": \"Doc\",\n"
+                                     "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                                     "    %s\n"
+                                     "    \"media\": [],\n"
+                                     "    \"tracks\": []\n"
+                                     "  }\n"
+                                     "}\n",
+                                     bad[i].body);
+      gchar *path = write_doc (fx, body);
+
+      OeProject *loaded = oe_project_format_load (path, &error);
+
+      g_assert_null (loaded);
+      g_assert_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE);
+      g_clear_error (&error);
+
+      g_free (body);
+      g_free (path);
+    }
+
+  /* A non-integer width is a type failure like any other. */
+  gchar *string_width = write_doc (fx, "{\n"
+                                       "  \"obvious-edit-project\": {\n"
+                                       "    \"format-version\": 1,\n"
+                                       "    \"name\": \"Doc\",\n"
+                                       "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                                       "    \"width\": \"wide\",\n"
+                                       "    \"media\": [],\n"
+                                       "    \"tracks\": []\n"
+                                       "  }\n"
+                                       "}\n");
+
+  OeProject *loaded = oe_project_format_load (string_width, &error);
+
+  g_assert_null (loaded);
+  g_assert_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE);
+  g_clear_error (&error);
+  g_free (string_width);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -636,6 +765,9 @@ main (int argc, char *argv[])
   ADD ("newer-version", test_newer_version);
   ADD ("bad-values", test_bad_values);
   ADD ("atomic-failure", test_atomic_failure);
+  ADD ("sequence-size", test_sequence_size);
+  ADD ("sequence-size-backfill", test_sequence_size_backfill);
+  ADD ("sequence-size-bad-values", test_sequence_size_bad_values);
 
 #undef ADD
 

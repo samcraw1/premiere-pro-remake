@@ -61,7 +61,7 @@ environment the verification gates were run against.
 All commands run from this directory (`obvious-edit/`):
 
     meson setup build && ninja -C build     # zero warnings, werror
-    meson test -C build                     # lifecycle smoke tests
+    meson test -C build                     # 16 test suites
     ./scripts/run-headless.sh               # headless self-check, exit 0
 
 The headless script opens the Obvious Edit window under Xvfb, quits after

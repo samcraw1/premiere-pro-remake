@@ -17,6 +17,8 @@ The document root has exactly one member. Its value is the project:
     "format-version": 1,
     "name": "My Edit",
     "frame-rate": { "num": 30000, "den": 1001 },
+    "width": 1920,
+    "height": 1080,
     "media": [
       { "ref": 1, "path": "/media/interview.mp4" },
       { "ref": 2, "path": "/media/theme.png" }
@@ -47,6 +49,8 @@ Member-by-member:
 | `format-version` | integer | first member; must be exactly `1` (see versions) |
 | `name` | string | project name, may be empty |
 | `frame-rate` | object | `num` and `den` integers, reduced, `den > 0`, `num > 0` |
+| `width` | integer | sequence width in pixels; positive and even. Always written; absent on read means 1920 (Phase 7-and-older files) |
+| `height` | integer | sequence height in pixels; positive and even. Always written; absent on read means 1080 (Phase 7-and-older files) |
 | `media` | array | `ref` (unique positive integer), `path` (string); document order is load order |
 | `tracks` | array | `kind` is `"video"` or `"audio"`; array order is compositing order for video, mixing order for audio |
 | `clips` | array | `media-ref` names a `media.ref`; positions integer microseconds; `source-out-us` must exceed `source-in-us`; clips are stored sorted by `position-us` |
@@ -55,6 +59,18 @@ A clip's timeline duration is always `source-out-us − source-in-us`,
 including still images: a still's "source range" encodes its screen
 duration (the model inserts stills at 5 s by default). Gaps are the
 absence of clips, never placeholder elements.
+
+`width` and `height` (Phase 8) are additive and backward-compatible:
+newer writers always emit them, current readers backfill 1920×1080
+when they are absent — a Phase 7 file (written before this field
+existed) loads unchanged. When present they follow
+the strict rules like any member (wrong JSON type is `TYPE`; zero,
+negative, or odd values are `VALUE`). The evenness rule exists because
+the export path emits yuv420p, whose chroma planes need even
+dimensions. No version bump: the additive fields cannot orphan an
+older file (it has none to reject) and a current reader never loses
+data it read (absence is normalized to defaults before the model is
+built).
 
 ## Strictness: no silent partial loads
 

@@ -122,6 +122,8 @@ oe_sequence_init (OeSequence *sequence)
 
   memset (sequence, 0, sizeof (*sequence));
   sequence->frame_rate = (OeRational) { 0, 0 };
+  sequence->width = OE_SEQUENCE_DEFAULT_WIDTH;
+  sequence->height = OE_SEQUENCE_DEFAULT_HEIGHT;
   sequence->tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) track_free);
 }
 
@@ -142,6 +144,8 @@ oe_sequence_copy (OeSequence *dst, const OeSequence *src)
 
   oe_sequence_clear (dst);
   dst->frame_rate = src->frame_rate;
+  dst->width = src->width;
+  dst->height = src->height;
   dst->tracks = g_ptr_array_new_full (src->tracks->len, (GDestroyNotify) track_free);
 
   for (guint i = 0; i < src->tracks->len; i++)
@@ -240,6 +244,8 @@ oe_project_init (OeProject *self)
 {
   self->name = g_strdup ("Untitled");
   self->sequence.frame_rate = (OeRational) { 0, 0 };
+  self->sequence.width = OE_SEQUENCE_DEFAULT_WIDTH;
+  self->sequence.height = OE_SEQUENCE_DEFAULT_HEIGHT;
   self->sequence.tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) track_free);
   self->media = g_ptr_array_new_with_free_func (media_ref_free);
   self->next_media_ref = 1;
@@ -336,6 +342,8 @@ oe_project_get_sequence (OeProject *self, OeSequence *out)
 
   oe_sequence_init (&copy);
   copy.frame_rate = self->sequence.frame_rate;
+  copy.width = self->sequence.width;
+  copy.height = self->sequence.height;
 
   for (guint i = 0; i < self->sequence.tracks->len; i++)
     {
@@ -346,6 +354,29 @@ oe_project_get_sequence (OeProject *self, OeSequence *out)
     }
 
   *out = copy;
+}
+
+gboolean
+oe_project_set_sequence_size (OeProject *self, gint width, gint height, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  /* Even dimensions are a model-level rule: the export path emits
+   * yuv420p, whose chroma planes need them. */
+  if (width <= 0 || height <= 0 || (width % 2) != 0 || (height % 2) != 0)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_SIZE,
+                   "sequence size must be positive and even (got %dx%d)", width, height);
+      return FALSE;
+    }
+
+  if (self->sequence.width == width && self->sequence.height == height)
+    return TRUE;
+
+  self->sequence.width = width;
+  self->sequence.height = height;
+  notify (self);
+  return TRUE;
 }
 
 guint
