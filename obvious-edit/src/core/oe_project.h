@@ -219,8 +219,7 @@ guint oe_project_get_clip_count (OeProject *project, guint track_index);
  *
  * Returns: TRUE when both indices are in range.
  */
-gboolean oe_project_get_clip (OeProject *project, guint track_index, guint clip_index,
-                              OeClip *out);
+gboolean oe_project_get_clip (OeProject *project, guint track_index, guint clip_index, OeClip *out);
 
 /**
  * oe_project_add_track:

@@ -150,10 +150,9 @@ record_insert (OeUndoStack *stack, OeProject *project, guint track_index, const 
           && clip.source_in_us == inserted->source_in_us
           && clip.source_out_us == inserted->source_out_us)
         {
-          OeUndoRecord *rec
-              = record_new (OE_UNDO_OP_INSERT, g_strdup_printf ("Insert clip %u on track %u", i,
-                                                                track_index),
-                            track_index, i);
+          OeUndoRecord *rec = record_new (
+              OE_UNDO_OP_INSERT, g_strdup_printf ("Insert clip %u on track %u", i, track_index),
+              track_index, i);
 
           rec->clip = *inserted;
           stack_push (stack, rec);
@@ -193,8 +192,8 @@ oe_edit_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index, 
   /* A successful remove implies these indices were in range, so the
      pre-read below succeeded too (same range checks); recording can
      trust @removed. */
-  const gboolean have_clip = stack != NULL && oe_project_get_clip (project, track_index,
-                                                                   clip_index, &removed);
+  const gboolean have_clip
+      = stack != NULL && oe_project_get_clip (project, track_index, clip_index, &removed);
 
   if (!oe_project_remove_clip (project, track_index, clip_index, error))
     return FALSE;
@@ -203,16 +202,17 @@ oe_edit_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index, 
     {
       if (!have_clip)
         {
-          oe_log (OE_LOG_LEVEL_WARNING, "undo: removed clip %u on track %u could not be captured; "
-                                        "edit not recorded",
+          oe_log (OE_LOG_LEVEL_WARNING,
+                  "undo: removed clip %u on track %u could not be captured; "
+                  "edit not recorded",
                   clip_index, track_index);
           return TRUE;
         }
 
-      OeUndoRecord *rec = record_new (OE_UNDO_OP_DELETE,
-                                      g_strdup_printf ("Delete clip %u on track %u", clip_index,
-                                                       track_index),
-                                      track_index, clip_index);
+      OeUndoRecord *rec
+          = record_new (OE_UNDO_OP_DELETE,
+                        g_strdup_printf ("Delete clip %u on track %u", clip_index, track_index),
+                        track_index, clip_index);
 
       rec->clip = removed;
       stack_push (stack, rec);
@@ -237,16 +237,16 @@ oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
     {
       if (!have_clip)
         {
-          oe_log (OE_LOG_LEVEL_WARNING, "undo: moved clip %u on track %u could not be captured; "
-                                        "edit not recorded",
+          oe_log (OE_LOG_LEVEL_WARNING,
+                  "undo: moved clip %u on track %u could not be captured; "
+                  "edit not recorded",
                   clip_index, track_index);
           return TRUE;
         }
 
-      OeUndoRecord *rec = record_new (OE_UNDO_OP_MOVE,
-                                      g_strdup_printf ("Move clip %u on track %u", clip_index,
-                                                       track_index),
-                                      track_index, clip_index);
+      OeUndoRecord *rec = record_new (
+          OE_UNDO_OP_MOVE, g_strdup_printf ("Move clip %u on track %u", clip_index, track_index),
+          track_index, clip_index);
 
       rec->clip = before;
       rec->old_a_us = before.position_us;
@@ -273,16 +273,16 @@ oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
     {
       if (!have_clip)
         {
-          oe_log (OE_LOG_LEVEL_WARNING, "undo: trimmed clip %u on track %u could not be captured; "
-                                        "edit not recorded",
+          oe_log (OE_LOG_LEVEL_WARNING,
+                  "undo: trimmed clip %u on track %u could not be captured; "
+                  "edit not recorded",
                   clip_index, track_index);
           return TRUE;
         }
 
-      OeUndoRecord *rec = record_new (OE_UNDO_OP_TRIM,
-                                      g_strdup_printf ("Trim clip %u on track %u", clip_index,
-                                                       track_index),
-                                      track_index, clip_index);
+      OeUndoRecord *rec = record_new (
+          OE_UNDO_OP_TRIM, g_strdup_printf ("Trim clip %u on track %u", clip_index, track_index),
+          track_index, clip_index);
 
       rec->clip = before;
       rec->old_a_us = before.source_in_us;
@@ -365,7 +365,8 @@ history_apply (OeUndoStack *self, OeProject *project, gboolean undo, const OeUnd
       return FALSE;
     }
 
-  const OeUndoRecord *rec = g_ptr_array_index (self->records, undo ? self->cursor - 1 : self->cursor);
+  const OeUndoRecord *rec
+      = g_ptr_array_index (self->records, undo ? self->cursor - 1 : self->cursor);
 
   if (!(undo ? apply_undo (project, rec, error) : apply_redo (project, rec, error)))
     return FALSE;
@@ -380,7 +381,8 @@ history_apply (OeUndoStack *self, OeProject *project, gboolean undo, const OeUnd
 }
 
 gboolean
-oe_undo_stack_undo (OeUndoStack *stack, OeProject *project, const OeUndoRecord **out, GError **error)
+oe_undo_stack_undo (OeUndoStack *stack, OeProject *project, const OeUndoRecord **out,
+                    GError **error)
 {
   g_return_val_if_fail (stack != NULL, FALSE);
   g_return_val_if_fail (OE_IS_PROJECT (project), FALSE);
@@ -389,7 +391,8 @@ oe_undo_stack_undo (OeUndoStack *stack, OeProject *project, const OeUndoRecord *
 }
 
 gboolean
-oe_undo_stack_redo (OeUndoStack *stack, OeProject *project, const OeUndoRecord **out, GError **error)
+oe_undo_stack_redo (OeUndoStack *stack, OeProject *project, const OeUndoRecord **out,
+                    GError **error)
 {
   g_return_val_if_fail (stack != NULL, FALSE);
   g_return_val_if_fail (OE_IS_PROJECT (project), FALSE);
@@ -409,16 +412,16 @@ pause_if_playing (OePlaybackSession *session)
 }
 
 gboolean
-oe_undo_stack_undo_with_session (OeUndoStack *stack, OeProject *project,
-                                 OePlaybackSession *session, const OeUndoRecord **out, GError **error)
+oe_undo_stack_undo_with_session (OeUndoStack *stack, OeProject *project, OePlaybackSession *session,
+                                 const OeUndoRecord **out, GError **error)
 {
   pause_if_playing (session);
   return oe_undo_stack_undo (stack, project, out, error);
 }
 
 gboolean
-oe_undo_stack_redo_with_session (OeUndoStack *stack, OeProject *project,
-                                 OePlaybackSession *session, const OeUndoRecord **out, GError **error)
+oe_undo_stack_redo_with_session (OeUndoStack *stack, OeProject *project, OePlaybackSession *session,
+                                 const OeUndoRecord **out, GError **error)
 {
   pause_if_playing (session);
   return oe_undo_stack_redo (stack, project, out, error);

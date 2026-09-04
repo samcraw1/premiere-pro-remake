@@ -632,8 +632,8 @@ test_undo_auto_pause (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
 
   const OeUndoRecord *record = NULL;
 
-  g_assert_true (oe_undo_stack_undo_with_session (fx->stack, fx->project, session, &record,
-                                                  &error));
+  g_assert_true (
+      oe_undo_stack_undo_with_session (fx->stack, fx->project, session, &record, &error));
   g_assert_no_error (error);
 
   g_assert_cmpint (oe_playback_session_get_state (session), !=, OE_PLAYBACK_PLAYING);
@@ -662,7 +662,7 @@ main (int argc, char *argv[])
       return 1;
     }
 
-#define ADD_UNDO_TEST(path, func) \
+#define ADD_UNDO_TEST(path, func)                                                                  \
   g_test_add ((path), UndoFixture, NULL, undo_fixture_setup, (func), undo_fixture_teardown)
 
   ADD_UNDO_TEST ("/undo/insert-inverse", test_undo_insert_inverse);
