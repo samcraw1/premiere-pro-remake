@@ -71,6 +71,7 @@ executable('obvious-edit',
     'src/playback/oe_audio_output.c',
     'src/ui/oe_main_window.c',
     'src/ui/oe_media_bin.c',
+    'src/ui/oe_timeline_layout.c',
     'src/ui/oe_shell_layout.c',
     'src/ui/oe_theme.c',
   ],
@@ -241,3 +242,20 @@ test_project_format = executable('test_project_format',
 )
 
 test('project-format', test_project_format)
+
+# Timeline geometry: pure math over project-model copies — GTK-free,
+# so the layout suite links the core model and the layout module only
+# (GLib/GObject; no math library needed, every conversion is
+# multiply/divide).
+test_timeline_layout = executable('test_timeline_layout',
+  [
+    'tests/test_timeline_layout.c',
+    'src/ui/oe_timeline_layout.c',
+    'src/core/oe_project.c',
+    'src/core/oe_time.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [glib_dep, gobject_dep],
+)
+
+test('timeline-layout', test_timeline_layout)
