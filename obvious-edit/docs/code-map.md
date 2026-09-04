@@ -1,4 +1,4 @@
-# Code map (Phases 1–4)
+# Code map (Phases 1–6)
 
 What lives where, and why it lives there.
 
@@ -56,6 +56,9 @@ premiere-pro-remake/
     │   ├── test_project.c         # model invariants, observer, media refs
     │   ├── test_project_format.c  # strict v1, round trip, atomic saves
     │   ├── test_timeline_layout.c # zoom conversions, hit-test, drag clamps
+    │   ├── test_playback_clock.c  # session clock on a virtual time source
+    │   ├── test_undo_stack.c      # undo/redo: inverses, rejection, depth
+    │   ├── test_audio_output.c    # SDL dummy-driver adapter contract
     │   ├── fixture_media.[ch]     # runtime media fixtures (WAV/AVI/PNG)
     │   └── valgrind.supp          # GLib/GObject-only suppressions
     └── docs/
@@ -68,7 +71,9 @@ premiere-pro-remake/
             ├── phase-1.md         # guided Phase 1 walkthrough
             ├── phase-2.md         # guided Phase 2 walkthrough
             ├── phase-3.md         # guided Phase 3 walkthrough
-            └── phase-4.md         # guided Phase 4 walkthrough
+            ├── phase-4.md         # guided Phase 4 walkthrough
+            ├── phase-5.md         # guided Phase 5 walkthrough
+            └── phase-6.md         # guided Phase 6 walkthrough
 ```
 
 ## File-by-file responsibilities
@@ -91,6 +96,7 @@ premiere-pro-remake/
 | `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit + the push-model device stream (queue, depth, flush, pause/resume) | `oe_audio_output_init`, `oe_audio_output_open_stream`, `oe_audio_output_queue`, `oe_audio_output_shutdown` |
 | `src/media/oe_media_playback.c` | Playback decode: audio decode-ahead worker (owned f32 chunks, main-context delivery) + frame-at-time BGRA video | `oe_media_playback_request_audio`, `oe_media_playback_video_open`, `oe_media_playback_video_get_frame` |
 | `src/app/oe_playback_session.c` | The GTK-free playback clock: stopped/paused/playing, wall-anchor, drift accounting, clip→source mapping, injectable time source (tests install a virtual clock), events | `oe_playback_session_play`, `oe_playback_session_tick`, `oe_playback_session_seek`, `oe_playback_session_set_time_source`, `oe_playback_session_map` |
+| `src/app/oe_undo_stack.c` | GTK-free command-object history: strict-LIFO records (depth 100, redo branch cleared on new edits), recorder helpers that mutate-then-record, undo/redo applied only through typed model mutators, changed-state seam, auto-pause entry point | `oe_undo_stack_undo`, `oe_undo_stack_redo`, `oe_edit_insert_clip`, `oe_undo_stack_set_changed_func` |
 | `src/ui/oe_program_monitor.c` | The program monitor: owned-frame Cairo blits, empty state, missing-media hatch | `oe_program_monitor_new`, `oe_program_monitor_show_frame`, `oe_program_monitor_set_empty_state` |
 | `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector | `oe_main_window_new` |
 | `src/ui/oe_media_bin.c` | The bin panel: row projection, badges, DnD, selection | `oe_media_bin_new`, `oe_media_bin_refresh` |
@@ -109,6 +115,9 @@ premiere-pro-remake/
 | `tests/test_project.c` | Ordering, overlap, observer, deep copies, media refs, trim validation | `/project/*` |
 | `tests/test_project_format.c` | Strict v1 parse, round trip, atomic failure | `/format/*` |
 | `tests/test_timeline_layout.c` | Pure timeline math: zoom, lanes, hit-test bands, drag clamps | `/timeline-layout/*` |
+| `tests/test_playback_clock.c` | Session clock on a virtual time source: mapping, deadlines, drift, seek, end-of-sequence | `/clock/*` |
+| `tests/test_undo_stack.c` | Per-op inverses, typed rejection at record/apply time, depth eviction, redo clearing, JSON round trips, auto-pause | `/undo/*` |
+| `tests/test_audio_output.c` | Adapter contract on SDL's dummy driver: init, open, queue depth, pause/resume | `/audio-output/*` |
 | `tests/fixture_media.c` | Runtime WAV/AVI/PNG/text fixture generator | `oe_fixture_media_create`, `oe_fixture_media_free` |
 
 ## Conventions

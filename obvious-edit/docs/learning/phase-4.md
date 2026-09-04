@@ -179,7 +179,8 @@ No model involvement anywhere in the path.
   with a serialized clip.
 - **Snapping during drags.** Deferred with the owning-phase comment —
   adding snap logic inside the clamp functions now would couple two
-  features that Phase 6 wants to evolve together.
+  features that the future snapping phase wants to evolve together
+  (Phase 6 delivers undo/redo, not snapping).
 - **Overlap leniency on trim.** The spec could be read to allow a trim
   that overlaps a neighbor; the overlap backstop stays because a legal
   model after every mutation is worth more than drag convenience.

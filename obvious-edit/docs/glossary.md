@@ -213,6 +213,43 @@ anchors on a fixed time point (the pointer for Ctrl+wheel, the widget
 center for the zoom commands) so the time under the anchor stays put
 on screen. Session-only: nothing in a project file records zoom.
 
+## History terms (Phase 6)
+
+**Command-object history (undo stack)** — every accepted edit becomes a
+record holding everything needed to apply its inverse: insert/delete
+carry a deep-copied [clip](#document-model-terms-phase-3), move/trim
+carry old and new µs bounds. The GTK-free stack in `oe_undo_stack`
+owns the records; the [project model](#document-model-terms-phase-3)
+owns validity.
+
+**Recorder helpers (`oe_edit_*`)** — the sole undoable path for model
+edits: each helper performs the `oe_project_*` mutator call and pushes
+a record only on success. A typed rejection (OVERLAP, BAD_RANGE,
+bad index) records nothing, so the stack only ever holds history that
+actually happened. Non-recording writers above the model are the
+documented reason undo application must survive rejection.
+
+**Strict LIFO** — undo and redo walk the records in exact reverse or
+forward order of application, one step at a time, with no branching:
+recording a new edit after an undo discards the redo branch
+(linear history, no trees).
+
+**Depth cap** — the history holds at most 100 records; recording past
+the cap drops the oldest. Eviction removes history only — model
+content created by an evicted record stays put.
+
+**Apply-time rejection** — an inverse that the model refuses when the
+stack applies it (for example after a direct, non-recording model
+poke). The typed error propagates and the stack position stays
+untouched, so the same step can be retried once the interference is
+cleared.
+
+**Auto-pause** — undo/redo while the session is
+[playing](#playback-terms-phase-5) pauses the transport first, then
+applies the inverse; the next play re-copies the mutated project, so
+playback never holds a stale snapshot. History never rewinds the
+playhead or crosses a project boundary (open/new clear the stack).
+
 ## Build terms
 
 **Meson / Ninja** — the build configuration system and the low-level
