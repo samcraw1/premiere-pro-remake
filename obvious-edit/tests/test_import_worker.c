@@ -47,11 +47,11 @@ result_copy (OeImportJobResult *dst, const OeImportJobResult *src)
   memset (&dst->info, 0, sizeof dst->info);
   oe_probe_info_copy (&dst->info, &src->info);
   if (src->thumbnail.rgba != NULL)
-    dst->thumbnail.rgba = g_memdup2 (src->thumbnail.rgba,
-                                     (gsize) src->thumbnail.width * src->thumbnail.height * 4);
+    dst->thumbnail.rgba
+        = g_memdup2 (src->thumbnail.rgba, (gsize) src->thumbnail.width * src->thumbnail.height * 4);
   if (src->waveform.peaks != NULL)
-    dst->waveform.peaks = g_memdup2 (src->waveform.peaks,
-                                     (gsize) src->waveform.bucket_count * 2 * sizeof (gfloat));
+    dst->waveform.peaks
+        = g_memdup2 (src->waveform.peaks, (gsize) src->waveform.bucket_count * 2 * sizeof (gfloat));
 }
 
 static void
@@ -281,8 +281,8 @@ main (int argc, char **argv)
               worker_fixture_teardown);
   g_test_add ("/worker/wav-completion", WorkerFixture, NULL, worker_fixture_setup,
               test_wav_completion, worker_fixture_teardown);
-  g_test_add ("/worker/missing-file", WorkerFixture, NULL, worker_fixture_setup,
-              test_missing_file, worker_fixture_teardown);
+  g_test_add ("/worker/missing-file", WorkerFixture, NULL, worker_fixture_setup, test_missing_file,
+              worker_fixture_teardown);
   g_test_add ("/worker/relink-flag", WorkerFixture, NULL, worker_fixture_setup, test_relink_flag,
               worker_fixture_teardown);
 

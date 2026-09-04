@@ -88,7 +88,6 @@ void oe_probe_info_clear (OeProbeInfo *info);
  */
 void oe_probe_info_copy (OeProbeInfo *dst, const OeProbeInfo *src);
 
-
 /**
  * OE_PROBE_ERROR: error domain for probing failures.
  */
