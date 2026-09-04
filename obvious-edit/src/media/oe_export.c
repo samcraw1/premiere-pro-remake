@@ -760,7 +760,6 @@ typedef struct
 {
   AVFormatContext *fmt;
   AVIOContext *avio;
-  guint8 *io_buffer;
   int fd;
   gchar *tmp_path;
   ExportEncoder video;
@@ -772,13 +771,15 @@ typedef struct
 static void
 export_job_teardown (ExportJob *job)
 {
+  /* The avio buffer stays caller-owned (see alloc site): capture the
+   * possibly-grown buffer, free the context, then free the buffer. */
   if (job->avio != NULL)
     {
-      av_freep (&job->avio->buffer);
-      avio_context_free (&job->avio);
-    }
+      uint8_t *avio_buf = job->avio->buffer;
 
-  g_clear_pointer (&job->io_buffer, av_free);
+      avio_context_free (&job->avio);
+      av_free (avio_buf);
+    }
 
   if (job->sws != NULL)
     sws_freeContext (job->sws);
@@ -864,11 +865,13 @@ oe_export_run (const OeExportSpec *spec, OeExportCancelFunc cancel_fn, gpointer 
       goto out;
     }
 
-  job.io_buffer = av_malloc (64 * 1024);
+  guint8 *avio_buf = av_malloc (64 * 1024);
 
-  g_assert_nonnull (job.io_buffer);
+  g_assert_nonnull (avio_buf);
 
-  job.avio = avio_alloc_context (job.io_buffer, 64 * 1024, 1, GINT_TO_POINTER (job.fd), NULL,
+  /* The buffer stays caller-owned for the whole run: every teardown
+   * path frees the context's current buffer after avio_context_free. */
+  job.avio = avio_alloc_context (avio_buf, 64 * 1024, 1, GINT_TO_POINTER (job.fd), NULL,
                                  avio_write_fn, avio_seek_fn);
 
   g_assert_nonnull (job.avio);
@@ -1050,10 +1053,11 @@ oe_export_run (const OeExportSpec *spec, OeExportCancelFunc cancel_fn, gpointer 
       }
 
     /* Release the fd and AVIO before the rename. */
-    av_freep (&job.avio->buffer);
+    uint8_t *avio_buf = job.avio->buffer;
+
     avio_context_free (&job.avio);
+    av_free (avio_buf);
     job.fmt->pb = NULL;
-    g_clear_pointer (&job.io_buffer, av_free);
     g_close (job.fd, NULL);
     job.fd = -1;
 

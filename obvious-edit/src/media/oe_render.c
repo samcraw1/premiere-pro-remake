@@ -348,6 +348,7 @@ ensure_source (OeRenderSession *session, guint media_ref, GError **error)
 
   vs = g_new0 (VideoSource, 1);
   vs->path = path;
+  vs->held = av_frame_alloc (); /* receive target for deliver()'s av_frame_ref */
 
   if (!decoder_open (path, &vs->dec, error))
     {
