@@ -141,6 +141,40 @@ append_clip_audio (GString *out, const OeClipAudio *a)
   g_string_append (out, "\n          }");
 }
 
+/* The generated-content payload (Phase 11 Wave A): written for every
+ * clip, the dormant identity included — re-saving an old file simply
+ * materializes the same defaults a load would backfill, keeping the
+ * format self-describing. */
+static void
+append_clip_generator (GString *out, const OeClip *clip)
+{
+  g_string_append (out, ",\n          \"generator\": {\n");
+  g_string_append (out, "            \"text\": ");
+  append_quoted (out, clip->generator.text != NULL ? clip->generator.text : "");
+  g_string_append (out, ",\n            \"color\": ");
+  append_int (out, clip->generator.color_rgb);
+  g_string_append (out, ",\n            \"size\": ");
+  append_int (out, clip->generator.size_permille);
+  g_string_append (out, "\n          }");
+}
+
+/* The per-clip chroma-key state (Phase 11 Wave A): written always,
+ * disabled by default — absence on read backfills the identity. */
+static void
+append_clip_key (GString *out, const OeClipKey *k)
+{
+  g_string_append (out, ",\n          \"key\": {\n");
+  g_string_append (out, "            \"color\": ");
+  append_int (out, k->color_rgb);
+  g_string_append (out, ",\n            \"tolerance\": ");
+  append_int (out, k->tolerance);
+  g_string_append (out, ",\n            \"softness\": ");
+  append_int (out, k->softness);
+  g_string_append (out, ",\n            \"enabled\": ");
+  append_int (out, k->enabled);
+  g_string_append (out, "\n          }");
+}
+
 /* The track-level audio member (Phase 10 Wave A): written for every
  * AUDIO track — unity volume, center pan, unmuted, unsoloed when the
  * track holds defaults — so a current writer's output is stable and
@@ -291,9 +325,14 @@ serialize_project (OeProject *project)
           append_int (out, clip->source_in_us);
           g_string_append (out, ",\n          \"source-out-us\": ");
           append_int (out, clip->source_out_us);
+          g_string_append (out, ",\n          \"kind\": \"");
+          g_string_append (out, oe_clip_kind_get_name (clip->kind));
+          g_string_append (out, "\"");
           append_clip_visual (out, &clip->visual);
           append_clip_keyframes (out, &clip->visual);
           append_clip_audio (out, &clip->audio);
+          append_clip_generator (out, clip);
+          append_clip_key (out, &clip->key);
           g_string_append (out, "\n        }");
         }
       if (track->clips->len > 0)
@@ -464,8 +503,11 @@ typedef struct
   gint64 source_in_us;
   gint64 source_out_us;
   guint media_ref;
-  OeClipVisual visual; /* identity when the file omitted the member */
-  OeClipAudio audio;   /* identity when the file omitted the member */
+  OeClipKind kind;           /* OE_CLIP_MEDIA when the file omitted the member */
+  OeClipGenerator generator; /* dormant identity when the file omitted the member */
+  OeClipKey key;             /* disabled identity when the file omitted the member */
+  OeClipVisual visual;       /* identity when the file omitted the member */
+  OeClipAudio audio;         /* identity when the file omitted the member */
 } ClipEntry;
 
 typedef struct
@@ -478,6 +520,7 @@ typedef struct
 
 static ClipEntry *
 clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint media_ref,
+                OeClipKind kind, const OeClipGenerator *generator, const OeClipKey *key,
                 const OeClipVisual *visual, const OeClipAudio *audio)
 {
   ClipEntry *clip = g_new0 (ClipEntry, 1);
@@ -486,6 +529,10 @@ clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, g
   clip->source_in_us = source_in_us;
   clip->source_out_us = source_out_us;
   clip->media_ref = media_ref;
+  clip->kind = kind;
+  if (generator != NULL)
+    oe_clip_generator_copy (&clip->generator, generator);
+  clip->key = key != NULL ? *key : oe_clip_key_identity ();
   if (visual != NULL)
     clip->visual = *visual; /* Wave A visuals own no memory: value copy is deep */
   else
@@ -501,6 +548,7 @@ clip_entry_free (gpointer data)
 {
   ClipEntry *clip = data;
 
+  oe_clip_generator_clear (&clip->generator);
   oe_clip_visual_clear (&clip->visual);
   g_free (clip);
 }
@@ -1058,15 +1106,169 @@ fail:
   return FALSE;
 }
 
+/* The optional clip "generator" member (Phase 11 Wave A): the
+ * generated-content payload of title and solid clips. Absent
+ * backfills the dormant identity (pre-Phase-11 file). Present means
+ * strict — closed member list, integer tokens, the kind-aware domain
+ * enforced by the model's own predicate — and a media clip carrying a
+ * non-identity payload is a VALUE error: a tolerated one would be
+ * silently dropped on re-save (the track-audio-on-video-track
+ * precedent). */
+static gboolean
+parse_clip_generator (JsonNode *node, const gchar *where, OeClipKind kind,
+                      OeClipGenerator *generator, GError **error)
+{
+  static const gchar *const members[] = { "text", "color", "size" };
+
+  JsonObject *obj = json_node_get_object (node);
+
+  if (!check_members (obj, members, G_N_ELEMENTS (members), where, error))
+    return FALSE;
+
+  *generator = oe_clip_generator_identity ();
+
+  /* Text first (the title domain predicate below needs it); every
+   * later failure jumps to fail:, which releases the owned string. */
+  JsonNode *text_node = json_object_get_member (obj, "text");
+
+  if (text_node != NULL)
+    {
+      const gchar *text = NULL;
+
+      if (!node_get_string (text_node, where, "text", &text, error))
+        return FALSE;
+
+      if (text[0] != '\0')
+        generator->text = g_strdup (text);
+    }
+
+  JsonNode *color_node = NULL;
+  JsonNode *size_node = NULL;
+  gint64 color = 0;
+  gint64 size = 0;
+
+  if (!require_node (obj, "color", JSON_NODE_VALUE, where, &color_node, error)
+      || !require_node (obj, "size", JSON_NODE_VALUE, where, &size_node, error)
+      || !node_get_int (color_node, where, "color", &color, error)
+      || !node_get_int (size_node, where, "size", &size, error))
+    goto fail;
+
+  if (color < 0 || color > OE_CLIP_COLOR_RGB_MAX || size < 0 || size > OE_CLIP_SIZE_PERMILLE_MAX)
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                   "%s: generator color %lld / size %lld out of range (0..%d / 0..%d)", where,
+                   (long long) color, (long long) size, OE_CLIP_COLOR_RGB_MAX,
+                   OE_CLIP_SIZE_PERMILLE_MAX);
+      goto fail;
+    }
+
+  generator->color_rgb = (gint) color;
+  generator->size_permille = (gint) size;
+
+  if (!oe_clip_generator_is_valid_for (kind, generator))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                   "%s: generator payload out of domain for %s clips", where,
+                   oe_clip_kind_get_name (kind));
+      goto fail;
+    }
+
+  if (kind == OE_CLIP_MEDIA)
+    {
+      OeClipGenerator identity = oe_clip_generator_identity ();
+
+      if (!oe_clip_generator_equal (generator, &identity))
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: media clips carry no generator state (a tolerated payload would be "
+                       "silently dropped on re-save)",
+                       where);
+          goto fail;
+        }
+    }
+
+  return TRUE;
+
+fail:
+  oe_clip_generator_clear (generator);
+  return FALSE;
+}
+
+/* The optional clip "key" member (Phase 11 Wave A): per-clip
+ * chroma-key state. Absent backfills the disabled identity
+ * (pre-Phase-11 file). Present means strict — closed member list,
+ * integer tokens, the documented domains via the model's own
+ * predicate — and a generated clip carrying a non-identity key is a
+ * VALUE error (D4: keying applies to media clips only). */
+static gboolean
+parse_clip_key (JsonNode *node, const gchar *where, OeClipKind kind, OeClipKey *key, GError **error)
+{
+  static const gchar *const members[] = { "color", "tolerance", "softness", "enabled" };
+
+  JsonObject *obj = json_node_get_object (node);
+
+  if (!check_members (obj, members, G_N_ELEMENTS (members), where, error))
+    return FALSE;
+
+  JsonNode *color_node = NULL;
+  JsonNode *tolerance_node = NULL;
+  JsonNode *softness_node = NULL;
+  JsonNode *enabled_node = NULL;
+  gint64 color = 0;
+  gint64 tolerance = 0;
+  gint64 softness = 0;
+  gint64 enabled = 0;
+
+  if (!require_node (obj, "color", JSON_NODE_VALUE, where, &color_node, error)
+      || !require_node (obj, "tolerance", JSON_NODE_VALUE, where, &tolerance_node, error)
+      || !require_node (obj, "softness", JSON_NODE_VALUE, where, &softness_node, error)
+      || !require_node (obj, "enabled", JSON_NODE_VALUE, where, &enabled_node, error)
+      || !node_get_int (color_node, where, "color", &color, error)
+      || !node_get_int (tolerance_node, where, "tolerance", &tolerance, error)
+      || !node_get_int (softness_node, where, "softness", &softness, error)
+      || !node_get_int (enabled_node, where, "enabled", &enabled, error))
+    return FALSE;
+
+  key->color_rgb = (gint) color;
+  key->tolerance = (gint) tolerance;
+  key->softness = (gint) softness;
+  key->enabled = (gint) enabled;
+
+  if (!oe_clip_key_is_valid (key))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                   "%s: key out of domain (color %lld, tolerance %lld, softness %lld, "
+                   "enabled %lld)",
+                   where, (long long) color, (long long) tolerance, (long long) softness,
+                   (long long) enabled);
+      return FALSE;
+    }
+
+  if (kind != OE_CLIP_MEDIA)
+    {
+      OeClipKey identity = oe_clip_key_identity ();
+
+      if (!oe_clip_key_equal (key, &identity))
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: keying applies to media clips only (D4); a tolerated key state on a "
+                       "%s clip would be silently dropped on re-save",
+                       where, oe_clip_kind_get_name (kind));
+          return FALSE;
+        }
+    }
+
+  return TRUE;
+}
+
 static gboolean
 parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEntry **out,
             GError **error)
 {
   static const gchar *const members[]
-      = { "media-ref", "position-us", "source-in-us", "source-out-us",
-          "visual",    "keyframes",   "audio" };
+      = { "media-ref", "position-us", "source-in-us", "source-out-us", "kind",
+          "visual",    "keyframes",   "audio",        "generator",     "key" };
 
-  JsonNode *media_ref_node = NULL;
   JsonNode *position_node = NULL;
   JsonNode *in_node = NULL;
   JsonNode *out_node = NULL;
@@ -1074,8 +1276,36 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
   if (!check_members (obj, members, G_N_ELEMENTS (members), where, error))
     return FALSE;
 
-  if (!require_node (obj, "media-ref", JSON_NODE_VALUE, where, &media_ref_node, error)
-      || !require_node (obj, "position-us", JSON_NODE_VALUE, where, &position_node, error)
+  /* The clip kind is optional (Phase 11 Wave A): absence is a
+   * pre-Phase-11 media clip. The closed spelling set matches the
+   * writer. */
+  OeClipKind kind = OE_CLIP_MEDIA;
+
+  JsonNode *kind_node = json_object_get_member (obj, "kind");
+
+  if (kind_node != NULL)
+    {
+      const gchar *kind_name = NULL;
+
+      if (!node_get_string (kind_node, where, "kind", &kind_name, error))
+        return FALSE;
+
+      if (g_strcmp0 (kind_name, "media") == 0)
+        kind = OE_CLIP_MEDIA;
+      else if (g_strcmp0 (kind_name, "title") == 0)
+        kind = OE_CLIP_TITLE;
+      else if (g_strcmp0 (kind_name, "solid") == 0)
+        kind = OE_CLIP_SOLID;
+      else
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: unknown kind \"%s\" (expected \"media\", \"title\", or \"solid\")",
+                       where, kind_name);
+          return FALSE;
+        }
+    }
+
+  if (!require_node (obj, "position-us", JSON_NODE_VALUE, where, &position_node, error)
       || !require_node (obj, "source-in-us", JSON_NODE_VALUE, where, &in_node, error)
       || !require_node (obj, "source-out-us", JSON_NODE_VALUE, where, &out_node, error))
     return FALSE;
@@ -1085,18 +1315,49 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
   gint64 source_in_us = 0;
   gint64 source_out_us = 0;
 
-  if (!node_get_int (media_ref_node, where, "media-ref", &media_ref, error)
-      || !node_get_int (position_node, where, "position-us", &position_us, error)
+  if (!node_get_int (position_node, where, "position-us", &position_us, error)
       || !node_get_int (in_node, where, "source-in-us", &source_in_us, error)
       || !node_get_int (out_node, where, "source-out-us", &source_out_us, error))
     return FALSE;
 
-  if (media_ref < 1 || media_ref > G_MAXUINT32)
+  /* The media reference is a media-clip member (D3): required for
+   * media clips, tolerated at its harmless zero for generated clips
+   * (the writer emits it for format uniformity) — a nonzero value
+   * would be silently dropped on re-save, so it is rejected. */
+  JsonNode *media_ref_node = json_object_get_member (obj, "media-ref");
+
+  if (kind == OE_CLIP_MEDIA)
     {
-      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
-                   "%s: media-ref %lld is out of range (must be 1..%u)", where,
-                   (long long) media_ref, G_MAXUINT32);
-      return FALSE;
+      if (media_ref_node == NULL)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_MISSING,
+                       "%s: missing required member \"media-ref\"", where);
+          return FALSE;
+        }
+
+      if (!node_get_int (media_ref_node, where, "media-ref", &media_ref, error))
+        return FALSE;
+
+      if (media_ref < 1 || media_ref > G_MAXUINT32)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: media-ref %lld is out of range (must be 1..%u)", where,
+                       (long long) media_ref, G_MAXUINT32);
+          return FALSE;
+        }
+    }
+  else if (media_ref_node != NULL)
+    {
+      if (!node_get_int (media_ref_node, where, "media-ref", &media_ref, error))
+        return FALSE;
+
+      if (media_ref != 0)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: generated clips carry no media reference (D3); got %lld", where,
+                       (long long) media_ref);
+          return FALSE;
+        }
     }
 
   if (position_us < 0)
@@ -1133,24 +1394,39 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
       return FALSE;
     }
 
-  gboolean ref_known = FALSE;
-
-  for (guint i = 0; i < media->len; i++)
-    {
-      const MediaEntry *entry = g_ptr_array_index (media, i);
-
-      if (entry->ref == (guint) media_ref)
-        {
-          ref_known = TRUE;
-          break;
-        }
-    }
-
-  if (!ref_known)
+  /* Generated clips encode their screen duration as the source range
+   * from zero (the still-image convention); a nonzero source-in is
+   * unrepresentable in the model and would be silently lost. */
+  if (kind != OE_CLIP_MEDIA && source_in_us != 0)
     {
       g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
-                   "%s: media-ref %u names no entry in \"media\"", where, (guint) media_ref);
+                   "%s: generated clips encode their duration as source range 0..source-out-us "
+                   "(D2); got source-in-us %lld",
+                   where, (long long) source_in_us);
       return FALSE;
+    }
+
+  if (kind == OE_CLIP_MEDIA)
+    {
+      gboolean ref_known = FALSE;
+
+      for (guint i = 0; i < media->len; i++)
+        {
+          const MediaEntry *entry = g_ptr_array_index (media, i);
+
+          if (entry->ref == (guint) media_ref)
+            {
+              ref_known = TRUE;
+              break;
+            }
+        }
+
+      if (!ref_known)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: media-ref %u names no entry in \"media\"", where, (guint) media_ref);
+          return FALSE;
+        }
     }
 
   OeClipVisual visual = oe_clip_visual_identity ();
@@ -1169,12 +1445,41 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
 
   JsonNode *audio_node = json_object_get_member (obj, "audio");
 
-  if (audio_node != NULL && !parse_clip_audio (audio_node, where, &audio, error))
-    return FALSE;
+  /* Declared before the fail-gotos below: a goto that skips the
+   * declaration would leave the struct uninitialized at fail:. */
+  OeClipGenerator generator = oe_clip_generator_identity ();
 
-  *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref, &visual,
-                         &audio);
+  if (audio_node != NULL && !parse_clip_audio (audio_node, where, &audio, error))
+    goto fail; /* the parsed keyframe store above still needs releasing */
+
+  JsonNode *generator_node = json_object_get_member (obj, "generator");
+
+  if (generator_node != NULL
+      && !parse_clip_generator (generator_node, where, kind, &generator, error))
+    goto fail; /* same — plus parse_clip_generator clears its own text */
+
+  OeClipKey key = oe_clip_key_identity ();
+
+  JsonNode *key_node = json_object_get_member (obj, "key");
+
+  if (key_node != NULL && !parse_clip_key (key_node, where, kind, &key, error))
+    goto fail;
+
+  *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref, kind,
+                         &generator, &key, &visual, &audio);
+  /* The entry deep-copied the generator text; the parse local's owned
+   * string ends here. The visual keyframes ALIASED into the entry —
+   * they must not be cleared. */
+  oe_clip_generator_clear (&generator);
   return TRUE;
+
+fail:
+  /* Ownership check: the keyframe store frees itself on its own
+   * failure paths, the generator text does not — and the audio/key
+   * locals are plain values. */
+  oe_clip_generator_clear (&generator);
+  oe_clip_visual_clear (&visual);
+  return FALSE;
 }
 
 /* The optional track "transitions" member (Phase 9 Wave B). Absent
@@ -1678,12 +1983,30 @@ oe_project_format_load (const gchar *path, GError **error)
           const ClipEntry *clip = g_ptr_array_index (track->clips, c);
           GError *insert_error = NULL;
 
-          if (!oe_project_insert_clip (project, track_index, clip->media_ref, clip->position_us,
-                                       clip->source_in_us, clip->source_out_us, &insert_error))
+          /* Media clips insert by source range; generated clips ride
+           * the still-image convention (their source range IS the
+           * screen duration, from zero) and carry the payload on the
+           * insert. Both route through the validated mutators. */
+          if (clip->kind == OE_CLIP_MEDIA)
             {
-              g_propagate_error (error, insert_error);
-              g_clear_object (&project);
-              goto out;
+              if (!oe_project_insert_clip (project, track_index, clip->media_ref, clip->position_us,
+                                           clip->source_in_us, clip->source_out_us, &insert_error))
+                {
+                  g_propagate_error (error, insert_error);
+                  g_clear_object (&project);
+                  goto out;
+                }
+            }
+          else
+            {
+              if (!oe_project_insert_generator_clip (
+                      project, track_index, clip->kind, clip->position_us,
+                      clip->source_out_us - clip->source_in_us, &clip->generator, &insert_error))
+                {
+                  g_propagate_error (error, insert_error);
+                  g_clear_object (&project);
+                  goto out;
+                }
             }
 
           /* Only non-default visuals touch the mutator: the insert
@@ -1713,6 +2036,23 @@ oe_project_format_load (const gchar *path, GError **error)
               if (!oe_project_set_clip_audio (project, track_index, c, &clip->audio, &audio_error))
                 {
                   g_propagate_error (error, audio_error);
+                  g_clear_object (&project);
+                  goto out;
+                }
+            }
+
+          /* Only enabled keys touch the mutator: set_clip_key rejects
+           * generator kinds outright (D4), so a generator entry never
+           * reaches here non-identity. */
+          OeClipKey key_identity = oe_clip_key_identity ();
+
+          if (!oe_clip_key_equal (&clip->key, &key_identity))
+            {
+              GError *key_error = NULL;
+
+              if (!oe_project_set_clip_key (project, track_index, c, &clip->key, &key_error))
+                {
+                  g_propagate_error (error, key_error);
                   g_clear_object (&project);
                   goto out;
                 }

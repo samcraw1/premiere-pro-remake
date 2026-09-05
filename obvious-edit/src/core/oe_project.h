@@ -109,6 +109,75 @@ typedef struct
 } OeClipAudio;
 
 /**
+ * OeClipKind: the closed set of clip content kinds (Phase 11 Wave A).
+ *
+ * @OE_CLIP_MEDIA: decoded media via @media_ref — the only kind before
+ *     Phase 11, and the identity backfill for pre-Phase-11 documents.
+ * @OE_CLIP_TITLE: a generated one-line text clip rasterized by the
+ *     media layer (Cairo toy API, pinned reference family).
+ * @OE_CLIP_SOLID: a generated opaque solid-color layer.
+ *
+ * The kind decides which sibling members are live: generators carry no
+ * media reference and no audio contribution, and keying applies to
+ * media clips only (spec D3/D4).
+ */
+typedef enum
+{
+  OE_CLIP_MEDIA = 0,
+  OE_CLIP_TITLE,
+  OE_CLIP_SOLID,
+} OeClipKind;
+
+/**
+ * OeClipGenerator: the generated-content payload of title and solid
+ * clips (Phase 11 Wave A).
+ *
+ * Integers only: @color_rgb is packed 0xRRGGBB (transparency lives in
+ * the visual's opacity domain, never here) and @size_permille is the
+ * title height as permille of frame height. One fixed style per title
+ * — pinned family, one size, one color (spec D1) — and titles anchor
+ * centered (spec D10), so there is no alignment field.
+ *
+ * @text is owned (g_strdup/g_free, valid UTF-8): titles require
+ * non-empty text, solids require absent text, and media clips keep
+ * the struct dormant at the identity. The init/clear/copy trio
+ * follows the OeClipVisual discipline exactly.
+ */
+typedef struct
+{
+  gchar *text;
+  gint color_rgb;
+  gint size_permille;
+} OeClipGenerator;
+
+/** Packing/domain limits for OeClipGenerator (Phase 11 Wave A). */
+#define OE_CLIP_COLOR_RGB_MAX 0xffffff /* packed 0xRRGGBB */
+#define OE_CLIP_SIZE_PERMILLE_MAX 1000 /* title height ≤ frame height */
+
+/**
+ * OeClipKey: per-clip RGB-distance chroma-key state (Phase 11 Wave
+ * A).
+ *
+ * Integers only: @color_rgb is packed 0xRRGGBB, @tolerance and
+ * @softness ride the 0-1024 fixed-point domain (the fade/gain idiom),
+ * and @enabled is 0 or 1. Keying rewrites ALPHA only — RGB channels
+ * are never touched and there is no spill suppression. Owning no
+ * memory, a struct copy IS the deep copy.
+ */
+typedef struct
+{
+  gint color_rgb;
+  gint tolerance;
+  gint softness;
+  gint enabled;
+} OeClipKey;
+
+/** OeClipKey domain: tolerance and softness ride the 0-1024 fixed-point
+ * fade/gain domain (converted once to the 0-255 alpha scale at render
+ * time). */
+#define OE_CLIP_KEY_DOMAIN_MAX 1024
+
+/**
  * OeClip: one non-destructive source-range placement on a track.
  * @position_us: sequence position (>= 0) of the clip's start.
  * @source_in_us: first source microsecond played (>= 0).
@@ -122,6 +191,14 @@ typedef struct
  *     deep-copied with the clip, never aliased.
  * @audio: per-clip gain/pan state (Phase 10 Wave A); memory-free, so
  *     every clip copy path carries it by value.
+ * @kind: the closed content kind (Phase 11 Wave A) — decides which
+ *     sibling members are live (media: @media_ref + audio; title and
+ *     solid: @generator; keying: media only, spec D4).
+ * @generator: owned generated-content payload for title/solid clips;
+ *     deep-copied with the clip (owned @text), dormant identity on
+ *     media clips.
+ * @key: chroma-key state (Phase 11 Wave A); memory-free, media clips
+ *     only — a generator clip never carries an enabled key (spec D4).
  */
 typedef struct
 {
@@ -129,9 +206,74 @@ typedef struct
   gint64 source_in_us;
   gint64 source_out_us;
   guint media_ref;
+  OeClipKind kind;
+  OeClipGenerator generator;
+  OeClipKey key;
   OeClipVisual visual;
   OeClipAudio audio;
 } OeClip;
+
+/**
+ * oe_clip_kind_get_name: the persistence spelling of @kind
+ * ("media" / "title" / "solid"), matching the track and transition
+ * string-enum patterns. "media" for out-of-range kinds.
+ */
+const gchar *oe_clip_kind_get_name (OeClipKind kind);
+
+/**
+ * oe_clip_generator_identity: the dormant zero state — no text, no
+ * color, no size. Every clip starts here and pre-Phase-11 documents
+ * backfill exactly this state (no version bump).
+ */
+OeClipGenerator oe_clip_generator_identity (void);
+
+/**
+ * oe_clip_generator_clear: frees the owned text and zeroes @generator
+ * (safe on a zeroed struct, like the model's other clear helpers).
+ */
+void oe_clip_generator_clear (OeClipGenerator *generator);
+
+/**
+ * oe_clip_generator_copy: deep-copies @src into @dst (owned text via
+ * g_strdup), freeing @dst's owned text first.
+ */
+void oe_clip_generator_copy (OeClipGenerator *dst, const OeClipGenerator *src);
+
+/**
+ * oe_clip_generator_equal: field equality, text compared by content
+ * (NULL and "" are equivalent — both mean no text).
+ */
+gboolean oe_clip_generator_equal (const OeClipGenerator *a, const OeClipGenerator *b);
+
+/**
+ * oe_clip_generator_is_valid_for: kind-aware domain check for the
+ * validated mutators and the persistence loader — color_rgb in
+ * 0..0xFFFFFF everywhere; titles need valid UTF-8 non-empty text and
+ * size_permille in 1..1000; solids need absent text (dormant size
+ * 0..1000); media keeps any structurally valid fields (dormant).
+ */
+gboolean oe_clip_generator_is_valid_for (OeClipKind kind, const OeClipGenerator *generator);
+
+/**
+ * oe_clip_key_identity: the disabled key — every clip starts here and
+ * pre-Phase-11 documents backfill exactly this state (no version
+ * bump).
+ */
+OeClipKey oe_clip_key_identity (void);
+
+/**
+ * oe_clip_key_is_valid: domain check for the validated mutator and
+ * the persistence loader — color_rgb in 0..0xFFFFFF, tolerance and
+ * softness in 0..1024, enabled 0..1. Out-of-domain state is
+ * rejected, never clamped.
+ */
+gboolean oe_clip_key_is_valid (const OeClipKey *key);
+
+/**
+ * oe_clip_key_equal: field equality (the undo recorder's zero-delta
+ * guard).
+ */
+gboolean oe_clip_key_equal (const OeClipKey *a, const OeClipKey *b);
 
 /**
  * oe_clip_visual_identity: the default state — zeroed position/crop,
@@ -379,6 +521,12 @@ GQuark oe_project_error_quark (void);
  *     of domain — gain/volume outside 0..2048, pan outside 0..1024,
  *     mute/solo outside 0..1 (see oe_clip_audio_is_valid and
  *     oe_track_audio_is_valid).
+ * @OE_PROJECT_ERROR_BAD_GENERATOR: a generated-clip payload or key
+ *     state is out of domain or used outside its kind scope — an
+ *     invalid text/color/size, a key field outside 0..1024, a
+ *     generator mutation on a media clip, or a key on a generated
+ *     clip (spec D4; see oe_clip_generator_is_valid_for and
+ *     oe_clip_key_is_valid).
  */
 typedef enum
 {
@@ -393,6 +541,7 @@ typedef enum
   OE_PROJECT_ERROR_BAD_KEYFRAME,
   OE_PROJECT_ERROR_BAD_TRANSITION,
   OE_PROJECT_ERROR_BAD_AUDIO,
+  OE_PROJECT_ERROR_BAD_GENERATOR,
 } OeProjectError;
 
 /**
@@ -525,6 +674,53 @@ gboolean oe_project_get_track_audio (OeProject *project, guint track_index, OeTr
  */
 gboolean oe_project_set_clip_audio (OeProject *project, guint track_index, guint clip_index,
                                     const OeClipAudio *audio, GError **error);
+
+/**
+ * oe_project_insert_generator_clip: inserts a generated clip — a
+ * title or solid on a video track (Phase 11 Wave A). The still-image
+ * source-range convention applies: source range 0..@duration_us is
+ * the clip's screen duration. Placement validation is shared with
+ * oe_project_insert_clip (overlap, range, track existence) with the
+ * kind-conditional rules: generators carry no media reference (spec
+ * D3) and never sit on audio tracks, and @kind must not be
+ * OE_CLIP_MEDIA.
+ *
+ * On success the observer fires exactly once; a rejected call
+ * touches nothing.
+ *
+ * Errors: OE_PROJECT_ERROR_BAD_GENERATOR for the media kind or an
+ *     invalid payload, BAD_RANGE for a non-positive duration,
+ *     BAD_TRACK for an audio track, OVERLAP for a covering clip.
+ */
+gboolean oe_project_insert_generator_clip (OeProject *project, guint track_index, OeClipKind kind,
+                                           gint64 position_us, gint64 duration_us,
+                                           const OeClipGenerator *generator, GError **error);
+
+/**
+ * oe_project_set_clip_generator: the validated mutator for a title or
+ * solid clip's generated payload (Phase 11 Wave A), mirroring
+ * oe_project_set_clip_visual/set_clip_audio: validates first, swaps
+ * in a deep copy (owned text included), notifies the observer exactly
+ * once; a rejected call touches nothing. Media clips are rejected
+ * with #OE_PROJECT_ERROR_BAD_GENERATOR — the payload is dormant
+ * there — and so are payloads invalid for the clip's kind.
+ */
+gboolean oe_project_set_clip_generator (OeProject *project, guint track_index, guint clip_index,
+                                        const OeClipGenerator *generator, GError **error);
+
+/**
+ * oe_project_set_clip_key: the validated mutator for a media clip's
+ * chroma-key state (Phase 11 Wave A). Keying is media-clips-only
+ * (spec D4): generated clips are rejected with
+ * #OE_PROJECT_ERROR_BAD_GENERATOR and clips on audio tracks with
+ * #OE_PROJECT_ERROR_BAD_TRACK, as is out-of-domain state (the key
+ * domain shares the BAD_GENERATOR code). On success swaps in the
+ * value (OeClipKey owns no memory — a struct copy is the deep copy)
+ * and notifies the observer exactly once; a rejected call touches
+ * nothing.
+ */
+gboolean oe_project_set_clip_key (OeProject *project, guint track_index, guint clip_index,
+                                  const OeClipKey *key, GError **error);
 
 /**
  * oe_project_set_track_audio: the validated mutator for a track's

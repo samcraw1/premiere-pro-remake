@@ -138,4 +138,14 @@ guint8 *oe_render_session_frame_at (OeRenderSession *session, gint64 t_us, int o
  */
 void oe_render_session_free (OeRenderSession *session);
 
+/**
+ * oe_render_chroma_key_alpha: (Phase 11 Wave A) the per-pixel rule
+ * behind source-space chroma keying — the alpha @key assigns to one
+ * pixel with RGB (@r, @g, @b). Tolerance and softness ride the
+ * 0-1024 fade/gain domain; the distance metric is Euclidean RGB in
+ * 255ths fixed point with exactly one rounding on the soft ramp.
+ * Pure and integer-exact; exported for the titles-key suite.
+ */
+guint8 oe_render_chroma_key_alpha (const OeClipKey *key, gint r, gint g, gint b);
+
 G_END_DECLS

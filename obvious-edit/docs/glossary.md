@@ -475,5 +475,38 @@ scale (`oe_fade_gain`), consumed by both the export mixdown and the
 playback chunk path so preview and export cannot drift. Contribution
 per sample: `(sample*g + 512) >> 10`, applied before the hard clamp.
 
+**Generator clip** — a clip whose pixels are produced by the editor
+rather than decoded from a file: a closed kind of `media`, `title`,
+or `solid`. It renders as an ordinary layer (crop, scale, rotate,
+opacity all apply), carries no audio, and keys over black inside a
+transition window.
+
+**Title** — a generator clip rasterizing owned UTF-8 text once per
+(text, size, color, identity) at sequence resolution with the Cairo
+toy API and the pinned 'DejaVu Sans' reference family, centered on
+the frame; its size is the title height as permille of frame height.
+
+**Solid** — a generator clip filling its layer with one packed
+`0xRRGGBB` color; the simplest possible layer and the reference
+case for generator compositing.
+
+**Chroma key** — the per-clip keying of a video-track media clip by
+color distance, computed in source space after crop and before
+scaling as an ALPHA-ONLY rewrite: pixels within tolerance of the
+key color go transparent, pixels beyond tolerance plus softness
+stay opaque, and the band between rounds once through the house
+ratio helper. RGB channels are never touched; no spill suppression.
+
+**RGB distance** — the integer color metric behind the chroma key:
+straight-line distance between two RGB triples on the 0–255
+per-channel scale, computed exactly in integers so the tolerance
+and softness domains (0–1024 on the doubled scale) are stable
+across preview and export.
+
+**Raster cache** — the render-session-owned store of generated
+buffers, keyed by clip identity plus generator and render
+dimensions, dropped on every sequence-snapshot refresh so an edited
+title repaints fresh on the paused monitor.
+
 **OE** — the project's module prefix (Obvious Edit) and its logging
 domain.

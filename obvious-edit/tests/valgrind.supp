@@ -4,9 +4,10 @@
 # stack lives inside GLib or GObject one-time initialization (the GType
 # registry, quark tables, slice allocator, default main context). It must
 # never grow entries for project code. Third-party entries are the
-# documented exception below: one scoped libasound record, for a leak
-# with no upstream free path. If a new leak class appears, fix or scope
-# it — do not widen this file.
+# documented exceptions below: one scoped libasound record and one
+# scoped libfontconfig record, each for a leak with no upstream free
+# path. If a new leak class appears, fix or scope it — do not widen
+# this file.
 #
 # Observed on GLib 2.84.4 / GObject 2.84.4 (Debian 13): ~43 KB of
 # "still reachable" blocks allocated by g_realloc inside GObject's static
@@ -65,4 +66,22 @@
    fun:snd_device_name_hint
    ...
    fun:oe_audio_output_init
+}
+
+# fontconfig's FcInitLoadConfigAndFonts() builds its configuration and
+# font-index caches in process-global state (parsing the system config
+# through expat) and exposes no release path; Cairo's toy font API —
+# used by the Phase 11 title rasterizer (oe_generator_raster,
+# D12/D13) to resolve the pinned 'DejaVu Sans' family — keeps the
+# resolved pattern alive for the process lifetime. One-time per
+# process, upstream-owned on both sides of the call, and the first
+# Cairo font use in the suite triggers it. Scoped to fontconfig's own
+# allocations — no project frame can ever match this pattern.
+{
+   libfontconfig-fcinit-config-caches-via-cairo-toy-font-face
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect
+   fun:*alloc
+   ...
+   obj:*/libfontconfig.so*
 }

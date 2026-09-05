@@ -27,9 +27,11 @@ The document root has exactly one member. Its value is the project:
       { "kind": "video", "clips": [
         {
           "media-ref": 1,
+          "media-ref": 1,
           "position-us": 0,
           "source-in-us": 0,
           "source-out-us": 5000000,
+          "kind": "media",
           "visual": {
             "pos-x": 24,
             "pos-y": 0,
@@ -51,6 +53,17 @@ The document root has exactly one member. Its value is the project:
           "audio": {
             "gain": 896,
             "pan": 384
+          },
+          "generator": {
+            "text": "",
+            "color": 0,
+            "size": 0
+          },
+          "key": {
+            "color": 0,
+            "tolerance": 0,
+            "softness": 0,
+            "enabled": 0
           }
         }
       ],
@@ -177,6 +190,37 @@ never floats or decibels. No version bump: a reader that predates
 `audio` never sees it, and a current reader normalizes absence to the
 identity before the model is built. Save-load-save is byte-identical
 because the writer's emission is canonical.
+
+Every clip carries a `kind` member plus `generator` and `key`
+members (Phase 11 Wave A), following the same recipe: every writer
+emits all three on every clip — the dormant identity included — and a
+reader backfills the identity when a member is absent. A pre-Phase-11
+file therefore loads unchanged: `kind` backfills `"media"`, the
+generator backfills the empty payload, and the key backfills disabled.
+The writer emits `kind` as a string enum (`"media"`, `"title"`,
+`"solid"`), matching the track and transition string-enum pattern.
+No version bump, and save-load-save stays byte-identical because the
+writer's emission is canonical.
+
+| `generator` member | Meaning | Identity |
+|---|---|---|
+| `text` | UTF-8 title text; `""` for solids (NULL in the model serializes as `""`) | `""` |
+| `color` | packed `0xRRGGBB` integer — ink color for titles, fill for solids | 0 |
+| `size` | title height as permille of frame height (500 = half the frame); 0 for solids | 0 |
+
+| `key` member | Meaning | Identity |
+|---|---|---|
+| `color` | packed `0xRRGGBB` key color | 0 |
+| `tolerance` | 0–1024 full-match domain on the integer RGB-distance scale (255 = the exact-match radius on unit RGB distance) | 0 |
+| `softness` | 0–1024 ramp width beyond tolerance; intermediate alphas round once through the house ratio helper | 0 |
+| `enabled` | 0 or 1; keying applies to video-track media clips only — a generated clip carrying a non-identity key is a `VALUE` error, as is non-identity generator state on a media clip (a tolerated payload would be silently dropped on re-save) | 0 (disabled) |
+
+The members are closed objects with integer tokens only (wrong JSON
+types are `TYPE`, out-of-range values `VALUE`, unknown or missing
+members `UNKNOWN_MEMBER` / `MISSING`). One strict-v1 trade: a reader
+from before Phase 11 rejects the new members as unknown — the same
+forward-compatibility posture every earlier additive wave took (newer
+readers read older files; older readers never guess).
 
 ## Strictness: no silent partial loads
 

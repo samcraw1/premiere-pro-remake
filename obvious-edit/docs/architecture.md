@@ -581,6 +581,63 @@ clock (its mixed chunks captured via the mix observer) and must
 match the export mixdown per channel. The test fails by construction
 on single-lane playback; its pass is the proof the mixer landed.
 
+## Generated clips and chroma key (Phase 11 Wave A)
+
+Every clip carries a closed `OeClipKind` — `OE_CLIP_MEDIA`,
+`OE_CLIP_TITLE`, `OE_CLIP_SOLID` — plus a payload and key state that
+ride the existing clip struct exactly like the visual and audio
+substructs: flat fields, no tagged unions, with an owned-text
+value trio (`g_strdup`/`g_free`) for `OeClipGenerator` and a
+memory-free one for `OeClipKey`. The model treats a generated clip
+as an ordinary layer with one twist: it has no source decoder.
+`oe_project_insert_generator_clip` reuses the still-image
+source-range-as-duration convention (default 5 s), and the
+validated mutators `oe_project_set_clip_generator` /
+`oe_project_set_clip_key` reject everything the model must never
+hold — a generated payload on a media clip, a non-identity key on a
+generated clip (keying is media-clips-on-video-tracks only),
+out-of-domain sizes, colors, and key ranges — with
+`OE_PROJECT_ERROR_BAD_GENERATOR` at the error enum tail. Rejected
+calls touch nothing; zero-delta calls touch nothing either.
+
+Titles rasterize ONCE per (clip identity, text, size, color) at
+sequence resolution into a straight-alpha BGRA buffer, never per
+frame and never per canvas size. The rasterizer (`src/media/
+oe_generator_raster.c`) uses the Cairo toy API with the pinned
+'DejaVu Sans' reference family (no vendored font binary — the
+string documents the font this build renders with; D12/D13), and
+the cache is owned by the render session, so every snapshot
+refresh — including the paused-repaint force-render after a text
+edit — drops it and the next frame shows fresh pixels. The monitor
+consumes the buffer scaled by the same integer nearest-neighbor
+layer scale as any media layer: generator layers are SCALED, never
+box-fitted, and they honor crop, scale, and rotation like every
+other layer. Solids fill directly at layer size.
+
+The chroma key is a source-space, post-crop, pre-scale,
+ALPHA-ONLY rewrite inside the layered compositor — RGB channels
+are never touched and there is no spill suppression. The metric is
+integer RGB distance; `dist <= tolerance` maps alpha to 0,
+`dist >= tolerance + softness` keeps 255, and the band between
+rounds ONCE through the house ratio helper. The key therefore
+composes with layer opacity for free through the existing blend.
+A keyed clip inside a transition window keys over black — the pair
+blend math is untouched (D8).
+
+The single-clip fast path now requires two more conjuncts: clip
+kind == media AND key disabled. Every pre-Phase-11 project
+satisfies both, so the path the straight-cut parity test pins is
+byte-identical; a keyed clip or a generator routes to the layered
+compositor and never reaches the media fast path's
+`ensure_source`.
+
+Persistence and undo follow the established recipes: `kind`,
+`generator`, and `key` are always-written closed-member JSON
+objects with identity backfills on absence (no version bump,
+byte-identical save-load-save), and `OE_UNDO_OP_GENERATOR` (owned
+text) and `OE_UNDO_OP_CLIP_KEY` (memory-free) replay only through
+the validated mutators.
+
 ## What comes later
 
 `src/core/` is the foundation later phases build on, and the
