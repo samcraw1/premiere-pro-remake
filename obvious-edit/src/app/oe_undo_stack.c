@@ -85,12 +85,22 @@ visual_value_store (OeClipVisual *dst, const OeClipVisual *src)
  * copy aliases the clip's keyframe store, which a following mutator
  * may free — replace the alias with a private deep copy. After this
  * call @clip owns its store; assigning it to a record moves that
- * ownership (the copy-out local is never cleared). */
+ * ownership. Callers that do NOT move @clip into a record must
+ * release it with clip_capture_clear — every editor path either
+ * records or clears, so a rejected or zero-delta edit leaks nothing. */
 static void
 clip_capture (OeClip *clip)
 {
   clip->visual.keyframes = oe_keyframes_copy_array (clip->visual.keyframes);
   clip->generator.text = g_strdup (clip->generator.text);
+}
+
+/* Release a captured value that never became a record baseline. */
+static void
+clip_capture_clear (OeClip *clip)
+{
+  g_clear_pointer (&clip->visual.keyframes, g_array_unref);
+  g_clear_pointer (&clip->generator.text, g_free);
 }
 
 /* Phase 11 Wave A stroke recorders, defined below their public entry
@@ -255,7 +265,7 @@ oe_edit_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index, 
   if (!oe_project_remove_clip (project, track_index, clip_index, error))
     {
       if (have_clip)
-        oe_clip_visual_clear (&removed.visual);
+        clip_capture_clear (&removed);
       return FALSE;
     }
 
@@ -318,7 +328,7 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
       g_clear_pointer (&shifts, g_array_unref);
       g_clear_pointer (&reanchors, g_array_unref);
       if (stack != NULL)
-        oe_clip_visual_clear (&removed.visual);
+        clip_capture_clear (&removed);
       return FALSE;
     }
 
@@ -437,7 +447,7 @@ oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
   if (!oe_project_move_clip (project, track_index, clip_index, position_us, error))
     {
       if (have_clip)
-        oe_clip_visual_clear (&before.visual);
+        clip_capture_clear (&before);
       return FALSE;
     }
 
@@ -482,7 +492,7 @@ oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
   if (!oe_project_trim_clip (project, track_index, clip_index, source_in_us, source_out_us, error))
     {
       if (have_clip)
-        oe_clip_visual_clear (&before.visual);
+        clip_capture_clear (&before);
       return FALSE;
     }
 
@@ -535,13 +545,13 @@ record_visual_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
 
   if (!oe_project_set_clip_visual (project, track_index, clip_index, new_visual, error))
     {
-      oe_clip_visual_clear (&before.visual);
+      clip_capture_clear (&before);
       return FALSE;
     }
 
   if (oe_clip_visual_equal (old_visual, new_visual))
     {
-      oe_clip_visual_clear (&before.visual);
+      clip_capture_clear (&before);
       return TRUE; /* zero-delta stroke: the model already holds the state */
     }
 
@@ -581,7 +591,7 @@ oe_edit_set_clip_visual (OeProject *project, OeUndoStack *stack, guint track_ind
   if (!oe_project_set_clip_visual (project, track_index, clip_index, visual, error))
     {
       if (stack != NULL)
-        oe_clip_visual_clear (&before.visual);
+        clip_capture_clear (&before);
       return FALSE;
     }
 
@@ -598,7 +608,7 @@ oe_edit_set_clip_visual (OeProject *project, OeUndoStack *stack, guint track_ind
     }
   else if (stack != NULL)
     {
-      oe_clip_visual_clear (&before.visual);
+      clip_capture_clear (&before);
     }
 
   return TRUE;
@@ -620,13 +630,13 @@ record_keyframe_stroke (OeProject *project, OeUndoStack *stack, guint track_inde
       /* The mutation landed; only the read-back failed — keep the
        * state, lose the history entry. */
       g_clear_error (error);
-      oe_clip_visual_clear (&before->visual);
+      clip_capture_clear (before);
       return TRUE;
     }
 
   if (oe_clip_visual_equal (&before->visual, &after.visual))
     {
-      oe_clip_visual_clear (&before->visual);
+      clip_capture_clear (before);
       /* `after` aliases the live store (borrowed getter result): never
        * unref it — the model still owns that array. */
       return TRUE; /* zero-delta stroke leaves no history entry */
@@ -666,7 +676,7 @@ oe_edit_set_clip_keyframe (OeProject *project, OeUndoStack *stack, guint track_i
                                      error))
     {
       if (stack != NULL)
-        oe_clip_visual_clear (&before.visual);
+        clip_capture_clear (&before);
       return FALSE;
     }
 
@@ -695,7 +705,7 @@ oe_edit_remove_clip_keyframe (OeProject *project, OeUndoStack *stack, guint trac
   if (!oe_project_remove_clip_keyframe (project, track_index, clip_index, property, time_us, error))
     {
       if (stack != NULL)
-        oe_clip_visual_clear (&before.visual);
+        clip_capture_clear (&before);
       return FALSE;
     }
 
@@ -740,10 +750,16 @@ record_clip_audio_stroke (OeProject *project, OeUndoStack *stack, guint track_in
   clip_capture (&before);
 
   if (!oe_project_set_clip_audio (project, track_index, clip_index, new_audio, error))
-    return FALSE;
+    {
+      clip_capture_clear (&before);
+      return FALSE;
+    }
 
   if (oe_clip_audio_equal (old_audio, new_audio))
-    return TRUE; /* zero-delta stroke: the model already holds the state */
+    {
+      clip_capture_clear (&before);
+      return TRUE; /* zero-delta stroke: the model already holds the state */
+    }
 
   OeUndoRecord *rec = record_new (
       OE_UNDO_OP_CLIP_AUDIO, g_strdup_printf ("Audio clip %u on track %u", clip_index, track_index),
@@ -809,7 +825,11 @@ oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint track_inde
     clip_capture (&before);
 
   if (!oe_project_set_clip_audio (project, track_index, clip_index, audio, error))
-    return FALSE;
+    {
+      if (stack != NULL)
+        clip_capture_clear (&before);
+      return FALSE;
+    }
 
   if (stack != NULL && !oe_clip_audio_equal (&before.audio, audio))
     {
@@ -821,6 +841,10 @@ oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint track_inde
       rec->clip = before; /* baseline audio moves with the record */
       rec->new_clip_audio = *audio;
       stack_push (stack, rec);
+    }
+  else if (stack != NULL)
+    {
+      clip_capture_clear (&before); /* zero-delta: no record took ownership */
     }
 
   return TRUE;
@@ -892,18 +916,26 @@ oe_edit_set_clip_generator (OeProject *project, OeUndoStack *stack, guint track_
     clip_capture (&before);
 
   if (!oe_project_set_clip_generator (project, track_index, clip_index, generator, error))
-    return FALSE;
+    {
+      if (stack != NULL)
+        clip_capture_clear (&before);
+      return FALSE;
+    }
 
   if (stack != NULL && !oe_clip_generator_equal (&before.generator, generator))
     {
-      OeUndoRecord *rec = record_new (OE_UNDO_OP_GENERATOR,
-                                      g_strdup_printf ("Title clip %u on track %u", clip_index,
-                                                       track_index),
-                                      track_index, clip_index);
+      OeUndoRecord *rec
+          = record_new (OE_UNDO_OP_GENERATOR,
+                        g_strdup_printf ("Title clip %u on track %u", clip_index, track_index),
+                        track_index, clip_index);
 
       rec->clip = before; /* baseline generator (owned text) moves with the record */
       oe_clip_generator_copy (&rec->new_generator, generator);
       stack_push (stack, rec);
+    }
+  else if (stack != NULL)
+    {
+      clip_capture_clear (&before); /* zero-delta: no record took ownership */
     }
 
   return TRUE;
@@ -935,18 +967,25 @@ oe_edit_set_clip_key (OeProject *project, OeUndoStack *stack, guint track_index,
     clip_capture (&before); /* aliases the keyframe store, like audio */
 
   if (!oe_project_set_clip_key (project, track_index, clip_index, key, error))
-    return FALSE;
+    {
+      if (stack != NULL)
+        clip_capture_clear (&before);
+      return FALSE;
+    }
 
   if (stack != NULL && !oe_clip_key_equal (&before.key, key))
     {
-      OeUndoRecord *rec = record_new (OE_UNDO_OP_CLIP_KEY,
-                                      g_strdup_printf ("Key clip %u on track %u", clip_index,
-                                                       track_index),
-                                      track_index, clip_index);
+      OeUndoRecord *rec = record_new (
+          OE_UNDO_OP_CLIP_KEY, g_strdup_printf ("Key clip %u on track %u", clip_index, track_index),
+          track_index, clip_index);
 
       rec->clip = before; /* baseline key moves with the record */
       rec->new_key = *key;
       stack_push (stack, rec);
+    }
+  else if (stack != NULL)
+    {
+      clip_capture_clear (&before); /* zero-delta: no record took ownership */
     }
 
   return TRUE;
@@ -984,15 +1023,20 @@ record_generator_stroke (OeProject *project, OeUndoStack *stack, guint track_ind
   clip_capture (&before);
 
   if (!oe_project_set_clip_generator (project, track_index, clip_index, new_generator, error))
-    return FALSE;
+    {
+      clip_capture_clear (&before);
+      return FALSE;
+    }
 
   if (oe_clip_generator_equal (old_generator, new_generator))
-    return TRUE; /* zero-delta stroke: the model already holds the state */
+    {
+      clip_capture_clear (&before);
+      return TRUE; /* zero-delta stroke: the model already holds the state */
+    }
 
-  OeUndoRecord *rec = record_new (OE_UNDO_OP_GENERATOR,
-                                  g_strdup_printf ("Title clip %u on track %u", clip_index,
-                                                   track_index),
-                                  track_index, clip_index);
+  OeUndoRecord *rec = record_new (
+      OE_UNDO_OP_GENERATOR, g_strdup_printf ("Title clip %u on track %u", clip_index, track_index),
+      track_index, clip_index);
 
   rec->clip = before;
   /* The undo payload is the STROKE baseline, not the project state at
@@ -1023,15 +1067,20 @@ record_key_stroke (OeProject *project, OeUndoStack *stack, guint track_index, gu
   clip_capture (&before);
 
   if (!oe_project_set_clip_key (project, track_index, clip_index, new_key, error))
-    return FALSE;
+    {
+      clip_capture_clear (&before);
+      return FALSE;
+    }
 
   if (oe_clip_key_equal (old_key, new_key))
-    return TRUE; /* zero-delta stroke: the model already holds the state */
+    {
+      clip_capture_clear (&before);
+      return TRUE; /* zero-delta stroke: the model already holds the state */
+    }
 
-  OeUndoRecord *rec = record_new (OE_UNDO_OP_CLIP_KEY,
-                                  g_strdup_printf ("Key clip %u on track %u", clip_index,
-                                                   track_index),
-                                  track_index, clip_index);
+  OeUndoRecord *rec = record_new (
+      OE_UNDO_OP_CLIP_KEY, g_strdup_printf ("Key clip %u on track %u", clip_index, track_index),
+      track_index, clip_index);
 
   rec->clip = before;
   rec->clip.key = *old_key;
@@ -1159,8 +1208,8 @@ apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
       return oe_project_set_clip_generator (project, rec->track_index, rec->clip_index,
                                             &rec->clip.generator, error);
     case OE_UNDO_OP_CLIP_KEY:
-      return oe_project_set_clip_key (project, rec->track_index, rec->clip_index,
-                                      &rec->clip.key, error);
+      return oe_project_set_clip_key (project, rec->track_index, rec->clip_index, &rec->clip.key,
+                                      error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_undo (project, rec, error);
     }
@@ -1197,8 +1246,8 @@ apply_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
       return oe_project_set_clip_generator (project, rec->track_index, rec->clip_index,
                                             &rec->new_generator, error);
     case OE_UNDO_OP_CLIP_KEY:
-      return oe_project_set_clip_key (project, rec->track_index, rec->clip_index,
-                                      &rec->new_key, error);
+      return oe_project_set_clip_key (project, rec->track_index, rec->clip_index, &rec->new_key,
+                                      error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_redo (project, rec, error);
     }
