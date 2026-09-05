@@ -3438,7 +3438,8 @@ build_menu_bar (void)
 
   menu_add_command (edit, "Undo", "edit.undo");
   menu_add_command (edit, "Redo", "edit.redo");
-  menu_add_command (edit, "Insert from Bin (Ctrl+E)", "media.insert-from-bin");
+  menu_add_command (edit, "Insert from Bin (" OE_COMMAND_PRIMARY_LABEL "+E)",
+                    "media.insert-from-bin");
   menu_add_command (edit, "Insert Title", "media.insert-title");
   menu_add_command (edit, "Insert Solid Color", "media.insert-solid");
   menu_add_command (edit, "Delete Selection", "selection.delete");
@@ -3451,8 +3452,8 @@ build_menu_bar (void)
    * Ctrl+wheel). */
   GMenu *view = g_menu_new ();
 
-  menu_add_command (view, "Zoom In (Ctrl+=)", "view.zoom-in");
-  menu_add_command (view, "Zoom Out (Ctrl+-)", "view.zoom-out");
+  menu_add_command (view, "Zoom In (" OE_COMMAND_PRIMARY_LABEL "+=)", "view.zoom-in");
+  menu_add_command (view, "Zoom Out (" OE_COMMAND_PRIMARY_LABEL "+-)", "view.zoom-out");
 
   GMenu *file = g_menu_new ();
 
@@ -3516,11 +3517,13 @@ build_toolbar (void)
   gtk_box_append (GTK_BOX (bar), toolbar_button ("New", "project.new", "New project"));
   gtk_box_append (GTK_BOX (bar), toolbar_button ("Open", "project.open", "Open project"));
   gtk_box_append (GTK_BOX (bar), toolbar_button ("Save", "project.save", "Save project"));
-  gtk_box_append (GTK_BOX (bar),
-                  toolbar_button ("Import…", "media.import", "Import media (Ctrl+I)"));
+  gtk_box_append (GTK_BOX (bar), toolbar_button ("Import…", "media.import",
+                                                 "Import media (" OE_COMMAND_PRIMARY_LABEL "+I)"));
   gtk_box_append (GTK_BOX (bar), toolbar_separator ());
-  gtk_box_append (GTK_BOX (bar), toolbar_button ("Undo", "edit.undo", "Undo (Ctrl+Z)"));
-  gtk_box_append (GTK_BOX (bar), toolbar_button ("Redo", "edit.redo", "Redo (Ctrl+Shift+Z)"));
+  gtk_box_append (GTK_BOX (bar),
+                  toolbar_button ("Undo", "edit.undo", "Undo (" OE_COMMAND_PRIMARY_LABEL "+Z)"));
+  gtk_box_append (GTK_BOX (bar), toolbar_button ("Redo", "edit.redo",
+                                                 "Redo (" OE_COMMAND_PRIMARY_LABEL "+Shift+Z)"));
   gtk_box_append (GTK_BOX (bar), toolbar_separator ());
   gtk_box_append (GTK_BOX (bar),
                   toolbar_button ("Play", "transport.play-pause", "Play / Pause (Space)"));
@@ -3818,7 +3821,6 @@ oe_main_window_constructed (GObject *object)
 
   self->mixer_page = mixer_page_new (self);
   gtk_stack_add_named (GTK_STACK (self->inspector_stack), self->mixer_page, "mixer");
-  mixer_page_refresh (self);
 
   self->timeline_paned = gtk_paned_new (GTK_ORIENTATION_VERTICAL);
   gtk_paned_set_shrink_start_child (GTK_PANED (self->timeline_paned), FALSE);
@@ -3835,6 +3837,7 @@ oe_main_window_constructed (GObject *object)
   oe_timeline_set_resolve_func (OE_TIMELINE (self->timeline), timeline_resolve_media, self);
   oe_timeline_set_report_func (OE_TIMELINE (self->timeline), timeline_report, self);
   oe_timeline_set_project (OE_TIMELINE (self->timeline), self->project);
+  mixer_page_refresh (self);
   g_signal_connect (self->timeline, "selection-changed", G_CALLBACK (on_timeline_selection_changed),
                     self);
   g_signal_connect (self->timeline, "project-changed", G_CALLBACK (on_timeline_project_changed),

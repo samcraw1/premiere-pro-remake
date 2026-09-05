@@ -90,7 +90,8 @@ oe_application_install_commands (OeApplication *self)
       if (table[i].accelerator != NULL)
         {
           g_autofree gchar *detailed = g_strdup_printf ("app.%s", table[i].name);
-          const gchar *accels[] = { table[i].accelerator, NULL };
+          g_autofree gchar *accelerator = oe_command_platform_accelerator (table[i].accelerator);
+          const gchar *accels[] = { accelerator, NULL };
 
           gtk_application_set_accels_for_action (GTK_APPLICATION (self), detailed, accels);
         }

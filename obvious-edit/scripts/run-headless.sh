@@ -1,10 +1,15 @@
 #!/bin/sh
 # Builds nothing; runs the already-built binary headless and exits 0 on success.
 #
-# The recipe (dbus-run-session + xvfb-run, GDK_BACKEND=x11, GSK_RENDERER=cairo)
-# is pinned because it was verified on Debian 13 without a GPU: the window
-# needs a session bus for GtkApplication and an X server for GtkWindow, and
-# the cairo renderer avoids GPU-dependent Vulkan/GL paths under Xvfb.
+# Linux: the recipe (dbus-run-session + xvfb-run, GDK_BACKEND=x11,
+# GSK_RENDERER=cairo) is pinned because it was verified on Debian 13 without
+# a GPU: the window needs a session bus for GtkApplication and an X server
+# for GtkWindow, and the cairo renderer avoids GPU-dependent Vulkan/GL paths
+# under Xvfb.
+#
+# macOS: there is no Xvfb and GtkApplication needs no session bus; the
+# window maps on the logged-in user's WindowServer via GTK's macos backend
+# and unwinds on first map exactly as on Linux.
 #
 # The build directory defaults to ./build; override with BUILD_DIR=<path>.
 set -eu
@@ -16,6 +21,10 @@ if [ ! -x "$BIN" ]; then
   echo "run-headless.sh: $BIN not found or not executable." >&2
   echo "Build first: meson setup build && ninja -C build" >&2
   exit 1
+fi
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  exec "$BIN" --self-check
 fi
 
 exec dbus-run-session -- xvfb-run -a -s "-screen 0 1280x800x24" \

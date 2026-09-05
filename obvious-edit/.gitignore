@@ -5,3 +5,6 @@ build-san/
 # Compiler/test debris
 *.o
 meson-logs/
+
+# macOS Finder metadata
+.DS_Store

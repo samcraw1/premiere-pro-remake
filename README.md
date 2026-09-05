@@ -1,5 +1,5 @@
 # premiere-pro-remake
 
-Home of **Obvious Edit** — a native GTK4 video editor for Linux.
+Home of **Obvious Edit** — a native GTK4 video editor for Linux and macOS.
 
 All code, docs, and build instructions live in [`obvious-edit/`](obvious-edit/README.md).

@@ -155,6 +155,37 @@ oe_command_accelerator_is_valid (const gchar *accelerator)
   return token_matches (p, strlen (p), named_key_tokens, G_N_ELEMENTS (named_key_tokens));
 }
 
+gchar *
+oe_command_platform_accelerator (const gchar *accelerator)
+{
+  if (accelerator == NULL)
+    return NULL;
+
+  GString *out = g_string_new (NULL);
+  const gchar *p = accelerator;
+
+  while (*p == '<')
+    {
+      const gchar *close = strchr (p + 1, '>');
+
+      if (close == NULL)
+        break;
+
+      gsize len = (gsize) (close - (p + 1));
+
+      if (len == strlen ("control") && g_ascii_strncasecmp (p + 1, "control", len) == 0)
+        g_string_append (out, OE_COMMAND_PRIMARY_MODIFIER);
+      else
+        g_string_append_len (out, p, (gssize) (close + 1 - p));
+
+      p = close + 1;
+    }
+
+  g_string_append (out, p);
+
+  return g_string_free (out, FALSE);
+}
+
 void
 oe_command_set_handler (OeCommandId id, OeCommandHandler handler)
 {

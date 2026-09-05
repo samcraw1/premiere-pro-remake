@@ -1,12 +1,43 @@
 # Obvious Edit
 
-A native GTK4 video editor for Linux, written in C17. Phase 0 is the
+A native GTK4 video editor for Linux and macOS, written in C17. Phase 0 is the
 scaffold and proof of life: build tooling, resource lifecycle adapters,
 structured logging, smoke tests, and a headless window verification.
 
 ## Requirements
 
-Debian 13 (trixie) with the following toolchain. The single install line:
+### macOS (Homebrew)
+
+Verified on macOS 26 (Apple Silicon) with Xcode command line tools and
+[Homebrew](https://brew.sh). The single install line:
+
+    brew install gtk4 glib json-glib ffmpeg sdl3 cairo pkg-config meson ninja clang-format
+
+Resolved versions at verification: gtk4 4.22.4, glib 2.88.3, json-glib
+1.10.8, ffmpeg 8.1.2 (libavformat 62 / libavcodec 62 / libavutil 60 /
+libavfilter 11 / libswscale 9 / libswresample 6), sdl3 3.4.12, cairo
+1.18.4, meson 1.12.0, ninja 1.13.2. Meson resolves everything through
+Homebrew's pkg-config; no `PKG_CONFIG_PATH` tweaks are needed.
+
+The source is platform-neutral (GLib/GTK4/FFmpeg/SDL3/Cairo only), so
+the build, test, and run commands below are identical on both platforms.
+Differences on macOS:
+
+- Keyboard chords use the Command key (Cmd+Z, Cmd+I, ...) instead of
+  Control; the command table stores `<Control>` and
+  `oe_command_platform_accelerator()` maps it at registration.
+- `./scripts/run-headless.sh` runs the self-check directly on the
+  logged-in display (no Xvfb or session bus exists on macOS).
+- Valgrind does not support Apple Silicon, so the memcheck gate below is
+  Linux-only. The ASan/UBSan gate works; LeakSanitizer is unavailable on
+  arm64 macOS, so `tests/lsan.supp` is inert there.
+- The layout file stays at `~/.config/obvious-edit/layout.conf` (XDG
+  convention, honoured on both platforms); the media cache lands in
+  `~/Library/Caches/obvious-edit` via `g_get_user_cache_dir()`.
+
+### Debian 13 (trixie)
+
+The single install line:
     sudo apt-get update
 
 

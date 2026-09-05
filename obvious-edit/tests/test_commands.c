@@ -247,6 +247,40 @@ test_accelerators (void)
   g_assert_false (oe_command_accelerator_is_valid (NULL));
 }
 
+/* The platform mapping rewrites <Control> to the host's primary modifier
+ * and nothing else; every table chord stays valid after mapping. */
+static void
+test_platform_accelerator (void)
+{
+  const OeCommandEntry *table = oe_command_table ();
+
+  for (int i = 0; i < OE_CMD_COUNT; i++)
+    {
+      g_autofree gchar *mapped = oe_command_platform_accelerator (table[i].accelerator);
+
+      if (table[i].accelerator == NULL)
+        g_assert_null (mapped);
+      else
+        g_assert_true (oe_command_accelerator_is_valid (mapped));
+    }
+
+  g_autofree gchar *undo = oe_command_platform_accelerator ("<Control>z");
+  g_autofree gchar *redo = oe_command_platform_accelerator ("<Control><Shift>z");
+  g_autofree gchar *plain = oe_command_platform_accelerator ("space");
+  g_autofree gchar *alt = oe_command_platform_accelerator ("<Alt>f4");
+
+  g_assert_cmpstr (undo, ==, OE_COMMAND_PRIMARY_MODIFIER "z");
+  g_assert_cmpstr (redo, ==, OE_COMMAND_PRIMARY_MODIFIER "<Shift>z");
+  g_assert_cmpstr (plain, ==, "space");
+  g_assert_cmpstr (alt, ==, "<Alt>f4");
+
+#ifdef __APPLE__
+  g_assert_cmpstr (undo, ==, "<Meta>z");
+#else
+  g_assert_cmpstr (undo, ==, "<Control>z");
+#endif
+}
+
 static void
 test_dispatch_not_implemented (void)
 {
@@ -317,6 +351,7 @@ main (int argc, char **argv)
 
   g_test_add_func ("/commands/table-integrity", test_table_integrity);
   g_test_add_func ("/commands/accelerators", test_accelerators);
+  g_test_add_func ("/commands/platform-accelerator", test_platform_accelerator);
   g_test_add_func ("/commands/dispatch", test_dispatch_not_implemented);
   g_test_add_func ("/commands/unknown-disabled", test_dispatch_unknown_and_disabled);
   g_test_add_func ("/commands/handler", test_dispatch_handler);

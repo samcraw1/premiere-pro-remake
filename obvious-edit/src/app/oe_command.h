@@ -147,6 +147,31 @@ const OeCommandEntry *oe_command_entry (OeCommandId id);
  */
 gboolean oe_command_accelerator_is_valid (const gchar *accelerator);
 
+/* The table stores Linux-convention <Control> chords; on macOS the same
+ * chords live on the Command key, which GTK spells <Meta>. The label is
+ * the human-readable spelling for menus and tooltips. */
+#ifdef __APPLE__
+#define OE_COMMAND_PRIMARY_MODIFIER "<Meta>"
+#define OE_COMMAND_PRIMARY_LABEL "Cmd"
+#else
+#define OE_COMMAND_PRIMARY_MODIFIER "<Control>"
+#define OE_COMMAND_PRIMARY_LABEL "Ctrl"
+#endif
+
+/**
+ * oe_command_platform_accelerator:
+ * @accelerator: accelerator string in GTK syntax from the command table
+ *
+ * Maps a table accelerator onto the host platform's primary modifier:
+ * every <Control> becomes #OE_COMMAND_PRIMARY_MODIFIER. Other modifiers
+ * and the key pass through untouched, so the result is valid whenever
+ * the input is.
+ *
+ * Returns: (transfer full): a newly allocated accelerator, or NULL when
+ * @accelerator is NULL.
+ */
+gchar *oe_command_platform_accelerator (const gchar *accelerator);
+
 /**
  * OeCommandHandler:
  * @id: the dispatched command
