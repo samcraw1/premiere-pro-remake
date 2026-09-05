@@ -1,3 +1,5 @@
+
+
 /* oe_main_window.c — the editor shell (Phases 1 + 2).
  *
  * Composition rules for this file:
@@ -39,6 +41,7 @@
 #include "../core/oe_time.h"
 #include "../media/oe_export.h"
 #include "oe_media_bin.h"
+#include "oe_meter.h"
 #include "oe_program_monitor.h"
 #include "oe_shell_layout.h"
 #include "oe_timeline.h"
@@ -56,8 +59,17 @@ enum
   CLIP_SPIN_CROP_T,
   CLIP_SPIN_CROP_R,
   CLIP_SPIN_CROP_B,
+  CLIP_SPIN_AUDIO_GAIN,
+  CLIP_SPIN_AUDIO_PAN,
   CLIP_SPIN_COUNT
 };
+
+/* The mixer page keeps its row widgets in fixed tables indexed by
+ * audio-track ordinal — the spin-table precedent of the clip page,
+ * sized for the editor's audio track counts (rows rebuild from the
+ * model on every refresh). */
+#define MIXER_MAX_ROWS 8
+#define MIXER_NO_TRACK G_MAXUINT
 
 /* Pending splitter positions from the loaded layout, applied on first map
  * (GtkPaned positions are only meaningful once the window is allocated). */
@@ -143,6 +155,25 @@ struct _OeMainWindow
   guint clip_track_index;
   guint clip_clip_index;
   OeClipVisual stroke_baseline;
+
+  /* Phase 10 Wave B: the clip page's audio section reuses the stroke
+   * contract (baseline at first change, preview through the validated
+   * mutator, ONE record at commit); the mixer page keeps per-row
+   * widgets rebuilt on refresh, one open stroke at a time. */
+  OeClipAudio stroke_audio_baseline;
+  gboolean audio_in_stroke;
+  GtkWidget *mixer_page; /* inspector stack child */
+  GtkWidget *mixer_rows; /* rebuilt per audio-track set */
+  guint mixer_loading;
+  GtkWidget *audio_meter;      /* program-panel peak meter strip */
+  guint mixer_in_stroke_track; /* MIXER_NO_TRACK = none */
+  OeTrackAudio mixer_baseline;
+  GtkWidget *mixer_volume[MIXER_MAX_ROWS];
+  GtkWidget *mixer_pan[MIXER_MAX_ROWS];
+  GtkWidget *mixer_mute[MIXER_MAX_ROWS];
+  GtkWidget *mixer_solo[MIXER_MAX_ROWS];
+  guint mixer_row_track[MIXER_MAX_ROWS]; /* model track index per row */
+  guint mixer_row_count;
   guint visual_in_stroke; /* 0 = idle; pairs preview with its record */
   guint visual_loading;   /* suppresses strokes while populating */
 
@@ -592,12 +623,388 @@ on_clip_spin_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
   clip_page_commit (OE_MAIN_WINDOW (user_data));
 }
 
+static void clip_audio_commit (OeMainWindow *self);
+
 static void
 on_clip_grid_released (GtkGestureClick *gesture G_GNUC_UNUSED, gint n_press G_GNUC_UNUSED,
                        gdouble x G_GNUC_UNUSED, gdouble y G_GNUC_UNUSED, gpointer user_data)
 {
   /* The pointer coming up ends the stroke: commit exactly one record. */
   clip_page_commit (OE_MAIN_WINDOW (user_data));
+  clip_audio_commit (OE_MAIN_WINDOW (user_data));
+}
+
+/* Phase 10 Wave B: the clip page's audio section reuses the stroke
+ * contract as the visual properties: baseline at the first change,
+ * preview through the validated mutator, ONE OE_UNDO_OP_CLIP_AUDIO
+ * record at commit, zero-delta records nothing. The collect keeps
+ * every other clip field untouched: the page does not own them. */
+static void
+clip_audio_collect (OeMainWindow *self, OeClipAudio *audio)
+{
+  audio->gain = (gint32) gtk_spin_button_get_value (
+      GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_AUDIO_GAIN]));
+  audio->pan
+      = (gint32) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_AUDIO_PAN]));
+}
+
+static void
+clip_audio_preview (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  OeClipAudio audio = clip.audio;
+
+  clip_audio_collect (self, &audio);
+
+  GError *error = NULL;
+
+  if (!oe_project_set_clip_audio (self->project, self->clip_track_index, self->clip_clip_index,
+                                  &audio, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Audio preview rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+}
+
+static void
+clip_audio_begin_stroke (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (self->audio_in_stroke || self->visual_loading != 0)
+    return;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  self->stroke_audio_baseline = clip.audio;
+  self->audio_in_stroke = TRUE;
+}
+
+static void
+clip_audio_commit (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (!self->audio_in_stroke)
+    return;
+
+  self->audio_in_stroke = FALSE;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  OeClipAudio audio = clip.audio;
+
+  clip_audio_collect (self, &audio);
+
+  GError *error = NULL;
+
+  if (!oe_edit_set_clip_audio_with_old (self->project, self->undo_stack, self->clip_track_index,
+                                        self->clip_clip_index, &self->stroke_audio_baseline, &audio,
+                                        &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Audio edit failed: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+}
+
+static void
+on_clip_audio_spin_value_changed (GtkSpinButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  clip_audio_begin_stroke (self);
+  clip_audio_preview (self);
+}
+
+static void
+on_clip_audio_spin_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
+{
+  /* Typed entry commits on activate with the same single record. */
+  clip_audio_commit (OE_MAIN_WINDOW (user_data));
+}
+
+/* Phase 10 Wave B: the mixer page — one row per AUDIO track, wired to
+ * the same stroke contract (preview without record, ONE undo record at
+ * commit, zero-delta records nothing) through the track-audio stroke
+ * wrapper. Rows are rebuilt from the model on every refresh so undo,
+ * redo, and project loads repaint the page; a row ordinal rides on
+ * each widget and maps into the fixed widget tables above. */
+static void
+mixer_collect_row (OeMainWindow *self, guint row, OeTrackAudio *audio)
+{
+  audio->volume = (gint32) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->mixer_volume[row]));
+  audio->pan = (gint32) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->mixer_pan[row]));
+  audio->mute = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (self->mixer_mute[row])) ? 1 : 0;
+  audio->solo = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (self->mixer_solo[row])) ? 1 : 0;
+}
+
+/* Preview half of the stroke contract: mutate without a history
+ * record so the metering and any later playback see the live value. */
+static void
+mixer_preview_row (OeMainWindow *self, guint row)
+{
+  const guint track = self->mixer_row_track[row];
+  OeTrackAudio audio;
+
+  mixer_collect_row (self, row, &audio);
+
+  GError *error = NULL;
+
+  if (!oe_project_set_track_audio (self->project, track, &audio, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Mixer preview rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+}
+
+static void
+mixer_begin_stroke (OeMainWindow *self, guint row)
+{
+  if (self->mixer_in_stroke_track != MIXER_NO_TRACK || self->mixer_loading != 0)
+    return;
+
+  const guint track = self->mixer_row_track[row];
+
+  if (!oe_project_get_track_audio (self->project, track, &self->mixer_baseline))
+    return;
+
+  self->mixer_in_stroke_track = track;
+}
+
+static void
+mixer_commit (OeMainWindow *self)
+{
+  if (self->mixer_in_stroke_track == MIXER_NO_TRACK)
+    return;
+
+  const guint track = self->mixer_in_stroke_track;
+  guint row = MIXER_MAX_ROWS;
+
+  for (guint i = 0; i < self->mixer_row_count; i++)
+    {
+      if (self->mixer_row_track[i] == track)
+        {
+          row = i;
+          break;
+        }
+    }
+
+  self->mixer_in_stroke_track = MIXER_NO_TRACK;
+
+  if (row == MIXER_MAX_ROWS)
+    return; /* the row died mid-stroke (refresh): the preview value stands */
+
+  OeTrackAudio audio;
+
+  mixer_collect_row (self, row, &audio);
+
+  GError *error = NULL;
+
+  if (!oe_edit_set_track_audio_with_old (self->project, self->undo_stack, track,
+                                         &self->mixer_baseline, &audio, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Mixer edit failed: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+}
+
+static void
+on_mixer_spin_value_changed (GtkSpinButton *button, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  const guint row = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "mixer-row"));
+
+  if (row >= self->mixer_row_count)
+    return;
+
+  mixer_begin_stroke (self, row);
+  mixer_preview_row (self, row);
+}
+
+static void
+on_mixer_spin_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
+{
+  /* Typed entry commits on activate with the same single record. */
+  mixer_commit (OE_MAIN_WINDOW (user_data));
+}
+
+static void
+on_mixer_grid_released (GtkGestureClick *gesture G_GNUC_UNUSED, gint n_press G_GNUC_UNUSED,
+                        gdouble x G_GNUC_UNUSED, gdouble y G_GNUC_UNUSED, gpointer user_data)
+{
+  /* The pointer coming up ends the stroke: commit exactly one record. */
+  mixer_commit (OE_MAIN_WINDOW (user_data));
+}
+
+/* Mute and solo are click actions, not drags: capture the baseline,
+ * preview the flipped state, and commit — one record per toggle. */
+static void
+on_mixer_mute_toggled (GtkToggleButton *button, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  const guint row = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "mixer-row"));
+
+  if (self->mixer_loading != 0 || row >= self->mixer_row_count)
+    return;
+
+  mixer_begin_stroke (self, row);
+  mixer_preview_row (self, row);
+  mixer_commit (self);
+}
+
+static void
+on_mixer_solo_toggled (GtkToggleButton *button, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  const guint row = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "mixer-row"));
+
+  if (self->mixer_loading != 0 || row >= self->mixer_row_count)
+    return;
+
+  mixer_begin_stroke (self, row);
+  mixer_preview_row (self, row);
+  mixer_commit (self);
+}
+
+/* Rebuilds the mixer rows from the current sequence: one row per audio
+ * track in track-array order (higher index mixes above), preloaded
+ * from the model with strokes suppressed. */
+static void
+mixer_page_refresh (OeMainWindow *self)
+{
+  if (self->mixer_rows == NULL)
+    return;
+
+  self->mixer_loading = 1;
+
+  while (gtk_widget_get_first_child (self->mixer_rows) != NULL)
+    gtk_box_remove (GTK_BOX (self->mixer_rows), gtk_widget_get_first_child (self->mixer_rows));
+
+  self->mixer_row_count = 0;
+
+  const OeSequence *sequence = oe_timeline_get_sequence (OE_TIMELINE (self->timeline));
+
+  if (sequence == NULL || sequence->tracks == NULL)
+    {
+      GtkWidget *empty = gtk_label_new ("No audio tracks in this sequence");
+
+      gtk_widget_add_css_class (empty, "empty-state");
+      gtk_box_append (GTK_BOX (self->mixer_rows), empty);
+      self->mixer_loading = 0;
+      return;
+    }
+
+  for (guint t = 0; t < sequence->tracks->len; t++)
+    {
+      const OeTrack *track = g_ptr_array_index (sequence->tracks, t);
+
+      if (track->kind != OE_TRACK_AUDIO)
+        continue;
+
+      if (self->mixer_row_count == MIXER_MAX_ROWS)
+        break; /* fixed table: see MIXER_MAX_ROWS above */
+
+      const guint row = self->mixer_row_count;
+      OeTrackAudio audio;
+
+      if (!oe_project_get_track_audio (self->project, t, &audio))
+        continue;
+
+      GtkWidget *row_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+      gchar *title = g_strdup_printf ("Track %u", t);
+      GtkWidget *label = gtk_label_new (title);
+
+      gtk_widget_set_halign (label, GTK_ALIGN_START);
+      gtk_widget_set_size_request (label, 72, -1);
+      gtk_box_append (GTK_BOX (row_box), label);
+      g_free (title);
+
+      GtkWidget *volume = gtk_spin_button_new_with_range (0, 2048, 1);
+
+      gtk_spin_button_set_value (GTK_SPIN_BUTTON (volume), audio.volume);
+      gtk_widget_set_tooltip_text (volume, "Track volume (1024 = unity)");
+      g_object_set_data (G_OBJECT (volume), "mixer-row", GUINT_TO_POINTER (row));
+      g_signal_connect (volume, "value-changed", G_CALLBACK (on_mixer_spin_value_changed), self);
+      g_signal_connect (volume, "activate", G_CALLBACK (on_mixer_spin_activate), self);
+      gtk_box_append (GTK_BOX (row_box), volume);
+
+      GtkWidget *pan = gtk_spin_button_new_with_range (0, 1024, 1);
+
+      gtk_spin_button_set_value (GTK_SPIN_BUTTON (pan), audio.pan);
+      gtk_widget_set_tooltip_text (pan, "Track pan (512 = center)");
+      g_object_set_data (G_OBJECT (pan), "mixer-row", GUINT_TO_POINTER (row));
+      g_signal_connect (pan, "value-changed", G_CALLBACK (on_mixer_spin_value_changed), self);
+      g_signal_connect (pan, "activate", G_CALLBACK (on_mixer_spin_activate), self);
+      gtk_box_append (GTK_BOX (row_box), pan);
+
+      GtkWidget *mute = gtk_toggle_button_new_with_label ("M");
+
+      gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (mute), audio.mute != 0);
+      gtk_widget_set_tooltip_text (mute, "Mute track");
+      g_object_set_data (G_OBJECT (mute), "mixer-row", GUINT_TO_POINTER (row));
+      g_signal_connect (mute, "toggled", G_CALLBACK (on_mixer_mute_toggled), self);
+      gtk_box_append (GTK_BOX (row_box), mute);
+
+      GtkWidget *solo = gtk_toggle_button_new_with_label ("S");
+
+      gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (solo), audio.solo != 0);
+      gtk_widget_set_tooltip_text (solo, "Solo track");
+      g_object_set_data (G_OBJECT (solo), "mixer-row", GUINT_TO_POINTER (row));
+      g_signal_connect (solo, "toggled", G_CALLBACK (on_mixer_solo_toggled), self);
+      gtk_box_append (GTK_BOX (row_box), solo);
+
+      self->mixer_volume[row] = volume;
+      self->mixer_pan[row] = pan;
+      self->mixer_mute[row] = mute;
+      self->mixer_solo[row] = solo;
+      self->mixer_row_track[row] = t;
+      self->mixer_row_count++;
+
+      gtk_box_append (GTK_BOX (self->mixer_rows), row_box);
+    }
+
+  self->mixer_loading = 0;
+}
+
+/* Builds the mixer page: a scrolled column of per-track rows, a grid
+ * gesture ending any open stroke on mouse release (the clip page's
+ * contract). */
+static GtkWidget *
+mixer_page_new (OeMainWindow *self)
+{
+  GtkWidget *scroller = gtk_scrolled_window_new ();
+
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller), GTK_POLICY_NEVER,
+                                  GTK_POLICY_AUTOMATIC);
+  gtk_widget_set_vexpand (scroller, TRUE);
+
+  self->mixer_rows = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_set_margin_top (self->mixer_rows, 8);
+  gtk_widget_set_margin_bottom (self->mixer_rows, 8);
+  gtk_widget_set_margin_start (self->mixer_rows, 10);
+  gtk_widget_set_margin_end (self->mixer_rows, 10);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), self->mixer_rows);
+
+  GtkGesture *click = gtk_gesture_click_new ();
+
+  g_signal_connect (click, "released", G_CALLBACK (on_mixer_grid_released), self);
+  gtk_widget_add_controller (scroller, GTK_EVENT_CONTROLLER (click));
+
+  return scroller;
 }
 
 /* Phase 9 Wave B: keyframe editing. The +/− buttons key the spin's
@@ -731,7 +1138,8 @@ inspector_clip_new (OeMainWindow *self)
     { "Scale (per mille)", 1, 10000, 10 },     { "Rotation (centideg)", -36000, 36000, 100 },
     { "Opacity (0-255)", 0, 255, 1 },          { "Crop left (px)", 0, 100000, 1 },
     { "Crop top (px)", 0, 100000, 1 },         { "Crop right (px)", 0, 100000, 1 },
-    { "Crop bottom (px)", 0, 100000, 1 },
+    { "Crop bottom (px)", 0, 100000, 1 },      { "Clip gain (per mille)", 0, 2048, 1 },
+    { "Clip pan (0-1024)", 0, 1024, 1 },
   };
 
   GtkWidget *scroller = gtk_scrolled_window_new ();
@@ -748,20 +1156,46 @@ inspector_clip_new (OeMainWindow *self)
   gtk_widget_set_margin_start (grid, 10);
   gtk_widget_set_margin_end (grid, 10);
 
+  int row = 0;
+
   for (int i = 0; i < CLIP_SPIN_COUNT; i++)
     {
+      if (i == CLIP_SPIN_AUDIO_GAIN)
+        {
+          /* Section header: the audio rows below own clip audio (Wave
+           * B); the visual rows above own the compositor properties. */
+          GtkWidget *header = inspector_key_label ("Clip audio");
+
+          gtk_widget_set_halign (header, GTK_ALIGN_START);
+          gtk_grid_attach (GTK_GRID (grid), header, 0, row, 3, 1);
+          row++;
+        }
+
       GtkWidget *label = inspector_key_label (spec[i].label);
 
       gtk_widget_set_halign (label, GTK_ALIGN_START);
-      gtk_grid_attach (GTK_GRID (grid), label, 0, i, 1, 1);
+      gtk_grid_attach (GTK_GRID (grid), label, 0, row, 1, 1);
 
       GtkWidget *spin = gtk_spin_button_new_with_range (spec[i].min, spec[i].max, spec[i].step);
 
       gtk_spin_button_set_digits (GTK_SPIN_BUTTON (spin), 0);
       gtk_widget_set_hexpand (spin, TRUE);
-      gtk_grid_attach (GTK_GRID (grid), spin, 1, i, 1, 1);
-      g_signal_connect (spin, "value-changed", G_CALLBACK (on_clip_spin_value_changed), self);
-      g_signal_connect (spin, "activate", G_CALLBACK (on_clip_spin_activate), self);
+      gtk_grid_attach (GTK_GRID (grid), spin, 1, row, 1, 1);
+
+      if (i == CLIP_SPIN_AUDIO_GAIN || i == CLIP_SPIN_AUDIO_PAN)
+        {
+          /* Audio rows ride the clip-page stroke contract through
+           * their own handlers. */
+          g_signal_connect (spin, "value-changed", G_CALLBACK (on_clip_audio_spin_value_changed),
+                            self);
+          g_signal_connect (spin, "activate", G_CALLBACK (on_clip_audio_spin_activate), self);
+        }
+      else
+        {
+          g_signal_connect (spin, "value-changed", G_CALLBACK (on_clip_spin_value_changed), self);
+          g_signal_connect (spin, "activate", G_CALLBACK (on_clip_spin_activate), self);
+        }
+
       self->clip_spin[i] = spin;
 
       if (spin_is_keyframeable (i))
@@ -780,8 +1214,10 @@ inspector_clip_new (OeMainWindow *self)
           g_signal_connect (rm_btn, "clicked", G_CALLBACK (on_key_remove_clicked), self);
           gtk_box_append (GTK_BOX (key_box), add_btn);
           gtk_box_append (GTK_BOX (key_box), rm_btn);
-          gtk_grid_attach (GTK_GRID (grid), key_box, 2, i, 1, 1);
+          gtk_grid_attach (GTK_GRID (grid), key_box, 2, row, 1, 1);
         }
+
+      row++;
     }
 
   /* One gesture on the grid: releasing the mouse anywhere in the
@@ -830,6 +1266,10 @@ show_clip_inspector (OeMainWindow *self, guint track_index, guint clip_index)
                              (gdouble) clip.visual.crop_r);
   gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_B]),
                              (gdouble) clip.visual.crop_b);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_AUDIO_GAIN]),
+                             (gdouble) clip.audio.gain);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_AUDIO_PAN]),
+                             (gdouble) clip.audio.pan);
 
   self->visual_loading = 0;
   gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "clip");
@@ -854,6 +1294,8 @@ on_timeline_project_changed (OeTimeline *timeline G_GNUC_UNUSED, gpointer user_d
    * itself right after. */
   OeMainWindow *self = OE_MAIN_WINDOW (user_data);
 
+  mixer_page_refresh (self); /* track sets and audio state stay current */
+
   if (self->playback != NULL)
     oe_playback_session_repaint_paused (self->playback);
 }
@@ -868,6 +1310,8 @@ populate_inspector (OeMainWindow *self)
 
   if (self->visual_in_stroke != 0)
     clip_page_commit (self); /* reselecting mid-stroke ends the stroke */
+  if (self->audio_in_stroke)
+    clip_audio_commit (self); /* the audio section ends its stroke too */
 
   if (oe_timeline_get_selection (OE_TIMELINE (self->timeline), &track_index, &clip_index))
     {
@@ -1146,6 +1590,29 @@ on_playback_event (const OePlaybackSession *session G_GNUC_UNUSED, OePlaybackEve
     }
 }
 
+/* Metering tap (D6): the session delivers per-chunk per-channel peaks
+ * on the main context; the widget applies the decay rule and repaints.
+ * No locks, no worker access, no timers. */
+static void
+on_playback_meter (OePlaybackSession *session G_GNUC_UNUSED, const gfloat *peaks, int n_channels,
+                   gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  if (self->audio_meter != NULL)
+    oe_meter_set_peaks (OE_METER (self->audio_meter), peaks, n_channels);
+}
+
+/* Pause/scrub settle: chunks stop flowing, so the meter must not
+ * freeze mid-scale — a release write settles it at silence (D6, no
+ * paused tap). */
+static void
+meter_release (OeMainWindow *self)
+{
+  if (self->audio_meter != NULL)
+    oe_meter_release (OE_METER (self->audio_meter));
+}
+
 /* UI → session: hand moves of the playhead seek the clock. Seeks during
  * playback reset the clock, flush the decoders, and clear the audio
  * queue inside the session. */
@@ -1155,6 +1622,7 @@ on_timeline_playhead (gint64 playhead_us, gpointer user_data)
   OeMainWindow *self = OE_MAIN_WINDOW (user_data);
 
   oe_playback_session_seek (self->playback, playhead_us);
+  meter_release (self);
 }
 
 /* Creates or re-creates the session against @project. The session
@@ -1170,6 +1638,8 @@ playback_attach (OeMainWindow *self, OeProject *project)
   oe_playback_session_set_observer (self->playback, on_playback_notify, self);
   oe_playback_session_set_frame_func (self->playback, on_playback_frame, self);
   oe_playback_session_set_event_func (self->playback, on_playback_event, self);
+  oe_playback_session_set_meter_func (self->playback, on_playback_meter, self);
+  meter_release (self);
   oe_program_monitor_clear (OE_PROGRAM_MONITOR (self->program_monitor));
 }
 
@@ -1188,6 +1658,7 @@ transport_play_pause_command_handler (OeCommandId id G_GNUC_UNUSED,
     {
       oe_playback_session_pause (self->playback);
       cancel_tick (self);
+      meter_release (self); /* chunks stop: settle the meter at silence */
       return;
     }
 
@@ -1221,6 +1692,7 @@ transport_stop_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data
 
   oe_playback_session_stop (self->playback);
   cancel_tick (self);
+  meter_release (self);
   set_status_message (self, "Stopped");
 }
 
@@ -1640,14 +2112,17 @@ edit_undo_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GN
       return;
     }
 
-  /* A visual undo leaves the clip alive — keep the selection and
-     refresh the page from the model; any other record may have removed
-     the selected clip (or re-created it elsewhere), so drop the
-     selection rather than keep a stale index. */
-  if (record->kind == OE_UNDO_OP_VISUAL)
+  /* A visual or clip-audio undo leaves the clip alive — keep the
+     selection and refresh the page from the model; any other record
+     may have removed the selected clip (or re-created it elsewhere),
+     so drop the selection rather than keep a stale index. Track-audio
+     records repaint the mixer rows from the model either way. */
+  if (record->kind == OE_UNDO_OP_VISUAL || record->kind == OE_UNDO_OP_CLIP_AUDIO)
     populate_inspector (self);
   else
     oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
+
+  mixer_page_refresh (self);
 
   g_autofree gchar *msg = g_strdup_printf ("Undo: %s", record->label);
 
@@ -1674,10 +2149,12 @@ edit_redo_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GN
       return;
     }
 
-  if (record->kind == OE_UNDO_OP_VISUAL)
+  if (record->kind == OE_UNDO_OP_VISUAL || record->kind == OE_UNDO_OP_CLIP_AUDIO)
     populate_inspector (self);
   else
     oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
+
+  mixer_page_refresh (self);
 
   g_autofree gchar *msg = g_strdup_printf ("Redo: %s", record->label);
 
@@ -2646,6 +3123,9 @@ oe_main_window_constructed (GObject *object)
   gtk_widget_set_halign (program_header, GTK_ALIGN_START);
   gtk_box_append (GTK_BOX (program_panel), program_header);
 
+  self->audio_meter = GTK_WIDGET (oe_meter_new ());
+  gtk_box_append (GTK_BOX (program_panel), self->audio_meter);
+
   self->program_monitor = GTK_WIDGET (oe_program_monitor_new ());
   gtk_box_append (GTK_BOX (program_panel), self->program_monitor);
   gtk_box_append (GTK_BOX (monitors), program_panel);
@@ -2656,6 +3136,10 @@ oe_main_window_constructed (GObject *object)
 
   self->inspector_clip = inspector_clip_new (self);
   gtk_stack_add_named (GTK_STACK (self->inspector_stack), self->inspector_clip, "clip");
+
+  self->mixer_page = mixer_page_new (self);
+  gtk_stack_add_named (GTK_STACK (self->inspector_stack), self->mixer_page, "mixer");
+  mixer_page_refresh (self);
 
   self->timeline_paned = gtk_paned_new (GTK_ORIENTATION_VERTICAL);
   gtk_paned_set_shrink_start_child (GTK_PANED (self->timeline_paned), FALSE);
