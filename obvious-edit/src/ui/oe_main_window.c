@@ -164,6 +164,7 @@ struct _OeMainWindow
    * solids only color; the key section exists for media clips on
    * video tracks only (D4); generators hide the media-only audio
    * section (D3). */
+  GtkWidget *clip_audio_header;     /* media-only section (D3) */
   GtkWidget *clip_generator_header; /* reads "Title" or "Solid" */
   GtkWidget *clip_generator_text;
   GtkWidget *clip_generator_size;
@@ -1533,11 +1534,13 @@ inspector_clip_new (OeMainWindow *self)
       if (i == CLIP_SPIN_AUDIO_GAIN)
         {
           /* Section header: the audio rows below own clip audio (Wave
-           * B); the visual rows above own the compositor properties. */
+           * B); the visual rows above own the compositor properties.
+           * Media-only — hidden with the rows for generated clips. */
           GtkWidget *header = inspector_key_label ("Clip audio");
 
           gtk_widget_set_halign (header, GTK_ALIGN_START);
           gtk_grid_attach (GTK_GRID (grid), header, 0, row, 3, 1);
+          self->clip_audio_header = header;
           row++;
         }
 
@@ -1801,9 +1804,11 @@ show_clip_inspector (OeMainWindow *self, guint track_index, guint clip_index)
       gtk_widget_set_visible (self->clip_spin_label[i], !generated || !media_row);
       gtk_widget_set_visible (self->clip_spin[i], !generated || !media_row);
     }
+  gtk_widget_set_visible (self->clip_audio_header, !generated);
 
   gtk_label_set_text (GTK_LABEL (self->clip_generator_header),
                       clip.kind == OE_CLIP_TITLE ? "Title" : "Solid");
+  gtk_widget_set_visible (self->clip_generator_header, generated);
   gtk_widget_set_visible (self->clip_generator_text, clip.kind == OE_CLIP_TITLE);
   gtk_widget_set_visible (self->clip_generator_text_label, clip.kind == OE_CLIP_TITLE);
   gtk_widget_set_visible (self->clip_generator_size, clip.kind == OE_CLIP_TITLE);
