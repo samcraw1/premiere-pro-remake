@@ -846,7 +846,14 @@ on_timeline_selection_changed (OeTimeline *timeline G_GNUC_UNUSED, gpointer user
 static void
 on_timeline_project_changed (OeTimeline *timeline G_GNUC_UNUSED, gpointer user_data)
 {
-  oe_playback_session_repaint_paused (OE_MAIN_WINDOW (user_data)->playback);
+  /* reset_session frees the session before the timeline detaches, so
+   * the swap notification lands with playback == NULL; there is no
+   * live session to repaint, and playback_attach clears the monitor
+   * itself right after. */
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  if (self->playback != NULL)
+    oe_playback_session_repaint_paused (self->playback);
 }
 
 /* Re-populates the inspector from the current timeline selection (clip
