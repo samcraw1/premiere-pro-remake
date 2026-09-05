@@ -128,6 +128,15 @@ typedef enum
  *     shape: keyed by @track_index ALONE — audio state belongs to the
  *     track, and the model rejects audio state on video tracks, so no
  *     sentinel clip index is ever needed.
+ * @OE_UNDO_OP_GENERATOR: a title/solid clip's generated payload
+ *     changed (Phase 11 Wave A); undo restores the pre-stroke
+ *     #OeClipGenerator, redo re-applies the post-stroke one. The
+ *     payload OWNS its text (the visual precedent): both recorded
+ *     generations are deep copies, freed with the record.
+ * @OE_UNDO_OP_CLIP_KEY: a media clip's chroma-key state changed
+ *     (Phase 11 Wave A); undo restores the pre-stroke #OeClipKey,
+ *     redo re-applies the post-stroke one. Memory-free payload (the
+ *     audio precedent).
  */
 typedef enum
 {
@@ -139,6 +148,8 @@ typedef enum
   OE_UNDO_OP_VISUAL,
   OE_UNDO_OP_CLIP_AUDIO,
   OE_UNDO_OP_TRACK_AUDIO,
+  OE_UNDO_OP_GENERATOR,
+  OE_UNDO_OP_CLIP_KEY,
 } OeUndoOpKind;
 
 /**
@@ -195,6 +206,8 @@ typedef struct
   gint64 new_b_us;
   OeClipVisual new_visual;      /* VISUAL only: the post-stroke state */
   OeClipAudio new_clip_audio;   /* CLIP_AUDIO only: the post-stroke state */
+  OeClipGenerator new_generator; /* GENERATOR only: owned post-stroke text */
+  OeClipKey new_key;            /* CLIP_KEY only: the post-stroke state */
   OeTrackAudio old_track_audio; /* TRACK_AUDIO only: the pre-stroke state */
   OeTrackAudio new_track_audio; /* TRACK_AUDIO only: the post-stroke state */
 
@@ -404,6 +417,58 @@ gboolean oe_edit_set_track_audio (OeProject *project, OeUndoStack *stack, guint 
 gboolean oe_edit_set_track_audio_with_old (OeProject *project, OeUndoStack *stack,
                                            guint track_index, const OeTrackAudio *old_audio,
                                            const OeTrackAudio *new_audio, GError **error);
+
+/**
+ * oe_edit_set_clip_generator: generated-payload edit (Phase 11 Wave
+ * A).
+ *
+ * Mutates through oe_project_set_clip_generator() and records ONE
+ * #OE_UNDO_OP_GENERATOR record whose old state is the clip's
+ * generator captured immediately before the mutation. Right for
+ * one-shot edits (inspector text entry); interactive strokes must
+ * call the _with_old variant instead. The record owns deep-copied
+ * text on both generations (the visual precedent).
+ */
+gboolean oe_edit_set_clip_generator (OeProject *project, OeUndoStack *stack, guint track_index,
+                                     guint clip_index, const OeClipGenerator *generator,
+                                     GError **error);
+
+/**
+ * oe_edit_set_clip_generator_with_old:
+ * @old_generator: the pre-stroke baseline, captured when the stroke
+ *     began
+ * @new_generator: the post-stroke state
+ *
+ * Stroke variant of oe_edit_set_clip_generator(): records ONE
+ * #OE_UNDO_OP_GENERATOR record restoring @old_generator. A
+ * @new_generator equal to @old_generator records nothing: a
+ * zero-delta stroke leaves no history entry.
+ */
+gboolean oe_edit_set_clip_generator_with_old (OeProject *project, OeUndoStack *stack,
+                                              guint track_index, guint clip_index,
+                                              const OeClipGenerator *old_generator,
+                                              const OeClipGenerator *new_generator, GError **error);
+
+/**
+ * oe_edit_set_clip_key: chroma-key edit (Phase 11 Wave A).
+ *
+ * Mutates through oe_project_set_clip_key() and records ONE
+ * #OE_UNDO_OP_CLIP_KEY record whose old state is the clip's key
+ * captured immediately before the mutation. Memory-free payload (the
+ * audio precedent).
+ */
+gboolean oe_edit_set_clip_key (OeProject *project, OeUndoStack *stack, guint track_index,
+                               guint clip_index, const OeClipKey *key, GError **error);
+
+/**
+ * oe_edit_set_clip_key_with_old: stroke variant of
+ * oe_edit_set_clip_key(). Records ONE #OE_UNDO_OP_CLIP_KEY record
+ * restoring @old_key. A @new_key equal to @old_key records nothing:
+ * a zero-delta stroke leaves no history entry.
+ */
+gboolean oe_edit_set_clip_key_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                                        guint clip_index, const OeClipKey *old_key,
+                                        const OeClipKey *new_key, GError **error);
 
 /**
  * oe_undo_stack_undo:

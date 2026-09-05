@@ -55,6 +55,10 @@ record_free (gpointer data)
    * release theirs exactly once. */
   g_clear_pointer (&rec->clip.visual.keyframes, g_array_unref);
   g_clear_pointer (&rec->new_visual.keyframes, g_array_unref);
+  /* Generators own their text: both recorded generations release
+   * theirs exactly once (the keyframe-store precedent). */
+  g_clear_pointer (&rec->clip.generator.text, g_free);
+  g_clear_pointer (&rec->new_generator.text, g_free);
   g_free (rec);
 }
 
@@ -67,6 +71,7 @@ clip_value_store (OeClip *dst, const OeClip *src)
 {
   *dst = *src;
   dst->visual.keyframes = oe_keyframes_copy_array (src->visual.keyframes);
+  dst->generator.text = g_strdup (src->generator.text);
 }
 
 static void
@@ -85,7 +90,17 @@ static void
 clip_capture (OeClip *clip)
 {
   clip->visual.keyframes = oe_keyframes_copy_array (clip->visual.keyframes);
+  clip->generator.text = g_strdup (clip->generator.text);
 }
+
+/* Phase 11 Wave A stroke recorders, defined below their public entry
+ * points (which pair with the audio/visual recorders). */
+static gboolean record_generator_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
+                                         guint clip_index, const OeClipGenerator *old_generator,
+                                         const OeClipGenerator *new_generator, GError **error);
+static gboolean record_key_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
+                                   guint clip_index, const OeClipKey *old_key,
+                                   const OeClipKey *new_key, GError **error);
 
 OeUndoStack *
 oe_undo_stack_new (void)
@@ -860,6 +875,171 @@ oe_edit_set_track_audio_with_old (OeProject *project, OeUndoStack *stack, guint 
   return record_track_audio_stroke (project, stack, track_index, old_audio, new_audio, error);
 }
 
+gboolean
+oe_edit_set_clip_generator (OeProject *project, OeUndoStack *stack, guint track_index,
+                            guint clip_index, const OeClipGenerator *generator, GError **error)
+{
+  g_return_val_if_fail (generator != NULL, FALSE);
+
+  OeClip before = { 0 };
+
+  if (stack != NULL && !oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  /* The capture aliases the live generator text; a private copy must
+   * exist before the mutator can release the original. */
+  if (stack != NULL)
+    clip_capture (&before);
+
+  if (!oe_project_set_clip_generator (project, track_index, clip_index, generator, error))
+    return FALSE;
+
+  if (stack != NULL && !oe_clip_generator_equal (&before.generator, generator))
+    {
+      OeUndoRecord *rec = record_new (OE_UNDO_OP_GENERATOR,
+                                      g_strdup_printf ("Title clip %u on track %u", clip_index,
+                                                       track_index),
+                                      track_index, clip_index);
+
+      rec->clip = before; /* baseline generator (owned text) moves with the record */
+      oe_clip_generator_copy (&rec->new_generator, generator);
+      stack_push (stack, rec);
+    }
+
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_clip_generator_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                                     guint clip_index, const OeClipGenerator *old_generator,
+                                     const OeClipGenerator *new_generator, GError **error)
+{
+  g_return_val_if_fail (old_generator != NULL && new_generator != NULL, FALSE);
+
+  return record_generator_stroke (project, stack, track_index, clip_index, old_generator,
+                                  new_generator, error);
+}
+
+gboolean
+oe_edit_set_clip_key (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
+                      const OeClipKey *key, GError **error)
+{
+  g_return_val_if_fail (key != NULL, FALSE);
+
+  OeClip before = { 0 };
+
+  if (stack != NULL && !oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  if (stack != NULL)
+    clip_capture (&before); /* aliases the keyframe store, like audio */
+
+  if (!oe_project_set_clip_key (project, track_index, clip_index, key, error))
+    return FALSE;
+
+  if (stack != NULL && !oe_clip_key_equal (&before.key, key))
+    {
+      OeUndoRecord *rec = record_new (OE_UNDO_OP_CLIP_KEY,
+                                      g_strdup_printf ("Key clip %u on track %u", clip_index,
+                                                       track_index),
+                                      track_index, clip_index);
+
+      rec->clip = before; /* baseline key moves with the record */
+      rec->new_key = *key;
+      stack_push (stack, rec);
+    }
+
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_clip_key_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                               guint clip_index, const OeClipKey *old_key, const OeClipKey *new_key,
+                               GError **error)
+{
+  g_return_val_if_fail (old_key != NULL && new_key != NULL, FALSE);
+
+  return record_key_stroke (project, stack, track_index, clip_index, old_key, new_key, error);
+}
+
+/* Shared generator stroke recorder (Phase 11 Wave A): mutates to
+ * @new_generator and records ONE #OE_UNDO_OP_GENERATOR record
+ * restoring @old_generator — the stroke baseline, immune to preview
+ * mutations in between. The payload OWNS its text (the visual
+ * precedent): both generations are deep-copied into the record. A
+ * zero-delta stroke records nothing. */
+static gboolean
+record_generator_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
+                         guint clip_index, const OeClipGenerator *old_generator,
+                         const OeClipGenerator *new_generator, GError **error)
+{
+  OeClip before = { 0 };
+
+  if (stack == NULL)
+    return oe_project_set_clip_generator (project, track_index, clip_index, new_generator, error);
+
+  if (!oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  clip_capture (&before);
+
+  if (!oe_project_set_clip_generator (project, track_index, clip_index, new_generator, error))
+    return FALSE;
+
+  if (oe_clip_generator_equal (old_generator, new_generator))
+    return TRUE; /* zero-delta stroke: the model already holds the state */
+
+  OeUndoRecord *rec = record_new (OE_UNDO_OP_GENERATOR,
+                                  g_strdup_printf ("Title clip %u on track %u", clip_index,
+                                                   track_index),
+                                  track_index, clip_index);
+
+  rec->clip = before;
+  /* The undo payload is the STROKE baseline, not the project state at
+   * record time — a previewed stroke leaves the model at its last
+   * preview, and undo must restore where the stroke began. */
+  oe_clip_generator_copy (&rec->clip.generator, old_generator);
+  oe_clip_generator_copy (&rec->new_generator, new_generator);
+  stack_push (stack, rec);
+  return TRUE;
+}
+
+/* Shared chroma-key stroke recorder (Phase 11 Wave A): mutates to
+ * @new_key and records ONE #OE_UNDO_OP_CLIP_KEY record restoring
+ * @old_key. The payload is memory-free (the audio precedent). A
+ * zero-delta stroke records nothing. */
+static gboolean
+record_key_stroke (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
+                   const OeClipKey *old_key, const OeClipKey *new_key, GError **error)
+{
+  OeClip before = { 0 };
+
+  if (stack == NULL)
+    return oe_project_set_clip_key (project, track_index, clip_index, new_key, error);
+
+  if (!oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  clip_capture (&before);
+
+  if (!oe_project_set_clip_key (project, track_index, clip_index, new_key, error))
+    return FALSE;
+
+  if (oe_clip_key_equal (old_key, new_key))
+    return TRUE; /* zero-delta stroke: the model already holds the state */
+
+  OeUndoRecord *rec = record_new (OE_UNDO_OP_CLIP_KEY,
+                                  g_strdup_printf ("Key clip %u on track %u", clip_index,
+                                                   track_index),
+                                  track_index, clip_index);
+
+  rec->clip = before;
+  rec->clip.key = *old_key;
+  rec->new_key = *new_key;
+  stack_push (stack, rec);
+  return TRUE;
+}
+
 /* ------------------------------------------------------------------ */
 /* History application: inverse replay through the model mutators.     */
 /* ------------------------------------------------------------------ */
@@ -975,6 +1155,12 @@ apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
                                         &rec->clip.audio, error);
     case OE_UNDO_OP_TRACK_AUDIO:
       return oe_project_set_track_audio (project, rec->track_index, &rec->old_track_audio, error);
+    case OE_UNDO_OP_GENERATOR:
+      return oe_project_set_clip_generator (project, rec->track_index, rec->clip_index,
+                                            &rec->clip.generator, error);
+    case OE_UNDO_OP_CLIP_KEY:
+      return oe_project_set_clip_key (project, rec->track_index, rec->clip_index,
+                                      &rec->clip.key, error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_undo (project, rec, error);
     }
@@ -1007,6 +1193,12 @@ apply_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
                                         &rec->new_clip_audio, error);
     case OE_UNDO_OP_TRACK_AUDIO:
       return oe_project_set_track_audio (project, rec->track_index, &rec->new_track_audio, error);
+    case OE_UNDO_OP_GENERATOR:
+      return oe_project_set_clip_generator (project, rec->track_index, rec->clip_index,
+                                            &rec->new_generator, error);
+    case OE_UNDO_OP_CLIP_KEY:
+      return oe_project_set_clip_key (project, rec->track_index, rec->clip_index,
+                                      &rec->new_key, error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_redo (project, rec, error);
     }
