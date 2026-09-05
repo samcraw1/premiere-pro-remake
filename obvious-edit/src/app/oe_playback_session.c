@@ -550,6 +550,11 @@ oe_playback_session_repaint_paused (OePlaybackSession *session)
   if (session->state == OE_PLAYBACK_PLAYING)
     return; /* the tick owns the frame while playing */
 
+  /* A visual edit mutated the live project since the last play/seek:
+   * re-snapshot before rendering, or the repaint serves the frozen
+   * pre-edit sequence and the monitor never shows the edit. */
+  refresh_sequence (session);
+
   update_video_full (session, session->last_position_us, TRUE);
 }
 
