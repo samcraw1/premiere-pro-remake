@@ -93,6 +93,15 @@ struct _OeTimeline
   OeUndoStack *undo_stack; /* weak — the window owns the stack */
 };
 
+enum
+{
+  SELECTION_CHANGED,
+  PROJECT_CHANGED,
+  LAST_SIGNAL
+};
+
+static guint timeline_signals[LAST_SIGNAL] = { 0 };
+
 G_DEFINE_TYPE (OeTimeline, oe_timeline, GTK_TYPE_DRAWING_AREA)
 
 /* ------------------------------------------------------------------ */
@@ -240,10 +249,12 @@ refresh_snapshot (OeTimeline *self)
         {
           self->selected_track = -1;
           self->selected_clip = -1;
+          g_signal_emit (self, timeline_signals[SELECTION_CHANGED], 0);
         }
     }
 
   gtk_widget_queue_draw (GTK_WIDGET (self));
+  g_signal_emit (self, timeline_signals[PROJECT_CHANGED], 0);
 }
 
 /* The project observer: fires exactly once per successful mutation,
@@ -374,6 +385,7 @@ oe_timeline_clear_selection (OeTimeline *self)
   self->selected_track = -1;
   self->selected_clip = -1;
   gtk_widget_queue_draw (GTK_WIDGET (self));
+  g_signal_emit (self, timeline_signals[SELECTION_CHANGED], 0);
 }
 
 gdouble
@@ -731,6 +743,7 @@ arm_drag (OeTimeline *self, gdouble x, gdouble y)
         /* Select whatever clip the press landed on. */
         self->selected_track = (gint) hit.track_index;
         self->selected_clip = (gint) hit.clip_index;
+        g_signal_emit (self, timeline_signals[SELECTION_CHANGED], 0);
 
         OeTimelineMediaInfo media = resolve_media (self, clip.media_ref);
 
@@ -768,6 +781,7 @@ arm_drag (OeTimeline *self, gdouble x, gdouble y)
       /* Armed as NOTHING: release clears the selection. */
       self->selected_track = -1;
       self->selected_clip = -1;
+      g_signal_emit (self, timeline_signals[SELECTION_CHANGED], 0);
       break;
     }
 }
@@ -1101,6 +1115,16 @@ oe_timeline_dispose (GObject *object)
 static void
 oe_timeline_class_init (OeTimelineClass *klass)
 {
+  /* UI seams: the inspector swaps its clip page on selection moves,
+   * and the paused monitor repaint rides project notifications without
+   * stealing the project's single observer slot from the timeline. */
+  timeline_signals[SELECTION_CHANGED]
+      = g_signal_new ("selection-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST, 0, NULL,
+                      NULL, NULL, G_TYPE_NONE, 0);
+  timeline_signals[PROJECT_CHANGED]
+      = g_signal_new ("project-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST, 0, NULL,
+                      NULL, NULL, G_TYPE_NONE, 0);
+
   G_OBJECT_CLASS (klass)->dispose = oe_timeline_dispose;
 }
 

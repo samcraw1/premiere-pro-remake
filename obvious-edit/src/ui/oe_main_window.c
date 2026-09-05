@@ -42,6 +42,22 @@
 #include "oe_shell_layout.h"
 #include "oe_timeline.h"
 
+/* Phase 9: the inspector clip page's controls, indexed to keep the
+ * build loop and the collect/populate mapping in lockstep. */
+enum
+{
+  CLIP_SPIN_POS_X,
+  CLIP_SPIN_POS_Y,
+  CLIP_SPIN_SCALE,
+  CLIP_SPIN_ROTATION,
+  CLIP_SPIN_OPACITY,
+  CLIP_SPIN_CROP_L,
+  CLIP_SPIN_CROP_T,
+  CLIP_SPIN_CROP_R,
+  CLIP_SPIN_CROP_B,
+  CLIP_SPIN_COUNT
+};
+
 /* Pending splitter positions from the loaded layout, applied on first map
  * (GtkPaned positions are only meaningful once the window is allocated). */
 struct _OeMainWindow
@@ -113,8 +129,21 @@ struct _OeMainWindow
    * on the timeline automatically (headless runs cannot click the bin). */
   gboolean insert_all_pending;
 
-  GtkWidget *inspector_stack; /* "empty" | "media" */
+  GtkWidget *inspector_stack; /* "empty" | "media" | "clip" */
   GtkWidget *inspector_media; /* grid rebuilt per selection */
+
+  /* Phase 9: the clip page — visual-property controls bound to the
+   * (track, clip) the timeline currently selects. Drags preview
+   * through unrecorded project mutations; ending a stroke (mouse
+   * release, Enter, or reselect) commits ONE OE_UNDO_OP_VISUAL record
+   * restoring the baseline captured at the stroke's first change. */
+  GtkWidget *inspector_clip; /* scrolled grid of controls */
+  GtkWidget *clip_spin[CLIP_SPIN_COUNT];
+  guint clip_track_index;
+  guint clip_clip_index;
+  OeClipVisual stroke_baseline;
+  guint visual_in_stroke; /* 0 = idle; pairs preview with its record */
+  guint visual_loading;   /* suppresses strokes while populating */
 
   guint import_pending; /* outstanding worker jobs in the current batch */
   guint import_ok;      /* OK verdicts since the batch started */
@@ -434,11 +463,261 @@ show_media_info (OeMainWindow *self, const OeAssetInfo *info)
   gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "media");
 }
 
-/* Re-populates the inspector from the current bin selection (or clears
- * it back to the preserved empty state). */
+/* ------------------------------------------------------------------ */
+/* Phase 9: the inspector clip page.                                   */
+/* ------------------------------------------------------------------ */
+
+/* Collects the ten exposed properties from the controls while
+ * carrying every other field (fades, keyframes) from @base untouched
+ * — the page does not own them in Wave A. */
+static OeClipVisual
+clip_page_collect (OeMainWindow *self, const OeClipVisual *base)
+{
+  OeClipVisual visual = *base;
+
+  visual.pos_x
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_POS_X]));
+  visual.pos_y
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_POS_Y]));
+  visual.scale_permille
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_SCALE]));
+  visual.rotation_cdeg
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_ROTATION]));
+  visual.opacity
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_OPACITY]));
+  visual.crop_l
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_L]));
+  visual.crop_t
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_T]));
+  visual.crop_r
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_R]));
+  visual.crop_b
+      = (int) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_B]));
+  return visual;
+}
+
+/* Preview half of the preview-then-commit contract: mutate the model
+ * without a history record so the compositor and monitor update live.
+ * The commit half records the whole stroke as ONE undo entry. */
+static void
+clip_page_preview (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  OeClipVisual visual = clip_page_collect (self, &clip.visual);
+  GError *error = NULL;
+
+  if (!oe_project_set_clip_visual (self->project, self->clip_track_index, self->clip_clip_index,
+                                   &visual, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Preview rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+}
+
+static void
+clip_page_begin_stroke (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (self->visual_in_stroke != 0 || self->visual_loading != 0)
+    return;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  self->stroke_baseline = clip.visual;
+  self->visual_in_stroke = 1;
+}
+
+static void
+clip_page_commit (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (self->visual_in_stroke == 0)
+    return;
+
+  self->visual_in_stroke = 0;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  OeClipVisual visual = clip_page_collect (self, &clip.visual);
+  GError *error = NULL;
+
+  if (!oe_edit_set_clip_visual_with_old (self->project, self->undo_stack, self->clip_track_index,
+                                         self->clip_clip_index, &self->stroke_baseline, &visual,
+                                         &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Visual edit failed: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+}
+
+static void
+on_clip_spin_value_changed (GtkSpinButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  clip_page_begin_stroke (self);
+  clip_page_preview (self);
+}
+
+static void
+on_clip_spin_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
+{
+  /* Typed entry commits on activate with the same single record. */
+  clip_page_commit (OE_MAIN_WINDOW (user_data));
+}
+
+static void
+on_clip_grid_released (GtkGestureClick *gesture G_GNUC_UNUSED, gint n_press G_GNUC_UNUSED,
+                       gdouble x G_GNUC_UNUSED, gdouble y G_GNUC_UNUSED, gpointer user_data)
+{
+  /* The pointer coming up ends the stroke: commit exactly one record. */
+  clip_page_commit (OE_MAIN_WINDOW (user_data));
+}
+
+/* Builds the clip page: one spin button per visual property, bound at
+ * repopulate time to the selected clip's current values. */
+static GtkWidget *
+inspector_clip_new (OeMainWindow *self)
+{
+  static const struct
+  {
+    const gchar *label;
+    gdouble min, max, step;
+  } spec[CLIP_SPIN_COUNT] = {
+    { "Position X (px)", -100000, 100000, 1 }, { "Position Y (px)", -100000, 100000, 1 },
+    { "Scale (per mille)", 1, 10000, 10 },     { "Rotation (centideg)", -36000, 36000, 100 },
+    { "Opacity (0-255)", 0, 255, 1 },          { "Crop left (px)", 0, 100000, 1 },
+    { "Crop top (px)", 0, 100000, 1 },         { "Crop right (px)", 0, 100000, 1 },
+    { "Crop bottom (px)", 0, 100000, 1 },
+  };
+
+  GtkWidget *scroller = gtk_scrolled_window_new ();
+
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller), GTK_POLICY_NEVER,
+                                  GTK_POLICY_AUTOMATIC);
+
+  GtkWidget *grid = gtk_grid_new ();
+
+  gtk_grid_set_row_spacing (GTK_GRID (grid), 4);
+  gtk_grid_set_column_spacing (GTK_GRID (grid), 12);
+  gtk_widget_set_margin_top (grid, 8);
+  gtk_widget_set_margin_bottom (grid, 8);
+  gtk_widget_set_margin_start (grid, 10);
+  gtk_widget_set_margin_end (grid, 10);
+
+  for (int i = 0; i < CLIP_SPIN_COUNT; i++)
+    {
+      GtkWidget *label = inspector_key_label (spec[i].label);
+
+      gtk_widget_set_halign (label, GTK_ALIGN_START);
+      gtk_grid_attach (GTK_GRID (grid), label, 0, i, 1, 1);
+
+      GtkWidget *spin = gtk_spin_button_new_with_range (spec[i].min, spec[i].max, spec[i].step);
+
+      gtk_spin_button_set_digits (GTK_SPIN_BUTTON (spin), 0);
+      gtk_widget_set_hexpand (spin, TRUE);
+      gtk_grid_attach (GTK_GRID (grid), spin, 1, i, 1, 1);
+      g_signal_connect (spin, "value-changed", G_CALLBACK (on_clip_spin_value_changed), self);
+      g_signal_connect (spin, "activate", G_CALLBACK (on_clip_spin_activate), self);
+      self->clip_spin[i] = spin;
+    }
+
+  /* One gesture on the grid: releasing the mouse anywhere in the
+   * page ends the open stroke. */
+  GtkGesture *click = gtk_gesture_click_new ();
+
+  g_signal_connect (click, "released", G_CALLBACK (on_clip_grid_released), self);
+  gtk_widget_add_controller (grid, GTK_EVENT_CONTROLLER (click));
+
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), grid);
+  return scroller;
+}
+
+/* Swaps the clip page in for the selected clip, preloading every
+ * control from the model (strokes suppressed while loading). */
+static void
+show_clip_inspector (OeMainWindow *self, guint track_index, guint clip_index)
+{
+  OeClip clip;
+
+  if (!oe_project_get_clip (self->project, track_index, clip_index, &clip))
+    {
+      gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "empty");
+      return;
+    }
+
+  self->clip_track_index = track_index;
+  self->clip_clip_index = clip_index;
+  self->visual_loading = 1;
+
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_POS_X]),
+                             (gdouble) clip.visual.pos_x);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_POS_Y]),
+                             (gdouble) clip.visual.pos_y);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_SCALE]),
+                             (gdouble) clip.visual.scale_permille);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_ROTATION]),
+                             (gdouble) clip.visual.rotation_cdeg);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_OPACITY]),
+                             (gdouble) clip.visual.opacity);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_L]),
+                             (gdouble) clip.visual.crop_l);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_T]),
+                             (gdouble) clip.visual.crop_t);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_R]),
+                             (gdouble) clip.visual.crop_r);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_CROP_B]),
+                             (gdouble) clip.visual.crop_b);
+
+  self->visual_loading = 0;
+  gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "clip");
+}
+
+/* Timeline seams: a selection move swaps the clip page in (committing
+ * any open stroke first); a project notification repaints the paused
+ * monitor through the shared seam — while playing the tick owns the
+ * frame, and repaint_paused no-ops there. */
+static void
+on_timeline_selection_changed (OeTimeline *timeline G_GNUC_UNUSED, gpointer user_data)
+{
+  populate_inspector (OE_MAIN_WINDOW (user_data));
+}
+
+static void
+on_timeline_project_changed (OeTimeline *timeline G_GNUC_UNUSED, gpointer user_data)
+{
+  oe_playback_session_repaint_paused (OE_MAIN_WINDOW (user_data)->playback);
+}
+
+/* Re-populates the inspector from the current timeline selection (clip
+ * page) or bin selection (media grid), or clears it back to the
+ * preserved empty state. */
 static void
 populate_inspector (OeMainWindow *self)
 {
+  guint track_index, clip_index;
+
+  if (self->visual_in_stroke != 0)
+    clip_page_commit (self); /* reselecting mid-stroke ends the stroke */
+
+  if (oe_timeline_get_selection (OE_TIMELINE (self->timeline), &track_index, &clip_index))
+    {
+      show_clip_inspector (self, track_index, clip_index);
+      return;
+    }
+
   guint id = oe_media_bin_get_selected (OE_MEDIA_BIN (self->media_bin));
   OeAssetInfo info;
 
@@ -1198,9 +1477,14 @@ edit_undo_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GN
       return;
     }
 
-  /* The selection may point at a clip the undo just removed (or
-     re-created elsewhere); drop it rather than keep a stale index. */
-  oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
+  /* A visual undo leaves the clip alive — keep the selection and
+     refresh the page from the model; any other record may have removed
+     the selected clip (or re-created it elsewhere), so drop the
+     selection rather than keep a stale index. */
+  if (record->kind == OE_UNDO_OP_VISUAL)
+    populate_inspector (self);
+  else
+    oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
 
   g_autofree gchar *msg = g_strdup_printf ("Undo: %s", record->label);
 
@@ -1227,7 +1511,10 @@ edit_redo_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GN
       return;
     }
 
-  oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
+  if (record->kind == OE_UNDO_OP_VISUAL)
+    populate_inspector (self);
+  else
+    oe_timeline_clear_selection (OE_TIMELINE (self->timeline));
 
   g_autofree gchar *msg = g_strdup_printf ("Redo: %s", record->label);
 
@@ -2204,6 +2491,9 @@ oe_main_window_constructed (GObject *object)
   gtk_paned_set_end_child (GTK_PANED (self->inspector_paned),
                            inspector_panel_new (&self->inspector_stack, &self->inspector_media));
 
+  self->inspector_clip = inspector_clip_new (self);
+  gtk_stack_add_named (GTK_STACK (self->inspector_stack), self->inspector_clip, "clip");
+
   self->timeline_paned = gtk_paned_new (GTK_ORIENTATION_VERTICAL);
   gtk_paned_set_shrink_start_child (GTK_PANED (self->timeline_paned), FALSE);
   gtk_paned_set_shrink_end_child (GTK_PANED (self->timeline_paned), FALSE);
@@ -2219,6 +2509,10 @@ oe_main_window_constructed (GObject *object)
   oe_timeline_set_resolve_func (OE_TIMELINE (self->timeline), timeline_resolve_media, self);
   oe_timeline_set_report_func (OE_TIMELINE (self->timeline), timeline_report, self);
   oe_timeline_set_project (OE_TIMELINE (self->timeline), self->project);
+  g_signal_connect (self->timeline, "selection-changed", G_CALLBACK (on_timeline_selection_changed),
+                    self);
+  g_signal_connect (self->timeline, "project-changed", G_CALLBACK (on_timeline_project_changed),
+                    self);
 
   /* Phase 5: the session drives the playhead and program monitor; the
    * timeline feeds hand moves back as seeks. */
