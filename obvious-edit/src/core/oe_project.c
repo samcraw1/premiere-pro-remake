@@ -426,6 +426,7 @@ oe_track_copy (OeTrack *dst, const OeTrack *src)
       /* Deep-copy the owned members too: track copies must never
        * alias clip state (sequence snapshots hand these to the
        * renderer). */
+      copy->kind = clip->kind;
       oe_clip_visual_copy (&copy->visual, &clip->visual);
       oe_clip_generator_copy (&copy->generator, &clip->generator);
       copy->audio = clip->audio; /* owns no memory — value copy */
@@ -945,8 +946,8 @@ oe_project_set_clip_generator (OeProject *self, guint track_index, guint clip_in
   if (clip->kind == OE_CLIP_MEDIA)
     {
       g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
-                   "media clips carry no generated payload (clip %u on track %u is %s)",
-                   clip_index, track_index, oe_clip_kind_get_name (clip->kind));
+                   "media clips carry no generated payload (clip %u on track %u is %s)", clip_index,
+                   track_index, oe_clip_kind_get_name (clip->kind));
       return FALSE;
     }
 
@@ -959,6 +960,10 @@ oe_project_set_clip_generator (OeProject *self, guint track_index, guint clip_in
                    generator->size_permille);
       return FALSE;
     }
+
+  /* Zero-delta strokes are silent successes: no copy, no pulse. */
+  if (oe_clip_generator_equal (&clip->generator, generator))
+    return TRUE;
 
   /* Validate first, deep-copy second, swap last: a rejected call never
    * mutates the model (owned text included). */
@@ -998,8 +1003,8 @@ oe_project_set_clip_key (OeProject *self, guint track_index, guint clip_index, c
   if (clip->kind != OE_CLIP_MEDIA)
     {
       g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
-                   "keying applies to media clips only (D4); clip %u on track %u is %s",
-                   clip_index, track_index, oe_clip_kind_get_name (clip->kind));
+                   "keying applies to media clips only (D4); clip %u on track %u is %s", clip_index,
+                   track_index, oe_clip_kind_get_name (clip->kind));
       return FALSE;
     }
 
@@ -1018,6 +1023,10 @@ oe_project_set_clip_key (OeProject *self, guint track_index, guint clip_index, c
                    key->color_rgb, key->tolerance, key->softness, key->enabled);
       return FALSE;
     }
+
+  /* Zero-delta strokes are silent successes: no copy, no pulse. */
+  if (oe_clip_key_equal (&clip->key, key))
+    return TRUE;
 
   /* Validate first, swap last: OeClipKey owns no memory, so the staged
    * copy is a plain struct value. */
@@ -1493,9 +1502,8 @@ oe_project_insert_generator_clip (OeProject *self, guint track_index, OeClipKind
     {
       g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
                    "generator payload out of domain for %s clips (text \"%s\", color %d, size %d)",
-                   oe_clip_kind_get_name (kind),
-                   generator->text != NULL ? generator->text : "", generator->color_rgb,
-                   generator->size_permille);
+                   oe_clip_kind_get_name (kind), generator->text != NULL ? generator->text : "",
+                   generator->color_rgb, generator->size_permille);
       return FALSE;
     }
 
