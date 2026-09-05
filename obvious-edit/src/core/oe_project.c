@@ -151,6 +151,70 @@ oe_clip_visual_is_valid (const OeClipVisual *visual)
   return TRUE; /* opacity: guint8 covers the full 0-255 domain */
 }
 
+/* ------------------------------------------------------------------ */
+/* Audio state value types (Phase 10 Wave A): identity, domain,        */
+/* equality. Both own no memory — a struct copy is the deep copy.      */
+/* ------------------------------------------------------------------ */
+
+OeClipAudio
+oe_clip_audio_identity (void)
+{
+  OeClipAudio audio;
+
+  audio.gain = OE_AUDIO_UNITY;
+  audio.pan = OE_AUDIO_PAN_CENTER;
+  return audio;
+}
+
+gboolean
+oe_clip_audio_is_valid (const OeClipAudio *audio)
+{
+  g_return_val_if_fail (audio != NULL, FALSE);
+
+  return audio->gain >= 0 && audio->gain <= OE_AUDIO_GAIN_MAX && audio->pan >= 0
+         && audio->pan <= OE_AUDIO_PAN_MAX;
+}
+
+gboolean
+oe_clip_audio_equal (const OeClipAudio *a, const OeClipAudio *b)
+{
+  g_return_val_if_fail (a != NULL, FALSE);
+  g_return_val_if_fail (b != NULL, FALSE);
+
+  return a->gain == b->gain && a->pan == b->pan;
+}
+
+OeTrackAudio
+oe_track_audio_identity (void)
+{
+  OeTrackAudio audio;
+
+  audio.volume = OE_AUDIO_UNITY;
+  audio.pan = OE_AUDIO_PAN_CENTER;
+  audio.mute = 0;
+  audio.solo = 0;
+  return audio;
+}
+
+gboolean
+oe_track_audio_is_valid (const OeTrackAudio *audio)
+{
+  g_return_val_if_fail (audio != NULL, FALSE);
+
+  return audio->volume >= 0 && audio->volume <= OE_AUDIO_GAIN_MAX && audio->pan >= 0
+         && audio->pan <= OE_AUDIO_PAN_MAX && (audio->mute == 0 || audio->mute == 1)
+         && (audio->solo == 0 || audio->solo == 1);
+}
+
+gboolean
+oe_track_audio_equal (const OeTrackAudio *a, const OeTrackAudio *b)
+{
+  g_return_val_if_fail (a != NULL, FALSE);
+  g_return_val_if_fail (b != NULL, FALSE);
+
+  return a->volume == b->volume && a->pan == b->pan && a->mute == b->mute && a->solo == b->solo;
+}
+
 static OeClip *
 clip_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint media_ref)
 {
@@ -161,6 +225,7 @@ clip_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint m
   clip->source_out_us = source_out_us;
   clip->media_ref = media_ref;
   clip->visual = oe_clip_visual_identity ();
+  clip->audio = oe_clip_audio_identity ();
   return clip;
 }
 
@@ -189,6 +254,7 @@ oe_track_init (OeTrack *track)
 
   memset (track, 0, sizeof (*track));
   track->clips = g_ptr_array_new_with_free_func (clip_free);
+  track->audio = oe_track_audio_identity ();
 }
 
 void
@@ -208,6 +274,7 @@ oe_track_copy (OeTrack *dst, const OeTrack *src)
 
   oe_track_clear (dst);
   dst->kind = src->kind;
+  dst->audio = src->audio; /* D4: audio state carries with the track */
   dst->clips = g_ptr_array_new_full (src->clips->len, clip_free);
 
   for (guint i = 0; i < src->clips->len; i++)
@@ -219,6 +286,7 @@ oe_track_copy (OeTrack *dst, const OeTrack *src)
       /* Deep-copy the owned visual too: track copies must never alias
        * clip state (sequence snapshots hand these to the renderer). */
       oe_clip_visual_copy (&copy->visual, &clip->visual);
+      copy->audio = clip->audio; /* owns no memory — value copy */
       g_ptr_array_add (dst->clips, copy);
     }
 }
@@ -643,6 +711,102 @@ oe_project_set_clip_visual (OeProject *self, guint track_index, guint clip_index
   oe_clip_visual_copy (&copy, visual);
   oe_clip_visual_clear (&clip->visual);
   clip->visual = copy;
+
+  notify (self);
+  return TRUE;
+}
+
+gboolean
+oe_project_get_track_audio (OeProject *self, guint track_index, OeTrackAudio *out)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (out != NULL, FALSE);
+
+  const OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL || track->kind != OE_TRACK_AUDIO)
+    return FALSE;
+
+  *out = track->audio;
+  return TRUE;
+}
+
+gboolean
+oe_project_set_clip_audio (OeProject *self, guint track_index, guint clip_index,
+                           const OeClipAudio *audio, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (audio != NULL, FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip index %u out of range on track %u", clip_index, track_index);
+      return FALSE;
+    }
+
+  if (!oe_clip_audio_is_valid (audio))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_AUDIO,
+                   "clip audio out of domain (gain %d, pan %d)", audio->gain, audio->pan);
+      return FALSE;
+    }
+
+  /* Validate first, deep-copy second, swap last: a rejected call never
+   * mutates the model. OeClipAudio owns no memory, so the staged copy
+   * is a plain struct value. */
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+
+  clip->audio = *audio;
+
+  notify (self);
+  return TRUE;
+}
+
+gboolean
+oe_project_set_track_audio (OeProject *self, guint track_index, const OeTrackAudio *audio,
+                            GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (audio != NULL, FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  /* D4: audio state lives on audio tracks only — video tracks carry
+   * no editable audio state (mirrors the transition track-kind rule). */
+  if (track->kind != OE_TRACK_AUDIO)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "audio state lives on audio tracks (Phase 10 D4); track %u is %s",
+                   track_index, oe_track_kind_get_name (track->kind));
+      return FALSE;
+    }
+
+  if (!oe_track_audio_is_valid (audio))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_AUDIO,
+                   "track audio out of domain (volume %d, pan %d, mute %d, solo %d)",
+                   audio->volume, audio->pan, audio->mute, audio->solo);
+      return FALSE;
+    }
+
+  track->audio = *audio;
 
   notify (self);
   return TRUE;
