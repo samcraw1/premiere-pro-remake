@@ -923,21 +923,21 @@ test_visual_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED
     }
 
   /* An unknown member inside visual is schema-foreign like any other. */
-  gchar *unknown = write_doc (
-      fx, "{\n"
-          "  \"obvious-edit-project\": {\n"
-          "    \"format-version\": 1,\n"
-          "    \"name\": \"Doc\",\n"
-          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
-          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
-          "    \"tracks\": [\n"
-          "      { \"kind\": \"video\", \"clips\": [\n"
-          "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
-          "          \"source-out-us\": 1000,\n"
-          "          \"visual\": { \"scale-permille\": 1000, \"blur\": 3 } } ] }\n"
-          "    ]\n"
-          "  }\n"
-          "}\n");
+  gchar *unknown
+      = write_doc (fx, "{\n"
+                       "  \"obvious-edit-project\": {\n"
+                       "    \"format-version\": 1,\n"
+                       "    \"name\": \"Doc\",\n"
+                       "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                       "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+                       "    \"tracks\": [\n"
+                       "      { \"kind\": \"video\", \"clips\": [\n"
+                       "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+                       "          \"source-out-us\": 1000,\n"
+                       "          \"visual\": { \"scale-permille\": 1000, \"blur\": 3 } } ] }\n"
+                       "    ]\n"
+                       "  }\n"
+                       "}\n");
 
   OeProject *loaded = oe_project_format_load (unknown, &error);
 
@@ -948,21 +948,21 @@ test_visual_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED
 
   /* A partial visual (missing members) is rejected: present means
    * strict — there is no silent half-load. */
-  gchar *partial = write_doc (
-      fx, "{\n"
-          "  \"obvious-edit-project\": {\n"
-          "    \"format-version\": 1,\n"
-          "    \"name\": \"Doc\",\n"
-          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
-          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
-          "    \"tracks\": [\n"
-          "      { \"kind\": \"video\", \"clips\": [\n"
-          "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
-          "          \"source-out-us\": 1000,\n"
-          "          \"visual\": { \"scale-permille\": 1000 } } ] }\n"
-          "    ]\n"
-          "  }\n"
-          "}\n");
+  gchar *partial
+      = write_doc (fx, "{\n"
+                       "  \"obvious-edit-project\": {\n"
+                       "    \"format-version\": 1,\n"
+                       "    \"name\": \"Doc\",\n"
+                       "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                       "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+                       "    \"tracks\": [\n"
+                       "      { \"kind\": \"video\", \"clips\": [\n"
+                       "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+                       "          \"source-out-us\": 1000,\n"
+                       "          \"visual\": { \"scale-permille\": 1000 } } ] }\n"
+                       "    ]\n"
+                       "  }\n"
+                       "}\n");
 
   loaded = oe_project_format_load (partial, &error);
 
