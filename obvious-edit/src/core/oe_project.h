@@ -37,6 +37,7 @@
 #include <glib-object.h>
 #include <glib.h>
 
+#include "oe_audio_factor.h" /* audio domain constants (Phase 10 D7) */
 #include "oe_keyframes.h"
 #include "oe_time.h"
 
@@ -90,6 +91,24 @@ typedef struct
 } OeClipVisual;
 
 /**
+ * OeClipAudio: per-clip audio gain and pan (Phase 10 Wave A).
+ *
+ * Integers only (locked decision D7): @gain is fixed point with unity
+ * 1024 (0 = silence, 1024 = unity, 2048 = +6 dB) and @pan rides the
+ * 0-1024 domain with 512 = center, driving the shared linear pan pair
+ * (see oe_audio_factor.h). The state rides every clip — like the
+ * visual's fade lengths — but only clips on audio tracks contribute
+ * to a mix today; on video tracks it is dormant. Owning no memory, a
+ * struct copy IS the deep copy; the validated mutator still guards
+ * the domain.
+ */
+typedef struct
+{
+  gint32 gain;
+  gint32 pan;
+} OeClipAudio;
+
+/**
  * OeClip: one non-destructive source-range placement on a track.
  * @position_us: sequence position (>= 0) of the clip's start.
  * @source_in_us: first source microsecond played (>= 0).
@@ -101,6 +120,8 @@ typedef struct
  *     a session asset id (those are transient and never serialize).
  * @visual: owned picture geometry/opacity, keyframe store included;
  *     deep-copied with the clip, never aliased.
+ * @audio: per-clip gain/pan state (Phase 10 Wave A); memory-free, so
+ *     every clip copy path carries it by value.
  */
 typedef struct
 {
@@ -109,6 +130,7 @@ typedef struct
   gint64 source_out_us;
   guint media_ref;
   OeClipVisual visual;
+  OeClipAudio audio;
 } OeClip;
 
 /**
@@ -165,6 +187,64 @@ gboolean oe_clip_visual_is_valid (const OeClipVisual *visual);
 void oe_clip_visual_resolve (const OeClipVisual *visual, gint64 clip_time_us, OeClipVisual *out);
 
 /**
+ * oe_clip_audio_identity: the default audio state — unity gain 1024,
+ * center pan 512. Every clip starts here; a pre-Phase-10 document
+ * backfills exactly this state (no version bump).
+ */
+OeClipAudio oe_clip_audio_identity (void);
+
+/**
+ * oe_clip_audio_is_valid: domain check for the validated mutator and
+ * the JSON loader — @gain in 0..2048 (unity 1024), @pan in 0..1024
+ * (center 512). Out-of-domain state is rejected, never clamped.
+ */
+gboolean oe_clip_audio_is_valid (const OeClipAudio *audio);
+
+/**
+ * oe_clip_audio_equal: field equality — the zero-delta check that
+ * keeps interactive strokes from recording no-op history records.
+ */
+gboolean oe_clip_audio_equal (const OeClipAudio *a, const OeClipAudio *b);
+
+/**
+ * OeTrackAudio: per-track audio mixing state (Phase 10 Wave A).
+ *
+ * Integers only (D7): @volume is fixed point with unity 1024
+ * (0..2048), @pan rides 0..1024 with 512 = center (linear pan pair,
+ * oe_audio_factor.h), and @mute/@solo are 0|1 flags. Locked decision
+ * D4: audio state lives on AUDIO tracks only — video tracks carry no
+ * editable or serialized audio state; the validated track mutator
+ * rejects them and the writer never emits the member for them.
+ */
+typedef struct
+{
+  gint32 volume;
+  gint32 pan;
+  gint32 mute;
+  gint32 solo;
+} OeTrackAudio;
+
+/**
+ * oe_track_audio_identity: the default track audio state — unity
+ * volume 1024, center pan 512, unmuted, unsoloed. Absent JSON members
+ * backfill exactly this state.
+ */
+OeTrackAudio oe_track_audio_identity (void);
+
+/**
+ * oe_track_audio_is_valid: domain check for the validated mutator and
+ * the JSON loader — @volume in 0..2048, @pan in 0..1024, @mute and
+ * @solo each exactly 0 or 1.
+ */
+gboolean oe_track_audio_is_valid (const OeTrackAudio *audio);
+
+/**
+ * oe_track_audio_equal: field equality — the zero-delta check for
+ * track-audio strokes.
+ */
+gboolean oe_track_audio_equal (const OeTrackAudio *a, const OeTrackAudio *b);
+
+/**
  * OeTrackKind: the two parallel lane kinds of a sequence.
  * @OE_TRACK_VIDEO: compositing order = array order (higher index above).
  * @OE_TRACK_AUDIO: mixing order = array order (higher index wins ties).
@@ -179,12 +259,15 @@ const gchar *oe_track_kind_get_name (OeTrackKind kind);
 
 /**
  * OeTrack: one lane of the sequence. @clips is a GPtrArray of owned
- * #OeClip pointers, ordered by position.
+ * #OeClip pointers, ordered by position. @audio holds the track's
+ * mixing state on audio tracks (D4); on video tracks it is dead state
+ * that no mutator accepts and no writer serializes.
  */
 typedef struct
 {
   OeTrackKind kind;
   GPtrArray *clips;
+  OeTrackAudio audio;
 } OeTrack;
 
 /**
@@ -292,6 +375,10 @@ GQuark oe_project_error_quark (void);
  * @OE_PROJECT_ERROR_BAD_KEYFRAME: a keyframe mutation is out of
  *     domain — time outside the clip, value outside the property's
  *     range, or a remove of a key that does not exist.
+ * @OE_PROJECT_ERROR_BAD_AUDIO: a clip's or track's audio state is out
+ *     of domain — gain/volume outside 0..2048, pan outside 0..1024,
+ *     mute/solo outside 0..1 (see oe_clip_audio_is_valid and
+ *     oe_track_audio_is_valid).
  */
 typedef enum
 {
@@ -305,6 +392,7 @@ typedef enum
   OE_PROJECT_ERROR_BAD_VISUAL,
   OE_PROJECT_ERROR_BAD_KEYFRAME,
   OE_PROJECT_ERROR_BAD_TRANSITION,
+  OE_PROJECT_ERROR_BAD_AUDIO,
 } OeProjectError;
 
 /**
@@ -412,6 +500,44 @@ gboolean oe_project_get_clip (OeProject *project, guint track_index, guint clip_
  */
 gboolean oe_project_set_clip_visual (OeProject *project, guint track_index, guint clip_index,
                                      const OeClipVisual *visual, GError **error);
+
+/**
+ * oe_project_get_track_audio: track-audio value getter — the undo
+ * recorder captures pre-edit state with it. Audio state lives on
+ * audio tracks only (D4).
+ *
+ * Returns: TRUE when @track_index is in range and the track is an
+ *     audio track; @out then receives the value.
+ */
+gboolean oe_project_get_track_audio (OeProject *project, guint track_index, OeTrackAudio *out);
+
+/**
+ * oe_project_set_clip_audio: the validated mutator for a clip's audio
+ * state (Phase 10 Wave A), mirroring oe_project_set_clip_visual
+ * exactly: rejects out-of-domain audio with
+ * #OE_PROJECT_ERROR_BAD_AUDIO (and out-of-range indices with the
+ * usual typed errors) without touching the model; on success swaps in
+ * the value (OeClipAudio owns no memory — a struct copy is the deep
+ * copy) and notifies the observer exactly once. A rejected call never
+ * mutates anything.
+ *
+ * Returns FALSE (with @error set) when the mutation was rejected.
+ */
+gboolean oe_project_set_clip_audio (OeProject *project, guint track_index, guint clip_index,
+                                    const OeClipAudio *audio, GError **error);
+
+/**
+ * oe_project_set_track_audio: the validated mutator for a track's
+ * audio state (Phase 10 Wave A). Rejects video tracks with
+ * #OE_PROJECT_ERROR_BAD_TRACK — audio state lives on audio tracks
+ * only (D4) — and out-of-domain state with
+ * #OE_PROJECT_ERROR_BAD_AUDIO, without touching the model; on success
+ * swaps in the value and notifies the observer exactly once.
+ *
+ * Returns FALSE (with @error set) when the mutation was rejected.
+ */
+gboolean oe_project_set_track_audio (OeProject *project, guint track_index,
+                                     const OeTrackAudio *audio, GError **error);
 
 /**
  * oe_project_set_clip_keyframe: the validated mutator for one keyed

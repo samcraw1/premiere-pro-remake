@@ -116,6 +116,18 @@ typedef enum
  *     (Phase 9 Wave A); undo restores the pre-stroke #OeClipVisual,
  *     redo re-applies the post-stroke one. One inspector stroke = one
  *     record, whatever the control count involved.
+ * @OE_UNDO_OP_CLIP_AUDIO: a clip's audio gain/pan changed (Phase 10
+ *     Wave A); undo restores the pre-stroke #OeClipAudio, redo
+ *     re-applies the post-stroke one. One inspector stroke = one
+ *     record. Same record/replay machinery as VISUAL; the payload is
+ *     memory-free, so replay runs through the validated clip-audio
+ *     mutator.
+ * @OE_UNDO_OP_TRACK_AUDIO: an audio track's volume/pan/mute/solo
+ *     changed (Phase 10 Wave A); undo restores the pre-stroke
+ *     #OeTrackAudio, redo re-applies the post-stroke one. NEW payload
+ *     shape: keyed by @track_index ALONE — audio state belongs to the
+ *     track, and the model rejects audio state on video tracks, so no
+ *     sentinel clip index is ever needed.
  */
 typedef enum
 {
@@ -125,6 +137,8 @@ typedef enum
   OE_UNDO_OP_TRIM,
   OE_UNDO_OP_RIPPLE_DELETE,
   OE_UNDO_OP_VISUAL,
+  OE_UNDO_OP_CLIP_AUDIO,
+  OE_UNDO_OP_TRACK_AUDIO,
 } OeUndoOpKind;
 
 /**
@@ -160,8 +174,13 @@ typedef struct
  * OeUndoRecord: one immutable command object, owned by the stack.
  * @label: status-bar text ("Move clip 2 on track 0"); owned by the
  *     record, borrowed by readers.
- * @clip: owned deep copy of the edited clip (insert/delete payload —
- *     OeClip owns no memory, so the struct copy IS the deep copy).
+ * @clip: owned deep copy of the edited clip (insert/delete payload).
+ *     Clips own keyframe stores since Phase 9 Wave B, so this is a
+ *     REAL deep copy, never a struct copy of the live clip:
+ *     clip_value_store()/clip_capture() replace the aliased store
+ *     pointer with a private one, and record_free releases it exactly
+ *     once. The VISUAL kind reuses the same field as its undo
+ *     baseline.
  */
 typedef struct
 {
@@ -174,7 +193,10 @@ typedef struct
   gint64 old_b_us;
   gint64 new_a_us;
   gint64 new_b_us;
-  OeClipVisual new_visual; /* VISUAL only: the post-stroke state */
+  OeClipVisual new_visual;      /* VISUAL only: the post-stroke state */
+  OeClipAudio new_clip_audio;   /* CLIP_AUDIO only: the post-stroke state */
+  OeTrackAudio old_track_audio; /* TRACK_AUDIO only: the pre-stroke state */
+  OeTrackAudio new_track_audio; /* TRACK_AUDIO only: the post-stroke state */
 
   /* RIPPLE_DELETE only: owned array of OeRippleShift, one entry per
    * shifted suffix clip ordered by pre_index ascending; NULL for every
@@ -330,6 +352,58 @@ gboolean oe_edit_set_clip_keyframe (OeProject *project, OeUndoStack *stack, guin
 gboolean oe_edit_remove_clip_keyframe (OeProject *project, OeUndoStack *stack, guint track_index,
                                        guint clip_index, OeKeyframeProperty property,
                                        gint64 time_us, GError **error);
+
+/**
+ * oe_edit_set_clip_audio: clip-audio edit (Phase 10 Wave A).
+ *
+ * Mutates through oe_project_set_clip_audio() and records ONE
+ * #OE_UNDO_OP_CLIP_AUDIO record whose old state is the clip's audio
+ * captured immediately before the mutation. Right for one-shot edits
+ * (numeric entry); interactive strokes must call the _with_old
+ * variant instead — a drag previews through unrecorded mutations, so
+ * the pre-capture baseline here would be the last preview state, not
+ * the stroke's start.
+ */
+gboolean oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint track_index,
+                                 guint clip_index, const OeClipAudio *audio, GError **error);
+
+/**
+ * oe_edit_set_clip_audio_with_old:
+ * @old_audio: the pre-stroke baseline, captured when the stroke began
+ * @new_audio: the post-stroke state
+ *
+ * Mutates to @new_audio through oe_project_set_clip_audio() and
+ * records ONE #OE_UNDO_OP_CLIP_AUDIO record restoring @old_audio —
+ * the true stroke start, immune to how many preview mutations
+ * happened in between. A @new_audio equal to @old_audio records
+ * nothing: a zero-delta stroke leaves no history entry.
+ */
+gboolean oe_edit_set_clip_audio_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                                          guint clip_index, const OeClipAudio *old_audio,
+                                          const OeClipAudio *new_audio, GError **error);
+
+/**
+ * oe_edit_set_track_audio: track-audio edit (Phase 10 Wave A).
+ *
+ * Mutates through oe_project_set_track_audio() and records ONE
+ * #OE_UNDO_OP_TRACK_AUDIO record — the track-indexed payload shape
+ * (no clip index). The plain variant captures the track's audio
+ * immediately before the mutation; strokes use the _with_old variant.
+ * Video tracks are rejected by the model mutator and record nothing.
+ */
+gboolean oe_edit_set_track_audio (OeProject *project, OeUndoStack *stack, guint track_index,
+                                  const OeTrackAudio *audio, GError **error);
+
+/**
+ * oe_edit_set_track_audio_with_old: stroke variant of
+ * oe_edit_set_track_audio(). Mutates to @new_audio and records ONE
+ * #OE_UNDO_OP_TRACK_AUDIO record restoring @old_audio — the true
+ * stroke start. A @new_audio equal to @old_audio records nothing: a
+ * zero-delta stroke leaves no history entry.
+ */
+gboolean oe_edit_set_track_audio_with_old (OeProject *project, OeUndoStack *stack,
+                                           guint track_index, const OeTrackAudio *old_audio,
+                                           const OeTrackAudio *new_audio, GError **error);
 
 /**
  * oe_undo_stack_undo:

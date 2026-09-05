@@ -124,6 +124,43 @@ append_clip_visual (GString *out, const OeClipVisual *v)
   g_string_append (out, "\n          }");
 }
 
+/* The clip-level audio member (Phase 10 Wave A): written always —
+ * unity gain and center pan when the clip holds defaults — so a
+ * current writer's output is stable and save-load-save is
+ * byte-identical. Readers backfill the identity when the member is
+ * absent (pre-Phase-10 file). Integer tokens only: the fixed-point
+ * fields never serialize as floats. */
+static void
+append_clip_audio (GString *out, const OeClipAudio *a)
+{
+  g_string_append (out, ",\n          \"audio\": {\n");
+  g_string_append (out, "            \"gain\": ");
+  append_int (out, a->gain);
+  g_string_append (out, ",\n            \"pan\": ");
+  append_int (out, a->pan);
+  g_string_append (out, "\n          }");
+}
+
+/* The track-level audio member (Phase 10 Wave A): written for every
+ * AUDIO track — unity volume, center pan, unmuted, unsoloed when the
+ * track holds defaults — so a current writer's output is stable and
+ * save-load-save is byte-identical. Video tracks carry no audio state
+ * (D4) and never get the member. Integer tokens only. */
+static void
+append_track_audio (GString *out, const OeTrackAudio *a)
+{
+  g_string_append (out, ",\n        \"audio\": {\n");
+  g_string_append (out, "          \"volume\": ");
+  append_int (out, a->volume);
+  g_string_append (out, ",\n          \"pan\": ");
+  append_int (out, a->pan);
+  g_string_append (out, ",\n          \"mute\": ");
+  append_int (out, a->mute);
+  g_string_append (out, ",\n          \"solo\": ");
+  append_int (out, a->solo);
+  g_string_append (out, "\n        }");
+}
+
 /* The clip-level keyframes member (Phase 9 Wave B): written always —
  * an empty object when the store is absent — so a current writer's
  * output is stable and save-load-save is byte-identical. Absent on
@@ -256,6 +293,7 @@ serialize_project (OeProject *project)
           append_int (out, clip->source_out_us);
           append_clip_visual (out, &clip->visual);
           append_clip_keyframes (out, &clip->visual);
+          append_clip_audio (out, &clip->audio);
           g_string_append (out, "\n        }");
         }
       if (track->clips->len > 0)
@@ -289,6 +327,12 @@ serialize_project (OeProject *project)
       if (track_transition_count > 0)
         g_string_append (out, "\n        ");
       g_string_append (out, "]");
+
+      /* Track-level audio (Phase 10 Wave A): written for every AUDIO
+       * track (D4 — video tracks carry no audio state and get no
+       * member); absent on read backfills the identity. */
+      if (track->kind == OE_TRACK_AUDIO)
+        append_track_audio (out, &track->audio);
 
       g_string_append (out, " }");
     }
@@ -421,6 +465,7 @@ typedef struct
   gint64 source_out_us;
   guint media_ref;
   OeClipVisual visual; /* identity when the file omitted the member */
+  OeClipAudio audio;   /* identity when the file omitted the member */
 } ClipEntry;
 
 typedef struct
@@ -428,11 +473,12 @@ typedef struct
   OeTrackKind kind;
   GPtrArray *clips;    /* ClipEntry* */
   GArray *transitions; /* OeTransition values, file order */
+  OeTrackAudio audio;  /* identity when the file omitted the member */
 } TrackEntry;
 
 static ClipEntry *
 clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint media_ref,
-                const OeClipVisual *visual)
+                const OeClipVisual *visual, const OeClipAudio *audio)
 {
   ClipEntry *clip = g_new0 (ClipEntry, 1);
 
@@ -444,6 +490,7 @@ clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, g
     clip->visual = *visual; /* Wave A visuals own no memory: value copy is deep */
   else
     clip->visual = oe_clip_visual_identity ();
+  clip->audio = audio != NULL ? *audio : oe_clip_audio_identity ();
   return clip;
 }
 
@@ -758,6 +805,144 @@ parse_clip_visual (JsonNode *node, const gchar *where, OeClipVisual *visual, GEr
   return TRUE;
 }
 
+/* The optional clip "audio" member (Phase 10 Wave A). Absent means
+ * identity — the width/height backfill recipe applied per clip: no
+ * version bump, older files load unchanged. Present means strict: a
+ * closed member list, integer tokens only, and the same domain ranges
+ * the validated mutator enforces. */
+static gboolean
+parse_clip_audio (JsonNode *node, const gchar *where, OeClipAudio *audio, GError **error)
+{
+  static const gchar *const members[] = { "gain", "pan" };
+
+  static const struct
+  {
+    const gchar *name;
+    gint64 min;
+    gint64 max;
+  } ranges[] = {
+    { "gain", 0, OE_AUDIO_GAIN_MAX },
+    { "pan", 0, OE_AUDIO_PAN_MAX },
+  };
+
+  if (!JSON_NODE_HOLDS_OBJECT (node))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                   "%s.audio: must be an object", where);
+      return FALSE;
+    }
+
+  JsonObject *obj = json_node_get_object (node);
+  gchar *audio_where = g_strdup_printf ("%s.audio", where);
+
+  if (!check_members (obj, members, G_N_ELEMENTS (members), audio_where, error))
+    {
+      g_free (audio_where);
+      return FALSE;
+    }
+
+  *audio = oe_clip_audio_identity ();
+  gint64 values[G_N_ELEMENTS (ranges)] = { 0 };
+
+  for (guint i = 0; i < G_N_ELEMENTS (ranges); i++)
+    {
+      JsonNode *value_node = NULL;
+
+      if (!require_node (obj, ranges[i].name, JSON_NODE_VALUE, audio_where, &value_node, error)
+          || !node_get_int (value_node, audio_where, ranges[i].name, &values[i], error))
+        {
+          g_free (audio_where);
+          return FALSE;
+        }
+
+      if (values[i] < ranges[i].min || values[i] > ranges[i].max)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: %s %lld is out of range (must be %lld..%lld)", audio_where,
+                       ranges[i].name, (long long) values[i], (long long) ranges[i].min,
+                       (long long) ranges[i].max);
+          g_free (audio_where);
+          return FALSE;
+        }
+    }
+
+  g_free (audio_where);
+  audio->gain = (gint32) values[0];
+  audio->pan = (gint32) values[1];
+  return TRUE;
+}
+
+/* The optional track "audio" member (Phase 10 Wave A). Absent on an
+ * audio track means identity (pre-Phase-10 file); present means
+ * strict, like the clip member. A video track carrying the member is
+ * rejected by the caller — video tracks hold no audio state (D4), so
+ * tolerating it would silently drop it on re-save. */
+static gboolean
+parse_track_audio (JsonNode *node, const gchar *where, OeTrackAudio *audio, GError **error)
+{
+  static const gchar *const members[] = { "volume", "pan", "mute", "solo" };
+
+  static const struct
+  {
+    const gchar *name;
+    gint64 min;
+    gint64 max;
+  } ranges[] = {
+    { "volume", 0, OE_AUDIO_GAIN_MAX },
+    { "pan", 0, OE_AUDIO_PAN_MAX },
+    { "mute", 0, 1 },
+    { "solo", 0, 1 },
+  };
+
+  if (!JSON_NODE_HOLDS_OBJECT (node))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                   "%s.audio: must be an object", where);
+      return FALSE;
+    }
+
+  JsonObject *obj = json_node_get_object (node);
+  gchar *audio_where = g_strdup_printf ("%s.audio", where);
+
+  if (!check_members (obj, members, G_N_ELEMENTS (members), audio_where, error))
+    {
+      g_free (audio_where);
+      return FALSE;
+    }
+
+  *audio = oe_track_audio_identity ();
+  gint64 values[G_N_ELEMENTS (ranges)] = { 0 };
+
+  for (guint i = 0; i < G_N_ELEMENTS (ranges); i++)
+    {
+      JsonNode *value_node = NULL;
+
+      if (!require_node (obj, ranges[i].name, JSON_NODE_VALUE, audio_where, &value_node, error)
+          || !node_get_int (value_node, audio_where, ranges[i].name, &values[i], error))
+        {
+          g_free (audio_where);
+          return FALSE;
+        }
+
+      if (values[i] < ranges[i].min || values[i] > ranges[i].max)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: %s %lld is out of range (must be %lld..%lld)", audio_where,
+                       ranges[i].name, (long long) values[i], (long long) ranges[i].min,
+                       (long long) ranges[i].max);
+          g_free (audio_where);
+          return FALSE;
+        }
+    }
+
+  g_free (audio_where);
+  audio->volume = (gint32) values[0];
+  audio->pan = (gint32) values[1];
+  audio->mute = (gint32) values[2];
+  audio->solo = (gint32) values[3];
+  return TRUE;
+}
+
 /* The optional clip "keyframes" member (Phase 9 Wave B). Absent
  * means none — their absence means none (the width/height backfill
  * recipe at clip level). Present means strict: an object whose closed
@@ -878,7 +1063,8 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
             GError **error)
 {
   static const gchar *const members[]
-      = { "media-ref", "position-us", "source-in-us", "source-out-us", "visual", "keyframes" };
+      = { "media-ref", "position-us", "source-in-us", "source-out-us",
+          "visual",    "keyframes",   "audio" };
 
   JsonNode *media_ref_node = NULL;
   JsonNode *position_node = NULL;
@@ -979,7 +1165,15 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
   if (keyframes_node != NULL && !parse_clip_keyframes (keyframes_node, where, &visual, error))
     return FALSE;
 
-  *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref, &visual);
+  OeClipAudio audio = oe_clip_audio_identity ();
+
+  JsonNode *audio_node = json_object_get_member (obj, "audio");
+
+  if (audio_node != NULL && !parse_clip_audio (audio_node, where, &audio, error))
+    return FALSE;
+
+  *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref, &visual,
+                         &audio);
   return TRUE;
 }
 
@@ -1100,7 +1294,7 @@ parse_tracks (JsonNode *node, const GPtrArray *media, GPtrArray *tracks_out, GEr
 
       track = json_node_get_object (track_node);
 
-      static const gchar *const members[] = { "kind", "clips", "transitions" };
+      static const gchar *const members[] = { "kind", "clips", "transitions", "audio" };
 
       if (!check_members (track, members, G_N_ELEMENTS (members), where, error))
         goto track_out;
@@ -1158,6 +1352,30 @@ parse_tracks (JsonNode *node, const GPtrArray *media, GPtrArray *tracks_out, GEr
       if (transitions_node != NULL
           && !parse_track_transitions (transitions_node, where, track_entry->transitions, error))
         goto track_out;
+
+      /* Track audio (Phase 10 Wave A): optional for audio tracks —
+       * absent backfills the identity (pre-Phase-10 file). A video
+       * track carrying the member is a VALUE error: video tracks hold
+       * no audio state (D4), the writer never emits one for them, and
+       * a tolerated member would be silently dropped on re-save. */
+      track_entry->audio = oe_track_audio_identity ();
+
+      JsonNode *audio_node = json_object_get_member (track, "audio");
+
+      if (audio_node != NULL)
+        {
+          if (track_kind != OE_TRACK_AUDIO)
+            {
+              g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                           "%s: \"audio\" lives on audio tracks only (video tracks carry no "
+                           "audio state)",
+                           where);
+              goto track_out;
+            }
+
+          if (!parse_track_audio (audio_node, where, &track_entry->audio, error))
+            goto track_out;
+        }
 
       g_ptr_array_add (tracks_out, track_entry);
       track_entry = NULL;
@@ -1438,6 +1656,23 @@ oe_project_format_load (const gchar *path, GError **error)
       const TrackEntry *track = g_ptr_array_index (tracks, t);
       guint track_index = oe_project_add_track (project, track->kind);
 
+      /* Only non-default track audio touches the mutator: add_track
+       * already produced the identity state, and the load path stays
+       * free of observer noise. */
+      OeTrackAudio track_identity = oe_track_audio_identity ();
+
+      if (track->kind == OE_TRACK_AUDIO && !oe_track_audio_equal (&track->audio, &track_identity))
+        {
+          GError *audio_error = NULL;
+
+          if (!oe_project_set_track_audio (project, track_index, &track->audio, &audio_error))
+            {
+              g_propagate_error (error, audio_error);
+              g_clear_object (&project);
+              goto out;
+            }
+        }
+
       for (guint c = 0; c < track->clips->len; c++)
         {
           const ClipEntry *clip = g_ptr_array_index (track->clips, c);
@@ -1462,6 +1697,22 @@ oe_project_format_load (const gchar *path, GError **error)
                                                &visual_error))
                 {
                   g_propagate_error (error, visual_error);
+                  g_clear_object (&project);
+                  goto out;
+                }
+            }
+
+          /* Only non-default clip audio touches the mutator (same
+           * observer-noise rule as the visual above). */
+          OeClipAudio audio_identity = oe_clip_audio_identity ();
+
+          if (!oe_clip_audio_equal (&clip->audio, &audio_identity))
+            {
+              GError *audio_error = NULL;
+
+              if (!oe_project_set_clip_audio (project, track_index, c, &clip->audio, &audio_error))
+                {
+                  g_propagate_error (error, audio_error);
                   g_clear_object (&project);
                   goto out;
                 }

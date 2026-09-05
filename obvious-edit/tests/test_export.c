@@ -16,6 +16,9 @@
  *   /export/transition-blend   Wave B ramp: degenerate edges + midpoint
  *   /export/mixdown-fade-ratio shared envelope shapes the mixdown
  *   /export/parity-transition-fade  2 layers + transition + fade parity
+ *   /export/mixdown-pan-positions  clip/track pan pairs steer channels
+ *   /export/mixdown-gain-ratio     clip gain and track volume halve the mix
+ *   /export/mixdown-mute-solo-matrix  serialized D5 matrix on the export path
  *   /export/cancellation       cancel mid-run: typed error, no files left
  *   /export/atomic-failure     failed export leaves the destination
  *                              byte-identical and no temp behind
@@ -753,6 +756,31 @@ window_mean_abs (const FloatAudio *a, gint64 start_us, gint64 end_us)
       acc += fabs (a->data[i * 2]);
       acc += fabs (a->data[i * 2 + 1]);
       count += 2;
+    }
+
+  return acc / (gdouble) MAX (count, 1);
+}
+
+/* Mean signed amplitude of ONE channel over [start_us, end_us). The
+ * pan proofs compare channels against each other, so the signed sum
+ * keeps the DC wav's polarity instead of folding both channels. */
+static gdouble
+channel_mean_signed (const FloatAudio *a, gint64 start_us, gint64 end_us, int channel)
+{
+  gint64 s = start_us * 48 / 1000;
+  gint64 e = end_us * 48 / 1000;
+
+  g_assert_cmpint ((int) s, <, (int) a->frames);
+
+  e = MIN (e, a->frames);
+
+  gdouble acc = 0;
+  gint64 count = 0;
+
+  for (gint64 i = s; i < e; i++)
+    {
+      acc += a->data[i * 2 + channel];
+      count++;
     }
 
   return acc / (gdouble) MAX (count, 1);
@@ -1601,6 +1629,281 @@ test_mixdown_fade_ratio (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
   g_free (dest);
 }
 
+/* /export/mixdown-pan-positions: the clip and track pan pairs steer
+ * the exported mix per channel — a hard pan sends one channel's
+ * windowed mean far above the other's (ratio-band idiom: encoder DC
+ * attenuation cancels in ratios), center keeps the channels matched. */
+static void
+test_mixdown_pan_positions (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *blue;
+  OeProject *project = build_two_cut_video (fx, &red, &blue);
+
+  write_dc_wav (fx, "tone.wav", 8192, 500000);
+  gchar *wav = g_build_filename (fx->dir, "tone.wav", NULL);
+  const guint audio = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint ref = add_media (project, wav);
+  GError *error = NULL;
+
+  /* Clip pan hard-left: the clip pair folds the right channel away. */
+  insert_clip (project, audio, ref, 0, 500000);
+  OeClipAudio ca = { .gain = 1024, .pan = 0 };
+
+  g_assert_true (oe_project_set_clip_audio (project, audio, 0, &ca, NULL));
+
+  gchar *dest = g_build_filename (fx->dir, "left.mp4", NULL);
+
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  FloatAudio mix;
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble hard_l = channel_mean_signed (&mix, 100000, 400000, 0);
+  const gdouble hard_r = channel_mean_signed (&mix, 100000, 400000, 1);
+
+  g_assert_cmpfloat (hard_l, >, 0.12);
+  g_assert_cmpfloat (hard_l, >, 10.0 * fabs (hard_r));
+
+  float_audio_clear (&mix);
+  g_free (dest);
+
+  /* Clip pan center (the identity state): the channels match. */
+  ca.pan = 512;
+  g_assert_true (oe_project_set_clip_audio (project, audio, 0, &ca, NULL));
+
+  dest = g_build_filename (fx->dir, "center.mp4", NULL);
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble center_l = channel_mean_signed (&mix, 100000, 400000, 0);
+  const gdouble center_r = channel_mean_signed (&mix, 100000, 400000, 1);
+
+  g_assert_cmpfloat (center_l, >, 0.12);
+  g_assert_cmpfloat (fabs (center_l - center_r), <=, 0.15 * fabs (center_l));
+
+  float_audio_clear (&mix);
+  g_free (dest);
+
+  /* Track pan hard-right: the track pair folds the left channel —
+   * the track half of the chain folds the OTHER way from the clip
+   * probe above. */
+  OeTrackAudio ta = { .volume = 1024, .pan = 1024, .mute = 0, .solo = 0 };
+
+  g_assert_true (oe_project_set_track_audio (project, audio, &ta, NULL));
+
+  dest = g_build_filename (fx->dir, "right.mp4", NULL);
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble track_l = channel_mean_signed (&mix, 100000, 400000, 0);
+  const gdouble track_r = channel_mean_signed (&mix, 100000, 400000, 1);
+
+  g_assert_cmpfloat (track_r, >, 0.12);
+  g_assert_cmpfloat (track_r, >, 10.0 * fabs (track_l));
+
+  float_audio_clear (&mix);
+  g_free (dest);
+  g_object_unref (project);
+  g_free (red);
+  g_free (blue);
+  g_free (wav);
+}
+
+/* /export/mixdown-gain-ratio: clip gain and track volume halve the
+ * exported windowed mean — fixed-point 512 halves the chain exactly,
+ * ratio-banded for AAC's level-dependent DC filter. */
+static void
+test_mixdown_gain_ratio (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *blue;
+  OeProject *project = build_two_cut_video (fx, &red, &blue);
+
+  write_dc_wav (fx, "tone.wav", 8192, 500000);
+  gchar *wav = g_build_filename (fx->dir, "tone.wav", NULL);
+  const guint audio = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint ref = add_media (project, wav);
+  GError *error = NULL;
+
+  /* Baseline: identity audio everywhere. */
+  insert_clip (project, audio, ref, 0, 500000);
+
+  gchar *dest = g_build_filename (fx->dir, "base.mp4", NULL);
+
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  FloatAudio mix;
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble baseline = window_mean_abs (&mix, 100000, 400000);
+
+  g_assert_cmpfloat (baseline, >, 0.12);
+
+  float_audio_clear (&mix);
+  g_free (dest);
+
+  /* Clip gain 512 (half of unity): the mix halves. */
+  OeClipAudio ca = { .gain = 512, .pan = 512 };
+
+  g_assert_true (oe_project_set_clip_audio (project, audio, 0, &ca, NULL));
+
+  dest = g_build_filename (fx->dir, "half-clip.mp4", NULL);
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble clip_gain = window_mean_abs (&mix, 100000, 400000);
+
+  g_assert_cmpfloat (clip_gain, >, 0.35 * baseline);
+  g_assert_cmpfloat (clip_gain, <, 0.65 * baseline);
+
+  float_audio_clear (&mix);
+  g_free (dest);
+
+  /* Track volume 512 with the clip at identity: the mix halves too. */
+  ca.gain = 1024;
+  g_assert_true (oe_project_set_clip_audio (project, audio, 0, &ca, NULL));
+
+  OeTrackAudio ta = { .volume = 512, .pan = 512, .mute = 0, .solo = 0 };
+
+  g_assert_true (oe_project_set_track_audio (project, audio, &ta, NULL));
+
+  dest = g_build_filename (fx->dir, "half-track.mp4", NULL);
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble track_gain = window_mean_abs (&mix, 100000, 400000);
+
+  g_assert_cmpfloat (track_gain, >, 0.35 * baseline);
+  g_assert_cmpfloat (track_gain, <, 0.65 * baseline);
+
+  float_audio_clear (&mix);
+  g_free (dest);
+  g_object_unref (project);
+  g_free (red);
+  g_free (blue);
+  g_free (wav);
+}
+
+/* /export/mixdown-mute-solo-matrix: the serialized D5 matrix acts on
+ * the export path exactly as preview will — mute zeroes a track, any
+ * soloed track silences every non-soloed one, and clearing the
+ * matrix restores ordinary summation. */
+static void
+test_mixdown_mute_solo_matrix (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *blue;
+  OeProject *project = build_two_cut_video (fx, &red, &blue);
+
+  /* Two DC sources overlapping [250, 500) ms on separate audio
+   * tracks — the /export/mixdown-sums geometry. */
+  write_dc_wav (fx, "a.wav", 8192, 500000);
+  write_dc_wav (fx, "b.wav", 8192, 500000);
+
+  gchar *a = g_build_filename (fx->dir, "a.wav", NULL);
+  gchar *b = g_build_filename (fx->dir, "b.wav", NULL);
+  const guint t1 = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint t2 = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint ref_a = add_media (project, a);
+  const guint ref_b = add_media (project, b);
+
+  insert_clip (project, t1, ref_a, 0, 500000);
+  insert_clip (project, t2, ref_b, 250000, 500000);
+
+  GError *error = NULL;
+
+  /* Mute T1: only T2 survives anywhere. */
+  OeTrackAudio mute = { .volume = 1024, .pan = 512, .mute = 1, .solo = 0 };
+
+  g_assert_true (oe_project_set_track_audio (project, t1, &mute, NULL));
+
+  gchar *dest = g_build_filename (fx->dir, "muted.mp4", NULL);
+
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  FloatAudio mix;
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble muted_b = window_mean_abs (&mix, 550000, 700000);
+  const gdouble muted_a = window_mean_abs (&mix, 50000, 200000);
+
+  g_assert_cmpfloat (muted_b, >, 0.12);
+  g_assert_cmpfloat (muted_a, <, 0.25 * muted_b);
+
+  float_audio_clear (&mix);
+  g_free (dest);
+
+  /* Solo T1 (mute cleared): solo overrides — T2 is silenced even
+   * unmuted. */
+  OeTrackAudio solo = { .volume = 1024, .pan = 512, .mute = 0, .solo = 1 };
+
+  g_assert_true (oe_project_set_track_audio (project, t1, &solo, NULL));
+
+  dest = g_build_filename (fx->dir, "solo.mp4", NULL);
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble solo_a = window_mean_abs (&mix, 50000, 200000);
+  const gdouble solo_b = window_mean_abs (&mix, 550000, 700000);
+
+  g_assert_cmpfloat (solo_a, >, 0.12);
+  g_assert_cmpfloat (solo_b, <, 0.25 * solo_a);
+
+  float_audio_clear (&mix);
+  g_free (dest);
+
+  /* Clear the matrix: ordinary summation returns (both audible). */
+  OeTrackAudio open_ = { .volume = 1024, .pan = 512, .mute = 0, .solo = 0 };
+
+  g_assert_true (oe_project_set_track_audio (project, t1, &open_, NULL));
+
+  dest = g_build_filename (fx->dir, "open.mp4", NULL);
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble open_a = window_mean_abs (&mix, 50000, 200000);
+  const gdouble open_b = window_mean_abs (&mix, 550000, 700000);
+  const gdouble open_overlap = window_mean_abs (&mix, 300000, 450000);
+
+  g_assert_cmpfloat (open_a, >, 0.12);
+  g_assert_cmpfloat (open_b, >, 0.12);
+  g_assert_cmpfloat (open_overlap, >, 1.4 * open_a);
+  g_assert_cmpfloat (open_overlap, >, 1.4 * open_b);
+
+  float_audio_clear (&mix);
+  g_free (dest);
+  g_object_unref (project);
+  g_free (red);
+  g_free (blue);
+  g_free (a);
+  g_free (b);
+}
+
 /* /export/parity-transition-fade: the Wave B acceptance sequence — two
  * video layers, a boundary transition, and an audio fade, rendered by
  * the one compositor and exported through the one mixdown. Block-mean
@@ -1728,6 +2031,9 @@ main (int argc, char *argv[])
   OE_ADD ("/export/two-layer-seam", test_two_layer_seam);
   OE_ADD ("/export/parity-two-layer", test_parity_two_layer);
   OE_ADD ("/export/transition-blend", test_transition_blend);
+  OE_ADD ("/export/mixdown-pan-positions", test_mixdown_pan_positions);
+  OE_ADD ("/export/mixdown-gain-ratio", test_mixdown_gain_ratio);
+  OE_ADD ("/export/mixdown-mute-solo-matrix", test_mixdown_mute_solo_matrix);
   OE_ADD ("/export/mixdown-fade-ratio", test_mixdown_fade_ratio);
   OE_ADD ("/export/parity-transition-fade", test_parity_transition_fade);
   OE_ADD ("/export/container-truth", test_container_truth);

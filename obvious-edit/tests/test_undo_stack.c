@@ -32,7 +32,18 @@
  *                                with the right (can_undo, can_redo) pair —
  *                                the command-enablement contract.
  *   /undo/auto-pause             undoing while the session is PLAYING
- *                                pauses first (virtual clock), then applies.
+ *                                pauses first (virtual clock), then applies. *
+ * /undo/clip-audio-inverse     clip-audio stroke → undo restores the baseline audio, redo
+ * re-applies (Wave A). /undo/clip-audio-stroke-one-record  many previews land as ONE record.
+ *   /undo/clip-audio-zero-delta  a stroke ending where it began records
+ *                                nothing, plain or stroke variant.
+ *   /undo/clip-audio-plain-baseline  one-shot entry captures the
+ *                                immediately-prior audio as the baseline.
+ *   /undo/track-audio-inverse    track-indexed payload: undo restores the
+ *                                audio track's prior state (no clip index).
+ *   /undo/track-audio-stroke-one-record  previews collapse to one record.
+ *   /undo/track-audio-zero-delta zero-delta strokes leave no entry.
+ *   /undo/track-audio-plain-baseline  one-shot entry undo/redo round trip.
  *
  * Links only the modules under test (core model, persistence, undo
  * stack, playback session) — no GTK. The playback test runs on SDL's
@@ -410,6 +421,324 @@ test_undo_visual_plain_baseline (UndoFixture *fx, gconstpointer user_data G_GNUC
   after = clip_at (fx, 0);
 
   g_assert_true (oe_clip_visual_equal (&after.visual, &visual));
+}
+
+/* ------------------------------------------------------------------ */
+/* Audio ops (Phase 10 Wave A): clip gain/pan and track                */
+/* volume/pan/mute/solo ride the same record/replay machinery as the   */
+/* visual kind.                                                        */
+/* ------------------------------------------------------------------ */
+
+/* Reads (copy of) an audio track's state. */
+static OeTrackAudio
+track_audio_at (UndoFixture *fx, guint index)
+{
+  OeTrackAudio audio = { 0 };
+
+  g_assert_true (oe_project_get_track_audio (fx->project, index, &audio));
+  return audio;
+}
+
+static void
+test_undo_clip_audio_inverse (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 0, 0, 5 * US);
+
+  OeClipAudio baseline = oe_clip_audio_identity ();
+
+  baseline.gain = 896;
+  baseline.pan = 384;
+
+  /* One unrecorded preview mutation before the stroke commits. */
+  OeClipAudio preview = baseline;
+
+  preview.gain = 300;
+  g_assert_true (oe_project_set_clip_audio (fx->project, fx->track, 0, &preview, NULL));
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1);
+
+  OeClipAudio final = baseline;
+
+  final.gain = 2048;
+  final.pan = 0;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_clip_audio_with_old (fx->project, fx->stack, fx->track, 0, &baseline,
+                                                  &final, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 2); /* insert + one stroke */
+
+  const OeUndoRecord *record = NULL;
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+  g_assert_cmpstr (record->label, ==, "Audio clip 0 on track 0");
+  g_assert_cmpuint (record->kind, ==, OE_UNDO_OP_CLIP_AUDIO);
+
+  OeClip restored = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_audio_equal (&restored.audio, &baseline)); /* not the preview */
+
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  restored = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_audio_equal (&restored.audio, &final));
+}
+
+static void
+test_undo_clip_audio_stroke_one_record (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 0, 0, 5 * US);
+
+  OeClipAudio baseline = oe_clip_audio_identity ();
+
+  baseline.gain = 640;
+
+  /* A long drag with many preview states still lands as ONE record. */
+  for (gint32 gain = 100; gain < 600; gain += 150)
+    {
+      OeClipAudio preview = baseline;
+
+      preview.gain = gain;
+      g_assert_true (oe_project_set_clip_audio (fx->project, fx->track, 0, &preview, NULL));
+    }
+
+  OeClipAudio committed = baseline;
+
+  committed.gain = 1536;
+  committed.pan = 256;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_clip_audio_with_old (fx->project, fx->stack, fx->track, 0, &baseline,
+                                                  &committed, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 2); /* insert + ONE audio stroke */
+
+  const OeUndoRecord *record = NULL;
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  OeClip restored = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_audio_equal (&restored.audio, &baseline));
+}
+
+static void
+test_undo_clip_audio_zero_delta (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 0, 0, 5 * US);
+
+  OeClipAudio identity = oe_clip_audio_identity ();
+  GError *error = NULL;
+
+  /* A stroke that ends where it started mutates (idempotent) but
+   * leaves no history entry. */
+  g_assert_true (oe_edit_set_clip_audio_with_old (fx->project, fx->stack, fx->track, 0, &identity,
+                                                  &identity, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1); /* still just the insert */
+
+  /* The one-shot recorder also refuses to record a no-op. */
+  g_assert_true (oe_edit_set_clip_audio (fx->project, fx->stack, fx->track, 0, &identity, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1); /* unchanged */
+  g_assert_true (oe_undo_stack_can_undo (fx->stack));
+}
+
+static void
+test_undo_clip_audio_plain_baseline (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 0, 0, 5 * US);
+
+  /* One-shot numeric entry: the recorder captures the audio
+   * immediately before the mutation as the undo baseline. */
+  OeClipAudio audio = oe_clip_audio_identity ();
+
+  audio.gain = 256;
+  audio.pan = 900;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_clip_audio (fx->project, fx->stack, fx->track, 0, &audio, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 2); /* insert + one record */
+
+  OeClip after = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_audio_equal (&after.audio, &audio));
+
+  const OeUndoRecord *record = NULL;
+  OeClipAudio identity = oe_clip_audio_identity ();
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  after = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_audio_equal (&after.audio, &identity));
+
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  after = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_audio_equal (&after.audio, &audio));
+}
+
+static void
+test_undo_track_audio_inverse (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  const guint audio = oe_project_add_track (fx->project, OE_TRACK_AUDIO);
+
+  OeTrackAudio baseline = oe_track_audio_identity ();
+
+  baseline.volume = 1536;
+  baseline.solo = 1;
+
+  /* One unrecorded preview before the stroke commits. */
+  OeTrackAudio preview = baseline;
+
+  preview.volume = 400;
+  g_assert_true (oe_project_set_track_audio (fx->project, audio, &preview, NULL));
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 0);
+
+  OeTrackAudio final = baseline;
+
+  final.volume = 2048;
+  final.pan = 128;
+
+  GError *error = NULL;
+
+  g_assert_true (
+      oe_edit_set_track_audio_with_old (fx->project, fx->stack, audio, &baseline, &final, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1); /* the one track stroke */
+
+  const OeUndoRecord *record = NULL;
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+  g_assert_cmpstr (record->label, ==, "Audio track 1");
+  g_assert_cmpuint (record->kind, ==, OE_UNDO_OP_TRACK_AUDIO);
+
+  OeTrackAudio restored = track_audio_at (fx, audio);
+
+  g_assert_true (oe_track_audio_equal (&restored, &baseline)); /* not the preview */
+
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  restored = track_audio_at (fx, audio);
+
+  g_assert_true (oe_track_audio_equal (&restored, &final));
+}
+
+static void
+test_undo_track_audio_stroke_one_record (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  const guint audio = oe_project_add_track (fx->project, OE_TRACK_AUDIO);
+
+  OeTrackAudio baseline = oe_track_audio_identity ();
+
+  /* A long drag with many preview states still lands as ONE record. */
+  for (gint32 volume = 200; volume < 900; volume += 250)
+    {
+      OeTrackAudio preview = baseline;
+
+      preview.volume = volume;
+      g_assert_true (oe_project_set_track_audio (fx->project, audio, &preview, NULL));
+    }
+
+  OeTrackAudio committed = baseline;
+
+  committed.volume = 1280;
+  committed.mute = 1;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_track_audio_with_old (fx->project, fx->stack, audio, &baseline,
+                                                   &committed, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1); /* ONE audio stroke */
+
+  const OeUndoRecord *record = NULL;
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  OeTrackAudio restored = track_audio_at (fx, audio);
+
+  g_assert_true (oe_track_audio_equal (&restored, &baseline));
+}
+
+static void
+test_undo_track_audio_zero_delta (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  const guint audio = oe_project_add_track (fx->project, OE_TRACK_AUDIO);
+
+  OeTrackAudio identity = oe_track_audio_identity ();
+  GError *error = NULL;
+
+  /* A stroke that ends where it started records nothing. */
+  g_assert_true (oe_edit_set_track_audio_with_old (fx->project, fx->stack, audio, &identity,
+                                                   &identity, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 0);
+
+  /* The one-shot recorder also refuses to record a no-op. */
+  g_assert_true (oe_edit_set_track_audio (fx->project, fx->stack, audio, &identity, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 0);
+  g_assert_false (oe_undo_stack_can_undo (fx->stack));
+}
+
+static void
+test_undo_track_audio_plain_baseline (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  const guint audio = oe_project_add_track (fx->project, OE_TRACK_AUDIO);
+
+  /* One-shot numeric entry: the recorder captures the track's audio
+   * immediately before the mutation as the undo baseline. */
+  OeTrackAudio audio_state = oe_track_audio_identity ();
+
+  audio_state.volume = 512;
+  audio_state.pan = 100;
+  audio_state.mute = 1;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_track_audio (fx->project, fx->stack, audio, &audio_state, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1);
+
+  OeTrackAudio got = track_audio_at (fx, audio);
+
+  g_assert_true (oe_track_audio_equal (&got, &audio_state));
+
+  const OeUndoRecord *record = NULL;
+  OeTrackAudio identity = oe_track_audio_identity ();
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  OeTrackAudio restored = track_audio_at (fx, audio);
+
+  g_assert_true (oe_track_audio_equal (&restored, &identity));
+
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  OeTrackAudio replayed = track_audio_at (fx, audio);
+
+  g_assert_true (oe_track_audio_equal (&replayed, &audio_state));
 }
 
 /* ------------------------------------------------------------------ */
@@ -844,6 +1173,14 @@ main (int argc, char *argv[])
   ADD_UNDO_TEST ("/undo/visual-stroke-one-record", test_undo_visual_stroke_one_record);
   ADD_UNDO_TEST ("/undo/visual-zero-delta", test_undo_visual_zero_delta);
   ADD_UNDO_TEST ("/undo/visual-plain-baseline", test_undo_visual_plain_baseline);
+  ADD_UNDO_TEST ("/undo/clip-audio-inverse", test_undo_clip_audio_inverse);
+  ADD_UNDO_TEST ("/undo/clip-audio-stroke-one-record", test_undo_clip_audio_stroke_one_record);
+  ADD_UNDO_TEST ("/undo/clip-audio-zero-delta", test_undo_clip_audio_zero_delta);
+  ADD_UNDO_TEST ("/undo/clip-audio-plain-baseline", test_undo_clip_audio_plain_baseline);
+  ADD_UNDO_TEST ("/undo/track-audio-inverse", test_undo_track_audio_inverse);
+  ADD_UNDO_TEST ("/undo/track-audio-stroke-one-record", test_undo_track_audio_stroke_one_record);
+  ADD_UNDO_TEST ("/undo/track-audio-zero-delta", test_undo_track_audio_zero_delta);
+  ADD_UNDO_TEST ("/undo/track-audio-plain-baseline", test_undo_track_audio_plain_baseline);
   ADD_UNDO_TEST ("/undo/record-rejection", test_undo_record_rejection);
   ADD_UNDO_TEST ("/undo/interleaved-roundtrip", test_undo_interleaved_roundtrip);
   ADD_UNDO_TEST ("/undo/depth-eviction", test_undo_depth_eviction);

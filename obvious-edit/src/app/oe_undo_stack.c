@@ -702,6 +702,164 @@ oe_edit_set_clip_visual_with_old (OeProject *project, OeUndoStack *stack, guint 
                                error);
 }
 
+/* Shared clip-audio stroke recorder (Phase 10 Wave A): mutates to
+ * @new_audio and records ONE #OE_UNDO_OP_CLIP_AUDIO record restoring
+ * @old_audio — the stroke baseline, immune to preview mutations in
+ * between. The payload owns no memory, so no deep copies are needed;
+ * the aliased keyframe store in the captured `before` still requires
+ * clip_capture() before the mutator can release the original. A
+ * zero-delta stroke records nothing. */
+static gboolean
+record_clip_audio_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
+                          guint clip_index, const OeClipAudio *old_audio,
+                          const OeClipAudio *new_audio, GError **error)
+{
+  OeClip before = { 0 };
+
+  if (stack == NULL)
+    return oe_project_set_clip_audio (project, track_index, clip_index, new_audio, error);
+
+  if (!oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  clip_capture (&before);
+
+  if (!oe_project_set_clip_audio (project, track_index, clip_index, new_audio, error))
+    return FALSE;
+
+  if (oe_clip_audio_equal (old_audio, new_audio))
+    return TRUE; /* zero-delta stroke: the model already holds the state */
+
+  OeUndoRecord *rec = record_new (
+      OE_UNDO_OP_CLIP_AUDIO, g_strdup_printf ("Audio clip %u on track %u", clip_index, track_index),
+      track_index, clip_index);
+
+  rec->clip = before;
+  /* The undo payload is the STROKE baseline, not the project state at
+   * record time — a previewed stroke leaves the model at its last
+   * preview, and undo must restore where the stroke began. */
+  rec->clip.audio = *old_audio;
+  rec->new_clip_audio = *new_audio;
+  stack_push (stack, rec);
+  return TRUE;
+}
+
+/* Shared track-audio stroke recorder (Phase 10 Wave A): mutates to
+ * @new_audio and records ONE #OE_UNDO_OP_TRACK_AUDIO record restoring
+ * @old_audio. The payload is track-indexed (keyed by track_index
+ * alone) and memory-free. A zero-delta stroke records nothing. */
+static gboolean
+record_track_audio_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
+                           const OeTrackAudio *old_audio, const OeTrackAudio *new_audio,
+                           GError **error)
+{
+  OeTrackAudio before = { 0 };
+
+  if (stack == NULL)
+    return oe_project_set_track_audio (project, track_index, new_audio, error);
+
+  if (!oe_project_get_track_audio (project, track_index, &before))
+    return FALSE;
+
+  if (!oe_project_set_track_audio (project, track_index, new_audio, error))
+    return FALSE;
+
+  if (oe_track_audio_equal (old_audio, new_audio))
+    return TRUE; /* zero-delta stroke: the model already holds the state */
+
+  OeUndoRecord *rec
+      = record_new (OE_UNDO_OP_TRACK_AUDIO, g_strdup_printf ("Audio track %u", track_index),
+                    track_index, 0); /* track-indexed payload: no clip identity */
+
+  rec->old_track_audio = *old_audio;
+  rec->new_track_audio = *new_audio;
+  stack_push (stack, rec);
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
+                        const OeClipAudio *audio, GError **error)
+{
+  g_return_val_if_fail (audio != NULL, FALSE);
+
+  OeClip before = { 0 };
+
+  if (stack != NULL && !oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  /* The capture aliases the live keyframe store; a private copy must
+   * exist before the mutator can release the original. */
+  if (stack != NULL)
+    clip_capture (&before);
+
+  if (!oe_project_set_clip_audio (project, track_index, clip_index, audio, error))
+    return FALSE;
+
+  if (stack != NULL && !oe_clip_audio_equal (&before.audio, audio))
+    {
+      OeUndoRecord *rec
+          = record_new (OE_UNDO_OP_CLIP_AUDIO,
+                        g_strdup_printf ("Audio clip %u on track %u", clip_index, track_index),
+                        track_index, clip_index);
+
+      rec->clip = before; /* baseline audio moves with the record */
+      rec->new_clip_audio = *audio;
+      stack_push (stack, rec);
+    }
+
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_clip_audio_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                                 guint clip_index, const OeClipAudio *old_audio,
+                                 const OeClipAudio *new_audio, GError **error)
+{
+  g_return_val_if_fail (old_audio != NULL && new_audio != NULL, FALSE);
+
+  return record_clip_audio_stroke (project, stack, track_index, clip_index, old_audio, new_audio,
+                                   error);
+}
+
+gboolean
+oe_edit_set_track_audio (OeProject *project, OeUndoStack *stack, guint track_index,
+                         const OeTrackAudio *audio, GError **error)
+{
+  g_return_val_if_fail (audio != NULL, FALSE);
+
+  OeTrackAudio before = { 0 };
+
+  if (stack != NULL && !oe_project_get_track_audio (project, track_index, &before))
+    return FALSE;
+
+  if (!oe_project_set_track_audio (project, track_index, audio, error))
+    return FALSE;
+
+  if (stack != NULL && !oe_track_audio_equal (&before, audio))
+    {
+      OeUndoRecord *rec
+          = record_new (OE_UNDO_OP_TRACK_AUDIO, g_strdup_printf ("Audio track %u", track_index),
+                        track_index, 0); /* track-indexed payload: no clip identity */
+
+      rec->old_track_audio = before;
+      rec->new_track_audio = *audio;
+      stack_push (stack, rec);
+    }
+
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_track_audio_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                                  const OeTrackAudio *old_audio, const OeTrackAudio *new_audio,
+                                  GError **error)
+{
+  g_return_val_if_fail (old_audio != NULL && new_audio != NULL, FALSE);
+
+  return record_track_audio_stroke (project, stack, track_index, old_audio, new_audio, error);
+}
+
 /* ------------------------------------------------------------------ */
 /* History application: inverse replay through the model mutators.     */
 /* ------------------------------------------------------------------ */
@@ -812,6 +970,11 @@ apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
     case OE_UNDO_OP_VISUAL:
       return oe_project_set_clip_visual (project, rec->track_index, rec->clip_index,
                                          &rec->clip.visual, error);
+    case OE_UNDO_OP_CLIP_AUDIO:
+      return oe_project_set_clip_audio (project, rec->track_index, rec->clip_index,
+                                        &rec->clip.audio, error);
+    case OE_UNDO_OP_TRACK_AUDIO:
+      return oe_project_set_track_audio (project, rec->track_index, &rec->old_track_audio, error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_undo (project, rec, error);
     }
@@ -839,6 +1002,11 @@ apply_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
     case OE_UNDO_OP_VISUAL:
       return oe_project_set_clip_visual (project, rec->track_index, rec->clip_index,
                                          &rec->new_visual, error);
+    case OE_UNDO_OP_CLIP_AUDIO:
+      return oe_project_set_clip_audio (project, rec->track_index, rec->clip_index,
+                                        &rec->new_clip_audio, error);
+    case OE_UNDO_OP_TRACK_AUDIO:
+      return oe_project_set_track_audio (project, rec->track_index, &rec->new_track_audio, error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_redo (project, rec, error);
     }

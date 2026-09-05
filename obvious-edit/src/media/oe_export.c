@@ -16,6 +16,7 @@
 
 #include "oe_export.h"
 
+#include "../core/oe_audio_factor.h"
 #include "../core/oe_fades.h"
 
 #include <errno.h>
@@ -317,7 +318,11 @@ frame_span_us (const AVFrame *frame)
 
 /* Decodes all audio tracks additively into an interleaved-stereo
  * float mix of @total_samples samples. Gaps stay silent (zeroed);
- * every track contributes in array order; sums are hard-clamped. */
+ * every audible track contributes in array order through the shared
+ * integer factor chain (Phase 10 Wave A): fade × clip gain/pan ×
+ * track volume/pan, with the mute/solo matrix zeroing silenced
+ * tracks — a silenced track is skipped before its media is even
+ * opened. Sums are hard-clamped once, at the end. */
 static gboolean
 export_mixdown (const OeExportSpec *spec, gint64 total_samples, gfloat *mix,
                 OeExportCancelFunc cancel_fn, gpointer cancel_data, GError **error)
@@ -326,12 +331,26 @@ export_mixdown (const OeExportSpec *spec, gint64 total_samples, gfloat *mix,
       = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, mix_source_free);
   gboolean ok = FALSE;
 
+  /* The any-solo scan (D5): one pass over the audio tracks — video
+   * tracks carry no audio state and never count. */
+  gboolean any_solo = FALSE;
+
+  for (guint t = 0; t < spec->sequence->tracks->len && !any_solo; t++)
+    {
+      const OeTrack *track = g_ptr_array_index (spec->sequence->tracks, t);
+
+      any_solo = track->kind == OE_TRACK_AUDIO && track->audio.solo != 0;
+    }
+
   for (guint t = 0; t < spec->sequence->tracks->len; t++)
     {
       const OeTrack *track = g_ptr_array_index (spec->sequence->tracks, t);
 
       if (track->kind != OE_TRACK_AUDIO || track->clips == NULL)
         continue;
+
+      /* The track-level mute/solo verdict (D5) for this track. */
+      const gboolean audible = oe_audio_audible (track->audio.mute, track->audio.solo, any_solo);
 
       for (guint c = 0; c < track->clips->len; c++)
         {
@@ -349,6 +368,9 @@ export_mixdown (const OeExportSpec *spec, gint64 total_samples, gfloat *mix,
 
           if (clip_start_us >= export_sequence_end (spec->sequence))
             continue; /* entirely past the sequence end */
+
+          if (!audible)
+            continue; /* muted or lost-solo: the track contributes silence */
 
           MixSource *ms = g_hash_table_lookup (sources, GUINT_TO_POINTER (clip->media_ref));
 
@@ -485,15 +507,27 @@ export_mixdown (const OeExportSpec *spec, gint64 total_samples, gfloat *mix,
                   clip_start_us + (frame_src_us - clip_src_start_us)
                       + av_rescale (skip, G_USEC_PER_SEC, OE_EXPORT_SAMPLE_RATE),
                   clip_start_us, clip_end_us, clip->visual.fade_in_us, clip->visual.fade_out_us);
-              const gfloat gain_scale = (gfloat) gain / (gfloat) OE_FADE_SCALE;
 
-              for (gint64 i = 0; i < n_write; i++)
+              /* Shared factor chain (Phase 10 Wave A): the fade keeps
+               * its per-AVFrame cadence while clip gain/pan and track
+               * volume/pan are buffer-constant; the chain folds both
+               * pan pairs, zeroes the buffer when the matrix
+               * silenced the track, and stays integer end to end. */
+              gint32 factor[2] = { 0, 0 };
+
+              oe_audio_factor ((gint32) gain, clip->audio.gain, clip->audio.pan,
+                               track->audio.volume, track->audio.pan, audible ? 1 : 0, factor);
+
+              if (factor[0] != 0 || factor[1] != 0)
                 {
-                  const gfloat *s = scratch + (size_t) (skip + i) * OE_EXPORT_CHANNELS;
-                  gfloat *d = mix + (size_t) (write_idx + i) * OE_EXPORT_CHANNELS;
+                  for (gint64 i = 0; i < n_write; i++)
+                    {
+                      const gfloat *s = scratch + (size_t) (skip + i) * OE_EXPORT_CHANNELS;
+                      gfloat *d = mix + (size_t) (write_idx + i) * OE_EXPORT_CHANNELS;
 
-                  d[0] += s[0] * gain_scale;
-                  d[1] += s[1] * gain_scale;
+                      d[0] += s[0] * (gfloat) factor[0] / (gfloat) OE_AUDIO_UNITY;
+                      d[1] += s[1] * (gfloat) factor[1] / (gfloat) OE_AUDIO_UNITY;
+                    }
                 }
 
               g_free (scratch);

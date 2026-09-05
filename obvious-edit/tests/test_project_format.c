@@ -23,6 +23,15 @@
  *   /format/visual-bad-values     strict when present: closed member
  *                                 list, integer tokens, model-domain
  *                                 ranges.
+ *   /format/audio-round-trip      clip and audio-track audio written
+ *                                 always; byte-identical round trip;
+ *                                 siblings keep identity (Wave A).
+ *   /format/audio-backfill        pre-Phase-10 documents load at the
+ *                                 audio identity, clips and tracks.
+ *   /format/audio-bad-values      strict when present: closed member
+ *                                 list, integer tokens, model-domain
+ *                                 ranges; video tracks never carry
+ *                                 audio state (Wave A).
  */
 
 #include <glib.h>
@@ -972,6 +981,235 @@ test_visual_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED
   g_free (partial);
 }
 
+/* A document with audio state on a clip and an audio track: the
+ * members survive byte-identically and the untouched siblings keep
+ * the identity (Phase 10 Wave A). */
+static void
+test_audio_round_trip (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  OeProject *project = build_round_trip_project ();
+
+  /* Non-default audio on the audio track's clip and the track itself. */
+  OeClipAudio clip_audio = { .gain = 896, .pan = 384 };
+
+  g_assert_true (oe_project_set_clip_audio (project, 1, 0, &clip_audio, NULL));
+
+  OeTrackAudio track_audio = { .volume = 1536, .pan = 640, .mute = 0, .solo = 1 };
+
+  g_assert_true (oe_project_set_track_audio (project, 1, &track_audio, NULL));
+
+  gchar *path1 = g_build_filename (fx->dir, "aud1.oe", NULL);
+  gchar *path2 = g_build_filename (fx->dir, "aud2.oe", NULL);
+
+  g_assert_true (oe_project_format_save (project, path1, &error));
+  g_assert_no_error (error);
+
+  OeProject *loaded = oe_project_format_load (path1, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (loaded);
+
+  /* The clip's audio survives the round trip exactly. */
+  OeClip loaded_clip = get_clip_at (loaded, 1, 0);
+
+  g_assert_true (oe_clip_audio_equal (&loaded_clip.audio, &clip_audio));
+
+  /* The audio track's state survives too. */
+  OeTrackAudio loaded_track = oe_track_audio_identity ();
+
+  g_assert_true (oe_project_get_track_audio (loaded, 1, &loaded_track));
+  g_assert_true (oe_track_audio_equal (&loaded_track, &track_audio));
+
+  /* The video track's clip keeps the identity (the writer emits the
+   * member everywhere; the value is the identity). */
+  OeClip video_clip = get_clip_at (loaded, 0, 0);
+  OeClipAudio clip_identity = oe_clip_audio_identity ();
+
+  g_assert_true (oe_clip_audio_equal (&video_clip.audio, &clip_identity));
+
+  /* A video track reads back nothing: it never carries audio state
+   * (D4), so the writer emitted no member and the getter rejects the
+   * kind — the model test pins that rejection; here the round trip
+   * simply drops nothing. The video clip keeps its identity audio.
+   */
+  OeTrackAudio untouched = oe_track_audio_identity ();
+
+  g_assert_false (oe_project_get_track_audio (loaded, 0, &untouched));
+
+  /* Save -> load -> save is byte-identical (integer tokens only). */
+  g_assert_true (oe_project_format_save (loaded, path2, &error));
+  g_assert_no_error (error);
+
+  gsize len1 = 0;
+  gsize len2 = 0;
+  gchar *data1 = read_all (path1, &len1);
+  gchar *data2 = read_all (path2, &len2);
+
+  g_assert_cmpmem (data1, len1, data2, len2);
+
+  g_free (data1);
+  g_free (data2);
+  g_free (path1);
+  g_free (path2);
+  g_clear_object (&loaded);
+  g_object_unref (project);
+}
+
+/* A pre-Phase-10 document without the audio members loads with the
+ * identity state everywhere — the width/height backfill recipe, per
+ * clip and per audio track. */
+static void
+test_audio_backfill (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  /* A doc with a video clip and an audio track, neither carrying an
+   * audio member (what every pre-Wave-A file looks like). */
+  gchar *path
+      = write_doc (fx, "{\n"
+                       "  \"obvious-edit-project\": {\n"
+                       "    \"format-version\": 1,\n"
+                       "    \"name\": \"Doc\",\n"
+                       "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                       "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+                       "    \"tracks\": [\n"
+                       "      { \"kind\": \"video\", \"clips\": [\n"
+                       "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+                       "          \"source-out-us\": 1000 } ] },\n"
+                       "      { \"kind\": \"audio\", \"clips\": [] }\n"
+                       "    ]\n"
+                       "  }\n"
+                       "}\n");
+
+  OeProject *loaded = oe_project_format_load (path, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (loaded);
+
+  OeClip clip = get_clip_at (loaded, 0, 0);
+  OeClipAudio clip_identity = oe_clip_audio_identity ();
+
+  g_assert_true (oe_clip_audio_equal (&clip.audio, &clip_identity));
+
+  OeTrackAudio track_identity = oe_track_audio_identity ();
+  OeTrackAudio got = oe_track_audio_identity ();
+
+  g_assert_true (oe_project_get_track_audio (loaded, 1, &got));
+  g_assert_true (oe_track_audio_equal (&got, &track_identity));
+
+  g_free (path);
+  g_clear_object (&loaded);
+}
+
+/* One complete audio member body per probe; the reader checks
+ * presence before ranges, so a range probe must be complete to reach
+ * the range check. The domain quark stays a macro at the assert site
+ * — it is a function call, not a constant initializer. */
+static void
+test_audio_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  /* Clip-level probes inside the "audio" member of a clip. */
+  static const struct
+  {
+    const gchar *audio_body;
+    gint code;
+  } clip_bad[] = {
+    { "\"gain\": 2049, \"pan\": 512", OE_PROJECT_FORMAT_ERROR_VALUE },
+    { "\"gain\": -1, \"pan\": 512", OE_PROJECT_FORMAT_ERROR_VALUE },
+    { "\"gain\": 1024, \"pan\": 1025", OE_PROJECT_FORMAT_ERROR_VALUE },
+    { "\"gain\": 1.5, \"pan\": 512", OE_PROJECT_FORMAT_ERROR_TYPE },
+    { "\"gain\": 1024, \"pan\": 512.0", OE_PROJECT_FORMAT_ERROR_TYPE },
+    { "\"gain\": 1024, \"pan\": 512, \"bogus\": 1", OE_PROJECT_FORMAT_ERROR_UNKNOWN_MEMBER },
+    { "\"gain\": 1024", OE_PROJECT_FORMAT_ERROR_MISSING },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (clip_bad); i++)
+    {
+      gchar *body = g_strdup_printf (
+          "{\n"
+          "  \"obvious-edit-project\": {\n"
+          "    \"format-version\": 1,\n"
+          "    \"name\": \"Doc\",\n"
+          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+          "    \"tracks\": [\n"
+          "      { \"kind\": \"audio\", \"clips\": [\n"
+          "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+          "          \"source-out-us\": 1000,\n"
+          "          \"audio\": { %s } } ] }\n"
+          "    ]\n"
+          "  }\n"
+          "}\n",
+          clip_bad[i].audio_body);
+      gchar *path = write_doc (fx, body);
+
+      OeProject *loaded = oe_project_format_load (path, &error);
+
+      g_assert_null (loaded);
+      g_assert_error (error, OE_PROJECT_FORMAT_ERROR, clip_bad[i].code);
+      g_clear_error (&error);
+
+      g_free (body);
+      g_free (path);
+    }
+
+  /* Track-level probes, ending with the video-track rejection (D4):
+   * the writer never emits audio state on a video track and a
+   * tolerated member would be dropped on the next save. */
+  static const struct
+  {
+    const gchar *track_line;
+    const gchar *audio_body;
+    gint code;
+  } track_bad[] = {
+    { "\"kind\": \"audio\", \"clips\": []",
+      "\"volume\": 2049, \"pan\": 512, \"mute\": 0, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
+    { "\"kind\": \"audio\", \"clips\": []",
+      "\"volume\": 1024, \"pan\": -1, \"mute\": 0, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
+    { "\"kind\": \"audio\", \"clips\": []",
+      "\"volume\": 1024, \"pan\": 512, \"mute\": 2, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
+    { "\"kind\": \"audio\", \"clips\": []",
+      "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 1.5", OE_PROJECT_FORMAT_ERROR_TYPE },
+    { "\"kind\": \"audio\", \"clips\": []",
+      "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 0, \"aux\": 9",
+      OE_PROJECT_FORMAT_ERROR_UNKNOWN_MEMBER },
+    { "\"kind\": \"video\", \"clips\": []",
+      "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (track_bad); i++)
+    {
+      gchar *body
+          = g_strdup_printf ("{\n"
+                             "  \"obvious-edit-project\": {\n"
+                             "    \"format-version\": 1,\n"
+                             "    \"name\": \"Doc\",\n"
+                             "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                             "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+                             "    \"tracks\": [\n"
+                             "      { %s,\n"
+                             "        \"audio\": { %s } }\n"
+                             "    ]\n"
+                             "  }\n"
+                             "}\n",
+                             track_bad[i].track_line, track_bad[i].audio_body);
+      gchar *path = write_doc (fx, body);
+
+      OeProject *loaded = oe_project_format_load (path, &error);
+
+      g_assert_null (loaded);
+      g_assert_error (error, OE_PROJECT_FORMAT_ERROR, track_bad[i].code);
+      g_clear_error (&error);
+
+      g_free (body);
+      g_free (path);
+    }
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -995,6 +1233,9 @@ main (int argc, char *argv[])
   ADD ("visual-round-trip", test_visual_round_trip);
   ADD ("visual-backfill", test_visual_backfill);
   ADD ("visual-bad-values", test_visual_bad_values);
+  ADD ("audio-round-trip", test_audio_round_trip);
+  ADD ("audio-backfill", test_audio_backfill);
+  ADD ("audio-bad-values", test_audio_bad_values);
 
 #undef ADD
 
