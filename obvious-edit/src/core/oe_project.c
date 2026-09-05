@@ -527,9 +527,11 @@ oe_project_set_clip_visual (OeProject *self, guint track_index, guint clip_index
     }
 
   /* Validate first, deep-copy second, swap last: a rejected call never
-   * mutates the model. */
+   * mutates the model. The staging visual is identity-initialized —
+   * oe_clip_visual_copy asserts a zeroed destination, so raw-stack
+   * storage would trip the Wave A keyframe-NULL invariant. */
   OeClip *clip = g_ptr_array_index (track->clips, clip_index);
-  OeClipVisual copy;
+  OeClipVisual copy = oe_clip_visual_identity ();
 
   oe_clip_visual_copy (&copy, visual);
   oe_clip_visual_clear (&clip->visual);

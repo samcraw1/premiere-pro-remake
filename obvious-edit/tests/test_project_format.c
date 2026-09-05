@@ -16,6 +16,13 @@
  *   /format/sequence-size         doc-level width/height written always;
  *                                 absent fields backfill defaults, bad
  *                                 values fail typed (additive v1).
+ *   /format/visual-round-trip     clip visual written always, integer
+ *                                 tokens only; save-load-save is
+ *                                 byte-identical and fields survive.
+ *   /format/visual-backfill       pre-Phase-9 clips load at identity.
+ *   /format/visual-bad-values     strict when present: closed member
+ *                                 list, integer tokens, model-domain
+ *                                 ranges.
  */
 
 #include <glib.h>
@@ -748,6 +755,223 @@ test_sequence_size_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC
   g_free (string_width);
 }
 
+/* --- clip visual member (Phase 9 Wave A) ------------------------------------------ */
+
+static void
+test_visual_round_trip (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  OeProject *project = build_round_trip_project ();
+
+  /* A distinctly non-default visual on the first video clip. */
+  OeClipVisual visual = oe_clip_visual_identity ();
+
+  visual.pos_x = 37;
+  visual.pos_y = -54;
+  visual.scale_permille = 1250;
+  visual.rotation_cdeg = -900;
+  visual.opacity = 128;
+  visual.crop_l = 4;
+  visual.crop_t = 5;
+  visual.crop_r = 6;
+  visual.crop_b = 7;
+  visual.fade_in_us = 120000;
+  visual.fade_out_us = 340000;
+  g_assert_true (oe_project_set_clip_visual (project, 0, 0, &visual, NULL));
+
+  gchar *path1 = g_build_filename (fx->dir, "vis1.oe", NULL);
+  gchar *path2 = g_build_filename (fx->dir, "vis2.oe", NULL);
+
+  g_assert_true (oe_project_format_save (project, path1, &error));
+  g_assert_no_error (error);
+
+  OeProject *loaded = oe_project_format_load (path1, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (loaded);
+
+  OeClip loaded_clip = get_clip_at (loaded, 0, 0);
+
+  g_assert_true (oe_clip_visual_equal (&loaded_clip.visual, &visual));
+
+  /* A second clip keeps the identity state. */
+  OeClip second_clip = get_clip_at (loaded, 0, 1);
+
+  g_assert_true (oe_clip_visual_is_default (&second_clip.visual));
+
+  /* Save -> load -> save is byte-identical (integer tokens only). */
+  g_assert_true (oe_project_format_save (loaded, path2, &error));
+  g_assert_no_error (error);
+
+  gsize len1 = 0;
+  gsize len2 = 0;
+  gchar *data1 = read_all (path1, &len1);
+  gchar *data2 = read_all (path2, &len2);
+
+  g_assert_cmpmem (data1, len1, data2, len2);
+
+  g_free (data1);
+  g_free (data2);
+  g_free (path1);
+  g_free (path2);
+  g_clear_object (&loaded);
+  g_object_unref (project);
+}
+
+/* A pre-Phase-9 document without the visual member loads with the
+ * identity state — the width/height backfill recipe, per clip. */
+static void
+test_visual_backfill (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  gchar *path = write_doc (fx, MINIMAL_DOC);
+
+  OeProject *loaded = oe_project_format_load (path, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (loaded);
+
+  OeClip clip = get_clip_at (loaded, 0, 0);
+  OeClipVisual identity = oe_clip_visual_identity ();
+
+  g_assert_true (oe_clip_visual_equal (&clip.visual, &identity));
+
+  g_free (path);
+  g_clear_object (&loaded);
+}
+
+/* A complete visual member body with one slot per field the range
+ * tests override; the reader checks presence before ranges, so a range
+ * probe must be complete to reach the range check. */
+static gchar *
+visual_body (const gchar *pos_x, const gchar *scale, const gchar *rotation, const gchar *opacity,
+             const gchar *crop_l)
+{
+  return g_strdup_printf (
+      "\"pos-x\": %s,\n"
+      "            \"pos-y\": 0, \"scale-permille\": %s, \"rotation-cdeg\": %s, \"opacity\": %s,\n"
+      "            \"crop-l\": %s, \"crop-t\": 0, \"crop-r\": 0, \"crop-b\": 0,\n"
+      "            \"fade-in-us\": 0, \"fade-out-us\": 0",
+      pos_x, scale, rotation, opacity, crop_l);
+}
+
+static void
+test_visual_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  static const struct
+  {
+    const gchar *pos_x;
+    const gchar *scale;
+    const gchar *rotation;
+    const gchar *opacity;
+    const gchar *crop_l;
+    gboolean type_error; /* TRUE: TYPE, FALSE: VALUE */
+  } bad[] = {
+    /* Below the 1 permille floor / above the 32000 ceiling. */
+    { "0", "0", "0", "255", "0", FALSE },
+    { "0", "32001", "0", "255", "0", FALSE },
+    /* Beyond the 8-bit opacity domain. */
+    { "0", "1000", "0", "256", "0", FALSE },
+    /* Past a full turn. */
+    { "0", "1000", "36001", "255", "0", FALSE },
+    /* A negative crop edge. */
+    { "0", "1000", "0", "255", "-1", FALSE },
+    /* A float token is never an integer field. */
+    { "0", "1.25", "0", "255", "0", TRUE },
+    /* A string where an integer belongs. */
+    { "0", "1000", "0", "\"full\"", "0", TRUE },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (bad); i++)
+    {
+      gchar *visual = visual_body (bad[i].pos_x, bad[i].scale, bad[i].rotation, bad[i].opacity,
+                                   bad[i].crop_l);
+      gchar *body = g_strdup_printf (
+          "{\n"
+          "  \"obvious-edit-project\": {\n"
+          "    \"format-version\": 1,\n"
+          "    \"name\": \"Doc\",\n"
+          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+          "    \"tracks\": [\n"
+          "      { \"kind\": \"video\", \"clips\": [\n"
+          "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+          "          \"source-out-us\": 1000,\n"
+          "          \"visual\": { %s } } ] }\n"
+          "    ]\n"
+          "  }\n"
+          "}\n",
+          visual);
+      gchar *path = write_doc (fx, body);
+
+      OeProject *loaded = oe_project_format_load (path, &error);
+
+      g_assert_null (loaded);
+      if (bad[i].type_error)
+        g_assert_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE);
+      else
+        g_assert_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE);
+      g_clear_error (&error);
+
+      g_free (visual);
+      g_free (body);
+      g_free (path);
+    }
+
+  /* An unknown member inside visual is schema-foreign like any other. */
+  gchar *unknown = write_doc (
+      fx, "{\n"
+          "  \"obvious-edit-project\": {\n"
+          "    \"format-version\": 1,\n"
+          "    \"name\": \"Doc\",\n"
+          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+          "    \"tracks\": [\n"
+          "      { \"kind\": \"video\", \"clips\": [\n"
+          "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+          "          \"source-out-us\": 1000,\n"
+          "          \"visual\": { \"scale-permille\": 1000, \"blur\": 3 } } ] }\n"
+          "    ]\n"
+          "  }\n"
+          "}\n");
+
+  OeProject *loaded = oe_project_format_load (unknown, &error);
+
+  g_assert_null (loaded);
+  g_assert_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_UNKNOWN_MEMBER);
+  g_clear_error (&error);
+  g_free (unknown);
+
+  /* A partial visual (missing members) is rejected: present means
+   * strict — there is no silent half-load. */
+  gchar *partial = write_doc (
+      fx, "{\n"
+          "  \"obvious-edit-project\": {\n"
+          "    \"format-version\": 1,\n"
+          "    \"name\": \"Doc\",\n"
+          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+          "    \"tracks\": [\n"
+          "      { \"kind\": \"video\", \"clips\": [\n"
+          "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+          "          \"source-out-us\": 1000,\n"
+          "          \"visual\": { \"scale-permille\": 1000 } } ] }\n"
+          "    ]\n"
+          "  }\n"
+          "}\n");
+
+  loaded = oe_project_format_load (partial, &error);
+
+  g_assert_null (loaded);
+  g_assert_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_MISSING);
+  g_clear_error (&error);
+  g_free (partial);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -768,6 +992,9 @@ main (int argc, char *argv[])
   ADD ("sequence-size", test_sequence_size);
   ADD ("sequence-size-backfill", test_sequence_size_backfill);
   ADD ("sequence-size-bad-values", test_sequence_size_bad_values);
+  ADD ("visual-round-trip", test_visual_round_trip);
+  ADD ("visual-backfill", test_visual_backfill);
+  ADD ("visual-bad-values", test_visual_bad_values);
 
 #undef ADD
 
