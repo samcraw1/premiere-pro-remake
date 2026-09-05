@@ -793,16 +793,16 @@ oe_project_set_track_audio (OeProject *self, guint track_index, const OeTrackAud
   if (track->kind != OE_TRACK_AUDIO)
     {
       g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
-                   "audio state lives on audio tracks (Phase 10 D4); track %u is %s",
-                   track_index, oe_track_kind_get_name (track->kind));
+                   "audio state lives on audio tracks (Phase 10 D4); track %u is %s", track_index,
+                   oe_track_kind_get_name (track->kind));
       return FALSE;
     }
 
   if (!oe_track_audio_is_valid (audio))
     {
       g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_AUDIO,
-                   "track audio out of domain (volume %d, pan %d, mute %d, solo %d)",
-                   audio->volume, audio->pan, audio->mute, audio->solo);
+                   "track audio out of domain (volume %d, pan %d, mute %d, solo %d)", audio->volume,
+                   audio->pan, audio->mute, audio->solo);
       return FALSE;
     }
 

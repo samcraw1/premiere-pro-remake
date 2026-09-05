@@ -1062,9 +1062,9 @@ static gboolean
 parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEntry **out,
             GError **error)
 {
-  static const gchar *const members[] = { "media-ref",  "position-us", "source-in-us",
-                                          "source-out-us", "visual",      "keyframes",
-                                          "audio" };
+  static const gchar *const members[]
+      = { "media-ref", "position-us", "source-in-us", "source-out-us",
+          "visual",    "keyframes",   "audio" };
 
   JsonNode *media_ref_node = NULL;
   JsonNode *position_node = NULL;

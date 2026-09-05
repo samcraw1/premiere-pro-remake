@@ -32,9 +32,9 @@
  *                                with the right (can_undo, can_redo) pair —
  *                                the command-enablement contract.
  *   /undo/auto-pause             undoing while the session is PLAYING
- *                                pauses first (virtual clock), then applies. *   /undo/clip-audio-inverse     clip-audio stroke → undo restores the
- *                                baseline audio, redo re-applies (Wave A).
- *   /undo/clip-audio-stroke-one-record  many previews land as ONE record.
+ *                                pauses first (virtual clock), then applies. *
+ * /undo/clip-audio-inverse     clip-audio stroke → undo restores the baseline audio, redo
+ * re-applies (Wave A). /undo/clip-audio-stroke-one-record  many previews land as ONE record.
  *   /undo/clip-audio-zero-delta  a stroke ending where it began records
  *                                nothing, plain or stroke variant.
  *   /undo/clip-audio-plain-baseline  one-shot entry captures the
@@ -617,8 +617,8 @@ test_undo_track_audio_inverse (UndoFixture *fx, gconstpointer user_data G_GNUC_U
 
   GError *error = NULL;
 
-  g_assert_true (oe_edit_set_track_audio_with_old (fx->project, fx->stack, audio, &baseline, &final,
-                                                   &error));
+  g_assert_true (
+      oe_edit_set_track_audio_with_old (fx->project, fx->stack, audio, &baseline, &final, &error));
   g_assert_no_error (error);
   g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1); /* the one track stroke */
 

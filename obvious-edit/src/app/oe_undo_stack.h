@@ -193,8 +193,8 @@ typedef struct
   gint64 old_b_us;
   gint64 new_a_us;
   gint64 new_b_us;
-  OeClipVisual new_visual; /* VISUAL only: the post-stroke state */
-  OeClipAudio new_clip_audio; /* CLIP_AUDIO only: the post-stroke state */
+  OeClipVisual new_visual;      /* VISUAL only: the post-stroke state */
+  OeClipAudio new_clip_audio;   /* CLIP_AUDIO only: the post-stroke state */
   OeTrackAudio old_track_audio; /* TRACK_AUDIO only: the pre-stroke state */
   OeTrackAudio new_track_audio; /* TRACK_AUDIO only: the post-stroke state */
 
@@ -378,9 +378,8 @@ gboolean oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint t
  * happened in between. A @new_audio equal to @old_audio records
  * nothing: a zero-delta stroke leaves no history entry.
  */
-gboolean oe_edit_set_clip_audio_with_old (OeProject *project, OeUndoStack *stack,
-                                          guint track_index, guint clip_index,
-                                          const OeClipAudio *old_audio,
+gboolean oe_edit_set_clip_audio_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                                          guint clip_index, const OeClipAudio *old_audio,
                                           const OeClipAudio *new_audio, GError **error);
 
 /**

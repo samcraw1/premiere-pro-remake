@@ -1067,21 +1067,21 @@ test_audio_backfill (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
 
   /* A doc with a video clip and an audio track, neither carrying an
    * audio member (what every pre-Wave-A file looks like). */
-  gchar *path = write_doc (
-      fx, "{\n"
-          "  \"obvious-edit-project\": {\n"
-          "    \"format-version\": 1,\n"
-          "    \"name\": \"Doc\",\n"
-          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
-          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
-          "    \"tracks\": [\n"
-          "      { \"kind\": \"video\", \"clips\": [\n"
-          "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
-          "          \"source-out-us\": 1000 } ] },\n"
-          "      { \"kind\": \"audio\", \"clips\": [] }\n"
-          "    ]\n"
-          "  }\n"
-          "}\n");
+  gchar *path
+      = write_doc (fx, "{\n"
+                       "  \"obvious-edit-project\": {\n"
+                       "    \"format-version\": 1,\n"
+                       "    \"name\": \"Doc\",\n"
+                       "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                       "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+                       "    \"tracks\": [\n"
+                       "      { \"kind\": \"video\", \"clips\": [\n"
+                       "        { \"media-ref\": 1, \"position-us\": 0, \"source-in-us\": 0,\n"
+                       "          \"source-out-us\": 1000 } ] },\n"
+                       "      { \"kind\": \"audio\", \"clips\": [] }\n"
+                       "    ]\n"
+                       "  }\n"
+                       "}\n");
 
   OeProject *loaded = oe_project_format_load (path, &error);
 
@@ -1167,41 +1167,36 @@ test_audio_bad_values (FormatFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
     gint code;
   } track_bad[] = {
     { "\"kind\": \"audio\", \"clips\": []",
-      "\"volume\": 2049, \"pan\": 512, \"mute\": 0, \"solo\": 0",
-      OE_PROJECT_FORMAT_ERROR_VALUE },
+      "\"volume\": 2049, \"pan\": 512, \"mute\": 0, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
     { "\"kind\": \"audio\", \"clips\": []",
-      "\"volume\": 1024, \"pan\": -1, \"mute\": 0, \"solo\": 0",
-      OE_PROJECT_FORMAT_ERROR_VALUE },
+      "\"volume\": 1024, \"pan\": -1, \"mute\": 0, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
     { "\"kind\": \"audio\", \"clips\": []",
-      "\"volume\": 1024, \"pan\": 512, \"mute\": 2, \"solo\": 0",
-      OE_PROJECT_FORMAT_ERROR_VALUE },
+      "\"volume\": 1024, \"pan\": 512, \"mute\": 2, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
     { "\"kind\": \"audio\", \"clips\": []",
-      "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 1.5",
-      OE_PROJECT_FORMAT_ERROR_TYPE },
+      "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 1.5", OE_PROJECT_FORMAT_ERROR_TYPE },
     { "\"kind\": \"audio\", \"clips\": []",
       "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 0, \"aux\": 9",
       OE_PROJECT_FORMAT_ERROR_UNKNOWN_MEMBER },
     { "\"kind\": \"video\", \"clips\": []",
-      "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 0",
-      OE_PROJECT_FORMAT_ERROR_VALUE },
+      "\"volume\": 1024, \"pan\": 512, \"mute\": 0, \"solo\": 0", OE_PROJECT_FORMAT_ERROR_VALUE },
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (track_bad); i++)
     {
-      gchar *body = g_strdup_printf (
-          "{\n"
-          "  \"obvious-edit-project\": {\n"
-          "    \"format-version\": 1,\n"
-          "    \"name\": \"Doc\",\n"
-          "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
-          "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
-          "    \"tracks\": [\n"
-          "      { %s,\n"
-          "        \"audio\": { %s } }\n"
-          "    ]\n"
-          "  }\n"
-          "}\n",
-          track_bad[i].track_line, track_bad[i].audio_body);
+      gchar *body
+          = g_strdup_printf ("{\n"
+                             "  \"obvious-edit-project\": {\n"
+                             "    \"format-version\": 1,\n"
+                             "    \"name\": \"Doc\",\n"
+                             "    \"frame-rate\": { \"num\": 25, \"den\": 1 },\n"
+                             "    \"media\": [ { \"ref\": 1, \"path\": \"/media/a.mp4\" } ],\n"
+                             "    \"tracks\": [\n"
+                             "      { %s,\n"
+                             "        \"audio\": { %s } }\n"
+                             "    ]\n"
+                             "  }\n"
+                             "}\n",
+                             track_bad[i].track_line, track_bad[i].audio_body);
       gchar *path = write_doc (fx, body);
 
       OeProject *loaded = oe_project_format_load (path, &error);

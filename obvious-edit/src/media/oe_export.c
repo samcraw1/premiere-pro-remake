@@ -16,8 +16,8 @@
 
 #include "oe_export.h"
 
-#include "../core/oe_fades.h"
 #include "../core/oe_audio_factor.h"
+#include "../core/oe_fades.h"
 
 #include <errno.h>
 #include <string.h>

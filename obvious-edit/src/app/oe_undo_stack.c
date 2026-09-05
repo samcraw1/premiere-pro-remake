@@ -767,9 +767,9 @@ record_track_audio_stroke (OeProject *project, OeUndoStack *stack, guint track_i
   if (oe_track_audio_equal (old_audio, new_audio))
     return TRUE; /* zero-delta stroke: the model already holds the state */
 
-  OeUndoRecord *rec = record_new (OE_UNDO_OP_TRACK_AUDIO,
-                                  g_strdup_printf ("Audio track %u", track_index), track_index,
-                                  0); /* track-indexed payload: no clip identity */
+  OeUndoRecord *rec
+      = record_new (OE_UNDO_OP_TRACK_AUDIO, g_strdup_printf ("Audio track %u", track_index),
+                    track_index, 0); /* track-indexed payload: no clip identity */
 
   rec->old_track_audio = *old_audio;
   rec->new_track_audio = *new_audio;
@@ -778,8 +778,8 @@ record_track_audio_stroke (OeProject *project, OeUndoStack *stack, guint track_i
 }
 
 gboolean
-oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint track_index,
-                        guint clip_index, const OeClipAudio *audio, GError **error)
+oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
+                        const OeClipAudio *audio, GError **error)
 {
   g_return_val_if_fail (audio != NULL, FALSE);
 
@@ -798,10 +798,10 @@ oe_edit_set_clip_audio (OeProject *project, OeUndoStack *stack, guint track_inde
 
   if (stack != NULL && !oe_clip_audio_equal (&before.audio, audio))
     {
-      OeUndoRecord *rec = record_new (
-          OE_UNDO_OP_CLIP_AUDIO,
-          g_strdup_printf ("Audio clip %u on track %u", clip_index, track_index), track_index,
-          clip_index);
+      OeUndoRecord *rec
+          = record_new (OE_UNDO_OP_CLIP_AUDIO,
+                        g_strdup_printf ("Audio clip %u on track %u", clip_index, track_index),
+                        track_index, clip_index);
 
       rec->clip = before; /* baseline audio moves with the record */
       rec->new_clip_audio = *audio;
@@ -838,9 +838,9 @@ oe_edit_set_track_audio (OeProject *project, OeUndoStack *stack, guint track_ind
 
   if (stack != NULL && !oe_track_audio_equal (&before, audio))
     {
-      OeUndoRecord *rec = record_new (OE_UNDO_OP_TRACK_AUDIO,
-                                      g_strdup_printf ("Audio track %u", track_index),
-                                      track_index, 0); /* track-indexed payload: no clip identity */
+      OeUndoRecord *rec
+          = record_new (OE_UNDO_OP_TRACK_AUDIO, g_strdup_printf ("Audio track %u", track_index),
+                        track_index, 0); /* track-indexed payload: no clip identity */
 
       rec->old_track_audio = before;
       rec->new_track_audio = *audio;
