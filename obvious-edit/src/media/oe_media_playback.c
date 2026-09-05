@@ -184,6 +184,7 @@ typedef struct
   OeMediaPlaybackWorker *worker;
   OePlaybackAudioChunk *chunk; /* NULL for signals */
   GError *error;               /* set only when chunk == NULL and failed */
+  guint generation; /* the owning request's token; chunks echo their own */
 } Delivery;
 
 struct _OeMediaPlaybackWorker
@@ -215,7 +216,7 @@ deliver_on_main (gpointer data)
 {
   Delivery *d = data;
 
-  d->worker->on_audio (d->chunk, d->error, d->worker->user_data);
+  d->worker->on_audio (d->chunk, d->error, d->generation, d->worker->user_data);
 
   if (d->chunk != NULL)
     oe_playback_audio_chunk_free (d->chunk);
@@ -225,15 +226,22 @@ deliver_on_main (gpointer data)
 }
 
 /* Hand @chunk (or a NULL-chunk signal) to the main context. Ownership of
- * chunk and error transfers to the delivery. */
+ * chunk and error transfers to the delivery. @generation stamps the
+ * delivery with the owning request's token so the receiver can drop a
+ * stale END-OF-RANGE or failure signal exactly like a stale chunk —
+ * Phase 10 Wave B: the mixer chains decode requests per window, so a
+ * late signal from a superseded decode must never advance the new
+ * chain. A chunk's own generation wins; a signal carries @generation. */
 static void
-deliver (OeMediaPlaybackWorker *worker, OePlaybackAudioChunk *chunk, GError *error)
+deliver (OeMediaPlaybackWorker *worker, OePlaybackAudioChunk *chunk, GError *error,
+         guint generation)
 {
   Delivery *d = g_new0 (Delivery, 1);
 
   d->worker = worker;
   d->chunk = chunk;
   d->error = error;
+  d->generation = chunk != NULL ? chunk->generation : generation;
   g_main_context_invoke (NULL, deliver_on_main, d);
 }
 
@@ -279,7 +287,7 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
 
   if (!ensure_audio_decoder (worker, req->path, &error))
     {
-      deliver (worker, NULL, error);
+      deliver (worker, NULL, error, req->generation);
       return;
     }
 
@@ -303,7 +311,8 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
         swr_free (&swr);
       deliver (worker, NULL,
                g_error_new (OE_MEDIA_PLAYBACK_ERROR, OE_MEDIA_PLAYBACK_ERROR_OPEN_FAILED,
-                            "'%s': resampler setup failed", req->path));
+                            "'%s': resampler setup failed", req->path),
+               req->generation);
       return;
     }
 
@@ -451,7 +460,7 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
                   chunk->n_frames = buf_frames;
                   chunk->generation = req->generation;
                   chunk->interleaved = buf;
-                  deliver (worker, chunk, NULL);
+                  deliver (worker, chunk, NULL, req->generation);
 
                   buf = g_malloc (chunk_bytes);
                   buf_frames = 0;
@@ -477,10 +486,10 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
           chunk->n_frames = buf_frames;
           chunk->generation = req->generation;
           chunk->interleaved = buf;
-          deliver (worker, chunk, NULL);
+          deliver (worker, chunk, NULL, req->generation);
           buf = NULL;
         }
-      deliver (worker, NULL, NULL);
+      deliver (worker, NULL, NULL, req->generation);
     }
 
   g_free (buf);
