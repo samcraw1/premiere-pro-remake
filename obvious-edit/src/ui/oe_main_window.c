@@ -1081,7 +1081,10 @@ reset_session (OeMainWindow *self, OeProject *project)
   g_clear_pointer (&self->playback, oe_playback_session_free);
 
   g_clear_pointer (&self->project_path, g_free);
-  g_clear_object (&self->project);
+  /* The timeline holds a weak pointer to the outgoing project and must
+   * detach its observer before the object can be finalized, so keep it
+   * alive across the swap and release it only afterwards. */
+  OeProject *outgoing = g_steal_pointer (&self->project);
   g_clear_pointer (&self->media_library, oe_media_library_free);
 
   /* History never crosses a project boundary: the outgoing session's
@@ -1099,12 +1102,15 @@ reset_session (OeMainWindow *self, OeProject *project)
    * selection reset inside the widget). */
   g_hash_table_remove_all (self->media_ref_to_asset);
   g_hash_table_remove_all (self->asset_to_media_ref);
-  oe_timeline_set_project (OE_TIMELINE (self->timeline), project);
 
   self->project = project;
+  oe_timeline_set_project (OE_TIMELINE (self->timeline), project);
+
   self->session_epoch++;
   playback_attach (self, project);
   populate_inspector (self);
+
+  g_clear_object (&outgoing);
 }
 
 static void
