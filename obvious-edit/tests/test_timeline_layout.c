@@ -14,9 +14,14 @@
  *                                  adjacency legal, ties prefer left.
  *   /timeline-layout/trim-bounds   AV bounded by the probed duration,
  *                                  stills unbounded, 1 µs floor.
+ *   /timeline-layout/clip-label    kind-aware labels (Wave B): title
+ *                                  text, solid hex, media basename;
+ *                                  plus the hex parse/format pair.
  */
 
 #include <glib.h>
+
+#include <string.h>
 
 #include "../src/ui/oe_timeline_layout.h"
 
@@ -194,6 +199,100 @@ test_trim_bounds (void)
   g_clear_object (&project);
 }
 
+/* Wave B: the model-side clip label — the string the widget draws for
+ * a clip. Built over plain stack clips: the label helper reads kind
+ * and generator payload only. */
+static void
+assert_label_is (OeClipKind kind, const gchar *text, gint color_rgb, const gchar *media_path,
+                 const gchar *expected)
+{
+  OeClip clip;
+
+  memset (&clip, 0, sizeof (clip));
+  clip.kind = kind;
+  clip.generator.color_rgb = color_rgb;
+  if (text != NULL)
+    clip.generator.text = g_strdup (text);
+
+  g_autofree gchar *label = oe_timeline_clip_label (&clip, media_path);
+
+  if (expected == NULL)
+    g_assert_null (label);
+  else
+    g_assert_cmpstr (label, ==, expected);
+
+  oe_clip_generator_clear (&clip.generator);
+}
+
+static void
+test_clip_label (void)
+{
+  /* Titles label from their payload text... */
+  assert_label_is (OE_CLIP_TITLE, "Hello", 0, NULL, "Hello");
+
+  /* ...and never lose their label to an empty or cleared entry. */
+  assert_label_is (OE_CLIP_TITLE, "", 0, NULL, "Title");
+  assert_label_is (OE_CLIP_TITLE, NULL, 0, NULL, "Title");
+
+  /* Solids label as the packed color, zero-padded lowercase hex. */
+  assert_label_is (OE_CLIP_SOLID, NULL, 0xff8800, NULL, "#ff8800");
+  assert_label_is (OE_CLIP_SOLID, NULL, 0x00ff00, NULL, "#00ff00");
+  assert_label_is (OE_CLIP_SOLID, NULL, 0x000abc, NULL, "#000abc");
+  assert_label_is (OE_CLIP_SOLID, NULL, 0, NULL, "#000000");
+
+  /* Media labels the basename; no path draws no label. */
+  assert_label_is (OE_CLIP_MEDIA, NULL, 0, "/media/a/clip.mp4", "clip.mp4");
+  assert_label_is (OE_CLIP_MEDIA, NULL, 0, NULL, NULL);
+  assert_label_is (OE_CLIP_MEDIA, NULL, 0, "", NULL);
+}
+
+static void
+test_clip_color_hex (void)
+{
+  /* Format: lowercase, zero-padded, masked to 24 bits. */
+  g_autofree gchar *hex = oe_timeline_clip_color_hex (0xff8800);
+
+  g_assert_cmpstr (hex, ==, "#ff8800");
+  g_free (g_steal_pointer (&hex));
+
+  hex = oe_timeline_clip_color_hex (0x1ff8800); /* above the packed domain */
+  g_assert_cmpstr (hex, ==, "#ff8800");
+  g_free (g_steal_pointer (&hex));
+
+  /* Parse: optional '#', exactly six hex digits, any case. */
+  gint color = -1;
+
+  g_assert_true (oe_timeline_clip_color_parse_hex ("ff8800", &color));
+  g_assert_cmpint (color, ==, 0xff8800);
+  g_assert_true (oe_timeline_clip_color_parse_hex ("#FF8800", &color));
+  g_assert_cmpint (color, ==, 0xff8800);
+  g_assert_true (oe_timeline_clip_color_parse_hex ("00ff00", &color));
+  g_assert_cmpint (color, ==, 0x00ff00);
+
+  /* Out may be NULL when the caller only validates. */
+  g_assert_true (oe_timeline_clip_color_parse_hex ("abcdef", NULL));
+
+  /* Rejects: too short, too long, non-hex, empty, NULL. */
+  g_assert_false (oe_timeline_clip_color_parse_hex ("ff88", &color));
+  g_assert_false (oe_timeline_clip_color_parse_hex ("ff88000", &color));
+  g_assert_false (oe_timeline_clip_color_parse_hex ("ff88g0", &color));
+  g_assert_false (oe_timeline_clip_color_parse_hex ("ff88g", &color));
+  g_assert_false (oe_timeline_clip_color_parse_hex ("", &color));
+  g_assert_false (oe_timeline_clip_color_parse_hex ("#", &color));
+  g_assert_false (oe_timeline_clip_color_parse_hex (NULL, &color));
+
+  /* A rejection must not touch the out parameter. */
+  color = 42;
+  g_assert_false (oe_timeline_clip_color_parse_hex ("zzzzzz", &color));
+  g_assert_cmpint (color, ==, 42);
+
+  /* Round trip. */
+  g_autofree gchar *rt = oe_timeline_clip_color_hex (0x123456);
+
+  g_assert_true (oe_timeline_clip_color_parse_hex (rt, &color));
+  g_assert_cmpint (color, ==, 0x123456);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -204,6 +303,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/timeline-layout/hit-test", test_hit_test);
   g_test_add_func ("/timeline-layout/clamp-move", test_clamp_move);
   g_test_add_func ("/timeline-layout/trim-bounds", test_trim_bounds);
+  g_test_add_func ("/timeline-layout/clip-label", test_clip_label);
+  g_test_add_func ("/timeline-layout/clip-color-hex", test_clip_color_hex);
 
   return g_test_run ();
 }

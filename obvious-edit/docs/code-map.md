@@ -94,7 +94,7 @@ premiere-pro-remake/
 |---|---|---|
 | `src/main.c` | Process lifetime | `main()` — oe_log_init, app run, exit code |
 | `src/app/oe_application.c` | Lifecycle ordering, command actions, --self-check | `oe_application_new`, vfuncs |
-| `src/app/oe_command.c` | Command registry: IDs, accelerators, dispatch | `oe_command_table`, `oe_command_dispatch`, `oe_command_set_reporter` |
+| `src/app/oe_command.c` | Command registry: IDs, accelerators, dispatch; Phase 11 Wave B adds the `media.insert-title` / `media.insert-solid` generated-clip affordances (menu-only, media.import precedent) | `oe_command_table`, `oe_command_dispatch`, `oe_command_set_reporter` |
 | `src/app/oe_log.c` | Log threshold + structured emission | `oe_log_init`, `oe_log`, `oe_log_get_level` |
 | `src/media/oe_ffmpeg.c` | avformat network init/teardown (thread-safe via g_once) | `oe_ffmpeg_init`, `oe_ffmpeg_shutdown` |
 | `src/media/oe_probe.c` | File classification + metadata extraction | `oe_probe_file`, `oe_probe_info_clear/copy` |
@@ -118,7 +118,7 @@ premiere-pro-remake/
 | `src/ui/oe_program_monitor.c` | The program monitor: owned-frame Cairo blits, empty state, missing-media hatch | `oe_program_monitor_new`, `oe_program_monitor_show_frame`, `oe_program_monitor_set_empty_state` |
 | `src/ui/oe_meter.c` | Cairo peak meter widget: a thin GTK shell over `oe_meter_math` — main-context peak updates, notify-driven repaints, explicit release-to-silence on pause/stop/seek (no timers while paused) | `oe_meter_new`, `oe_meter_set_peaks`, `oe_meter_release` |
 | `src/ui/oe_meter_math.c` | GTK-free meter math: per-update peak-hold with a documented decay rule and Cairo bar geometry (clamped edges, minimum readable width — the transition-band precedent) | `oe_meter_math_apply`, `oe_meter_math_bar` |
-| `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector (third stack page: clip visual properties with preview-then-commit editing) | `oe_main_window_new` |
+| `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector (third stack page: clip visual properties with preview-then-commit editing); Phase 11 Wave B adds kind-aware generated-clip and chroma-key sections on the stroke contract, the insert-title/solid handlers, and media-row hiding for generators | `oe_main_window_new` |
 | `src/ui/oe_media_bin.c` | The bin panel: row projection, badges, DnD, selection | `oe_media_bin_new`, `oe_media_bin_refresh` |
 | `src/ui/oe_timeline_layout.c` | GTK-free timeline math: zoom round-trips, lane mapping, edge-band hit-test, move/trim clamps, the pure snap decision (`OeSnapContext`: px-scaled threshold, edges/playhead/zero/frame-grid targets, nearest-wins earlier-tie-break) | `oe_timeline_x_for_us`, `oe_timeline_hit_test`, `oe_timeline_clamp_move_position`, `oe_timeline_trim_bounds`, `oe_timeline_snap_time` |
 | `src/ui/oe_timeline.c` | The timeline widget: observer snapshots, Cairo painting, one drag state machine → model mutators, snap-then-clamp drag previews, snapping session flag (`_set/get_snapping`) | `oe_timeline_new`, `oe_timeline_set_project`, `oe_timeline_get_selection`, `oe_timeline_set_snapping`, `oe_timeline_zoom_in/out` |
@@ -134,7 +134,8 @@ premiere-pro-remake/
 | `tests/test_time.c` | Rate reduction, typed rejection, rounding, identities | `/time/*` |
 | `tests/test_project.c` | Ordering, overlap, observer, deep copies, media refs, trim validation, visual identity defaults, validated visual mutation + typed rejection, audio state identity/copy/mutation (clip and audio-track) | `/project/*` |
 | `tests/test_project_format.c` | Strict v1 parse, round trip, atomic failure, audio members (byte-identical round trip, identity backfill, strict values, video-track rejection) | `/format/*` |
-| `tests/test_timeline_layout.c` | Pure timeline math: zoom, lanes, hit-test bands, drag clamps | `/timeline-layout/*` |
+| `tests/test_timeline_layout.c` | Pure timeline math: zoom, lanes, hit-test bands, drag clamps; Wave B adds generated-clip label/color helpers (title text, solid hex, media basenames, strict #rrggbb parse/format) | `/timeline-layout/*` |
+| `tests/test_inspector_strokes.c` | The clip page's Wave B stroke contract replayed through the validated mutators and undo helpers the window calls: record-per-stroke with baseline restore, zero-delta silence, and rejected-commit silence for both key and generator strokes | `/inspector-strokes/*` |
 | `tests/test_playback_clock.c` | Session clock on a virtual time source: mapping, deadlines, drift, seek, end-of-sequence | `/clock/*` |
 | `tests/test_undo_stack.c` | Per-op inverses, visual stroke records (one record per stroke, stroke-baseline restore, zero-delta suppression), audio stroke records for both ops (clip-indexed and track-indexed payloads), typed rejection at record/apply time, depth eviction, redo clearing, JSON round trips, auto-pause | `/undo/*` |
 | `tests/test_snap_ripple.c` | Pure snap decision (targets, band boundaries, tie-break, zoom scaling, disabled pass-through, snap-then-clamp) + composite ripple records (first/middle/last deletes, typed rejection, JSON round trips, depth, redo clearing, auto-pause) | `/snap-ripple/*` |

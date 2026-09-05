@@ -45,6 +45,7 @@
 #include "oe_program_monitor.h"
 #include "oe_shell_layout.h"
 #include "oe_timeline.h"
+#include "oe_timeline_layout.h"
 
 /* Phase 9: the inspector clip page's controls, indexed to keep the
  * build loop and the collect/populate mapping in lockstep. */
@@ -152,9 +153,38 @@ struct _OeMainWindow
    * restoring the baseline captured at the stroke's first change. */
   GtkWidget *inspector_clip; /* scrolled grid of controls */
   GtkWidget *clip_spin[CLIP_SPIN_COUNT];
+  GtkWidget *clip_spin_label[CLIP_SPIN_COUNT]; /* row labels: kind-aware hiding */
   guint clip_track_index;
   guint clip_clip_index;
   OeClipVisual stroke_baseline;
+
+  /* Phase 11 Wave B: the clip page's generated-clip and chroma-key
+   * sections ride the same stroke contract as the visual and audio
+   * rows. Visibility is kind-aware: titles show text/size/color,
+   * solids only color; the key section exists for media clips on
+   * video tracks only (D4); generators hide the media-only audio
+   * section (D3). */
+  GtkWidget *clip_audio_header;     /* media-only section (D3) */
+  GtkWidget *clip_generator_header; /* reads "Title" or "Solid" */
+  GtkWidget *clip_generator_text;
+  GtkWidget *clip_generator_size;
+  GtkWidget *clip_generator_color;
+  GtkWidget *clip_generator_text_label;
+  GtkWidget *clip_generator_size_label;
+  GtkWidget *clip_generator_color_label;
+  OeClipGenerator stroke_generator_baseline; /* owns its text */
+  gboolean generator_in_stroke;
+  GtkWidget *clip_key_header;
+  GtkWidget *clip_key_color;
+  GtkWidget *clip_key_tolerance;
+  GtkWidget *clip_key_softness;
+  GtkWidget *clip_key_enabled;
+  GtkWidget *clip_key_color_label;
+  GtkWidget *clip_key_tolerance_label;
+  GtkWidget *clip_key_softness_label;
+  GtkWidget *clip_key_enabled_label;
+  OeClipKey stroke_key_baseline;
+  gboolean key_in_stroke;
 
   /* Phase 10 Wave B: the clip page's audio section reuses the stroke
    * contract (baseline at first change, preview through the validated
@@ -624,6 +654,8 @@ on_clip_spin_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
 }
 
 static void clip_audio_commit (OeMainWindow *self);
+static void clip_generator_commit (OeMainWindow *self);
+static void clip_key_commit (OeMainWindow *self);
 
 static void
 on_clip_grid_released (GtkGestureClick *gesture G_GNUC_UNUSED, gint n_press G_GNUC_UNUSED,
@@ -632,6 +664,8 @@ on_clip_grid_released (GtkGestureClick *gesture G_GNUC_UNUSED, gint n_press G_GN
   /* The pointer coming up ends the stroke: commit exactly one record. */
   clip_page_commit (OE_MAIN_WINDOW (user_data));
   clip_audio_commit (OE_MAIN_WINDOW (user_data));
+  clip_generator_commit (OE_MAIN_WINDOW (user_data));
+  clip_key_commit (OE_MAIN_WINDOW (user_data));
 }
 
 /* Phase 10 Wave B: the clip page's audio section reuses the stroke
@@ -731,6 +765,343 @@ on_clip_audio_spin_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
 {
   /* Typed entry commits on activate with the same single record. */
   clip_audio_commit (OE_MAIN_WINDOW (user_data));
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 11 Wave B: the clip page's generated-clip and chroma-key      */
+/* sections. Same stroke contract as the visual and audio rows:        */
+/* baseline at the first change, live preview through the validated    */
+/* mutator WITHOUT a record, exactly ONE OE_UNDO_OP_GENERATOR /        */
+/* OE_UNDO_OP_CLIP_KEY record at commit (activate, focus-out, spin     */
+/* release, grid-gesture release, or reselect), zero-delta strokes     */
+/* record nothing. Entries parse "#rrggbb"; an unparsable entry keeps  */
+/* the last valid preview and reloads from the model at commit.        */
+/* ------------------------------------------------------------------ */
+
+static const gchar *const CLIP_COLOR_HINT = "Enter colors as six hex digits (#rrggbb)";
+
+/* Reads the generated-clip section's controls into @out. @out->text
+ * is owned — clear it with oe_clip_generator_clear. @base carries the
+ * model's current payload for fields the section does not show
+ * (a solid's dormant size). Answers FALSE when a hex entry is
+ * unparsable; the caller never hands a failed value to the model. */
+static gboolean
+clip_generator_collect (OeMainWindow *self, OeClipKind kind, const OeClipGenerator *base,
+                        OeClipGenerator *out)
+{
+  gint color;
+
+  if (!oe_timeline_clip_color_parse_hex (
+          gtk_editable_get_text (GTK_EDITABLE (self->clip_generator_color)), &color))
+    return FALSE;
+
+  out->text = NULL;
+  out->color_rgb = color;
+  out->size_permille = base->size_permille; /* dormant for solids */
+
+  if (kind == OE_CLIP_TITLE)
+    {
+      out->text = g_strdup (gtk_editable_get_text (GTK_EDITABLE (self->clip_generator_text)));
+      out->size_permille
+          = (gint) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_generator_size));
+    }
+
+  return TRUE;
+}
+
+static void
+clip_generator_preview (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  OeClipGenerator gen;
+
+  if (!clip_generator_collect (self, clip.kind, &clip.generator, &gen))
+    return; /* unparsable entry: keep the last valid preview */
+
+  GError *error = NULL;
+
+  if (!oe_project_set_clip_generator (self->project, self->clip_track_index, self->clip_clip_index,
+                                      &gen, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Generator preview rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+
+  oe_clip_generator_clear (&gen);
+}
+
+static void
+clip_generator_begin_stroke (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (self->generator_in_stroke || self->visual_loading != 0)
+    return;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  /* get_clip borrows members: the baseline deep-copies the
+   * generator (owned text included) and clears it exactly once, in
+   * commit. */
+  oe_clip_generator_copy (&self->stroke_generator_baseline, &clip.generator);
+  self->generator_in_stroke = TRUE;
+}
+
+/* Reloads the generated-clip section from the model — the recovery
+ * path after a rejected commit (the model keeps its truth). Loading
+ * is gated so the programmatic writes cannot open a stroke. */
+static void
+clip_generator_reload (OeMainWindow *self, const OeClip *clip)
+{
+  g_autofree gchar *hex = oe_timeline_clip_color_hex (clip->generator.color_rgb);
+
+  self->visual_loading = 1;
+  gtk_label_set_text (GTK_LABEL (self->clip_generator_header),
+                      clip->kind == OE_CLIP_TITLE ? "Title" : "Solid");
+  gtk_editable_set_text (
+      GTK_EDITABLE (self->clip_generator_text),
+      clip->kind == OE_CLIP_TITLE && clip->generator.text != NULL ? clip->generator.text : "");
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_generator_size),
+                             (gdouble) clip->generator.size_permille);
+  gtk_editable_set_text (GTK_EDITABLE (self->clip_generator_color), hex);
+  self->visual_loading = 0;
+}
+
+static void
+clip_generator_commit (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (!self->generator_in_stroke)
+    return;
+
+  self->generator_in_stroke = FALSE;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    {
+      oe_clip_generator_clear (&self->stroke_generator_baseline);
+      return;
+    }
+
+  OeClipGenerator gen;
+
+  if (!clip_generator_collect (self, clip.kind, &clip.generator, &gen))
+    {
+      set_status_message (self, CLIP_COLOR_HINT);
+      oe_clip_generator_clear (&self->stroke_generator_baseline);
+      clip_generator_reload (self, &clip);
+      return;
+    }
+
+  GError *error = NULL;
+
+  if (!oe_edit_set_clip_generator_with_old (self->project, self->undo_stack, self->clip_track_index,
+                                            self->clip_clip_index, &self->stroke_generator_baseline,
+                                            &gen, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Generator edit failed: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      clip_generator_reload (self, &clip); /* the model kept its truth */
+    }
+
+  oe_clip_generator_clear (&gen);
+  oe_clip_generator_clear (&self->stroke_generator_baseline);
+}
+
+static void
+on_clip_generator_entry_changed (GtkEditable *editable G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  clip_generator_begin_stroke (self);
+  clip_generator_preview (self);
+}
+
+static void
+on_clip_generator_entry_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
+{
+  /* Typed entry commits on activate with the same single record. */
+  clip_generator_commit (OE_MAIN_WINDOW (user_data));
+}
+
+static void
+on_clip_generator_focus_left (GtkEventControllerFocus *focus G_GNUC_UNUSED, gpointer user_data)
+{
+  /* Clicking elsewhere ends the stroke: commit exactly one record. */
+  clip_generator_commit (OE_MAIN_WINDOW (user_data));
+}
+
+static void
+on_clip_generator_spin_value_changed (GtkSpinButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  clip_generator_begin_stroke (self);
+  clip_generator_preview (self);
+}
+
+/* Reads the chroma-key section's controls into @key. Answers FALSE
+ * when the hex entry is unparsable. */
+static gboolean
+clip_key_collect (OeMainWindow *self, OeClipKey *key)
+{
+  gint color;
+
+  if (!oe_timeline_clip_color_parse_hex (
+          gtk_editable_get_text (GTK_EDITABLE (self->clip_key_color)), &color))
+    return FALSE;
+
+  key->color_rgb = color;
+  key->tolerance = (gint) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_key_tolerance));
+  key->softness = (gint) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_key_softness));
+  key->enabled = gtk_check_button_get_active (GTK_CHECK_BUTTON (self->clip_key_enabled)) ? 1 : 0;
+  return TRUE;
+}
+
+static void
+clip_key_preview (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  OeClipKey key = clip.key;
+
+  clip_key_collect (self, &key);
+
+  GError *error = NULL;
+
+  if (!oe_project_set_clip_key (self->project, self->clip_track_index, self->clip_clip_index, &key,
+                                &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Key preview rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+    }
+}
+
+static void
+clip_key_begin_stroke (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (self->key_in_stroke || self->visual_loading != 0)
+    return;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  self->stroke_key_baseline = clip.key;
+  self->key_in_stroke = TRUE;
+}
+
+/* Reloads the chroma-key section from the model — the recovery path
+ * after a rejected commit. Loading is gated like every populate. */
+static void
+clip_key_reload (OeMainWindow *self, const OeClip *clip)
+{
+  g_autofree gchar *hex = oe_timeline_clip_color_hex (clip->key.color_rgb);
+
+  self->visual_loading = 1;
+  gtk_editable_set_text (GTK_EDITABLE (self->clip_key_color), hex);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_key_tolerance),
+                             (gdouble) clip->key.tolerance);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_key_softness),
+                             (gdouble) clip->key.softness);
+  gtk_check_button_set_active (GTK_CHECK_BUTTON (self->clip_key_enabled), clip->key.enabled != 0);
+  self->visual_loading = 0;
+}
+
+static void
+clip_key_commit (OeMainWindow *self)
+{
+  OeClip clip;
+
+  if (!self->key_in_stroke)
+    return;
+
+  self->key_in_stroke = FALSE;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  OeClipKey key = clip.key;
+
+  if (!clip_key_collect (self, &key))
+    {
+      set_status_message (self, CLIP_COLOR_HINT);
+      clip_key_reload (self, &clip);
+      return;
+    }
+
+  GError *error = NULL;
+
+  if (!oe_edit_set_clip_key_with_old (self->project, self->undo_stack, self->clip_track_index,
+                                      self->clip_clip_index, &self->stroke_key_baseline, &key,
+                                      &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Key edit failed: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      clip_key_reload (self, &clip); /* the model kept its truth */
+    }
+}
+
+static void
+on_clip_key_entry_changed (GtkEditable *editable G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  clip_key_begin_stroke (self);
+  clip_key_preview (self);
+}
+
+static void
+on_clip_key_entry_activate (GtkEntry *entry G_GNUC_UNUSED, gpointer user_data)
+{
+  clip_key_commit (OE_MAIN_WINDOW (user_data));
+}
+
+static void
+on_clip_key_focus_left (GtkEventControllerFocus *focus G_GNUC_UNUSED, gpointer user_data)
+{
+  clip_key_commit (OE_MAIN_WINDOW (user_data));
+}
+
+static void
+on_clip_key_spin_value_changed (GtkSpinButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  clip_key_begin_stroke (self);
+  clip_key_preview (self);
+}
+
+static void
+on_clip_key_check_toggled (GtkCheckButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  /* One click is one full stroke: begin, preview, commit — a single
+   * OE_UNDO_OP_CLIP_KEY record per toggle, like the mixer switches. */
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+
+  if (self->visual_loading != 0)
+    return;
+
+  clip_key_begin_stroke (self);
+  clip_key_preview (self);
+  clip_key_commit (self);
 }
 
 /* Phase 10 Wave B: the mixer page — one row per AUDIO track, wired to
@@ -1163,11 +1534,13 @@ inspector_clip_new (OeMainWindow *self)
       if (i == CLIP_SPIN_AUDIO_GAIN)
         {
           /* Section header: the audio rows below own clip audio (Wave
-           * B); the visual rows above own the compositor properties. */
+           * B); the visual rows above own the compositor properties.
+           * Media-only — hidden with the rows for generated clips. */
           GtkWidget *header = inspector_key_label ("Clip audio");
 
           gtk_widget_set_halign (header, GTK_ALIGN_START);
           gtk_grid_attach (GTK_GRID (grid), header, 0, row, 3, 1);
+          self->clip_audio_header = header;
           row++;
         }
 
@@ -1197,6 +1570,7 @@ inspector_clip_new (OeMainWindow *self)
         }
 
       self->clip_spin[i] = spin;
+      self->clip_spin_label[i] = label;
 
       if (spin_is_keyframeable (i))
         {
@@ -1219,6 +1593,146 @@ inspector_clip_new (OeMainWindow *self)
 
       row++;
     }
+
+  /* Wave B: the generated-clip section. One grid, kind-aware rows —
+   * titles show text/size/color, solids only color; the header reads
+   * "Title" or "Solid" at populate time. */
+  GtkWidget *gen_header = inspector_key_label ("Generated");
+
+  gtk_widget_set_halign (gen_header, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), gen_header, 0, row, 3, 1);
+  self->clip_generator_header = gen_header;
+  row++;
+
+  GtkWidget *gen_text_label = inspector_key_label ("Text");
+
+  gtk_widget_set_halign (gen_text_label, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), gen_text_label, 0, row, 1, 1);
+
+  GtkWidget *gen_text = gtk_entry_new ();
+
+  gtk_widget_set_hexpand (gen_text, TRUE);
+  gtk_grid_attach (GTK_GRID (grid), gen_text, 1, row, 2, 1);
+  g_signal_connect (gen_text, "changed", G_CALLBACK (on_clip_generator_entry_changed), self);
+  g_signal_connect (gen_text, "activate", G_CALLBACK (on_clip_generator_entry_activate), self);
+  GtkEventController *gen_text_focus = GTK_EVENT_CONTROLLER (gtk_event_controller_focus_new ());
+
+  g_signal_connect (gen_text_focus, "leave", G_CALLBACK (on_clip_generator_focus_left), self);
+  gtk_widget_add_controller (gen_text, gen_text_focus);
+  self->clip_generator_text = gen_text;
+  self->clip_generator_text_label = gen_text_label;
+  row++;
+
+  GtkWidget *gen_size_label = inspector_key_label ("Size (per mille of height)");
+
+  gtk_widget_set_halign (gen_size_label, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), gen_size_label, 0, row, 1, 1);
+
+  GtkWidget *gen_size = gtk_spin_button_new_with_range (1, 1000, 5);
+
+  gtk_spin_button_set_digits (GTK_SPIN_BUTTON (gen_size), 0);
+  gtk_widget_set_hexpand (gen_size, TRUE);
+  gtk_grid_attach (GTK_GRID (grid), gen_size, 1, row, 2, 1);
+  g_signal_connect (gen_size, "value-changed", G_CALLBACK (on_clip_generator_spin_value_changed),
+                    self);
+  g_signal_connect (gen_size, "activate", G_CALLBACK (on_clip_generator_entry_activate), self);
+  self->clip_generator_size = gen_size;
+  self->clip_generator_size_label = gen_size_label;
+  row++;
+
+  GtkWidget *gen_color_label = inspector_key_label ("Color");
+
+  gtk_widget_set_halign (gen_color_label, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), gen_color_label, 0, row, 1, 1);
+
+  GtkWidget *gen_color = gtk_entry_new ();
+
+  gtk_entry_set_placeholder_text (GTK_ENTRY (gen_color), "#rrggbb");
+  gtk_widget_set_hexpand (gen_color, TRUE);
+  gtk_grid_attach (GTK_GRID (grid), gen_color, 1, row, 2, 1);
+  g_signal_connect (gen_color, "changed", G_CALLBACK (on_clip_generator_entry_changed), self);
+  g_signal_connect (gen_color, "activate", G_CALLBACK (on_clip_generator_entry_activate), self);
+  GtkEventController *gen_color_focus = GTK_EVENT_CONTROLLER (gtk_event_controller_focus_new ());
+
+  g_signal_connect (gen_color_focus, "leave", G_CALLBACK (on_clip_generator_focus_left), self);
+  gtk_widget_add_controller (gen_color, gen_color_focus);
+  self->clip_generator_color = gen_color;
+  self->clip_generator_color_label = gen_color_label;
+  row++;
+
+  /* Wave B: the chroma-key section — media clips on video tracks
+   * only (D4); hidden everywhere else. */
+  GtkWidget *key_header = inspector_key_label ("Chroma key");
+
+  gtk_widget_set_halign (key_header, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), key_header, 0, row, 3, 1);
+  self->clip_key_header = key_header;
+  row++;
+
+  GtkWidget *key_color_label = inspector_key_label ("Key color");
+
+  gtk_widget_set_halign (key_color_label, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), key_color_label, 0, row, 1, 1);
+
+  GtkWidget *key_color = gtk_entry_new ();
+
+  gtk_entry_set_placeholder_text (GTK_ENTRY (key_color), "#rrggbb");
+  gtk_widget_set_hexpand (key_color, TRUE);
+  gtk_grid_attach (GTK_GRID (grid), key_color, 1, row, 2, 1);
+  g_signal_connect (key_color, "changed", G_CALLBACK (on_clip_key_entry_changed), self);
+  g_signal_connect (key_color, "activate", G_CALLBACK (on_clip_key_entry_activate), self);
+  GtkEventController *key_color_focus = GTK_EVENT_CONTROLLER (gtk_event_controller_focus_new ());
+
+  g_signal_connect (key_color_focus, "leave", G_CALLBACK (on_clip_key_focus_left), self);
+  gtk_widget_add_controller (key_color, key_color_focus);
+  self->clip_key_color = key_color;
+  self->clip_key_color_label = key_color_label;
+  row++;
+
+  GtkWidget *key_tol_label = inspector_key_label ("Tolerance (0-1024)");
+
+  gtk_widget_set_halign (key_tol_label, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), key_tol_label, 0, row, 1, 1);
+
+  GtkWidget *key_tol = gtk_spin_button_new_with_range (0, 1024, 1);
+
+  gtk_spin_button_set_digits (GTK_SPIN_BUTTON (key_tol), 0);
+  gtk_widget_set_hexpand (key_tol, TRUE);
+  gtk_grid_attach (GTK_GRID (grid), key_tol, 1, row, 2, 1);
+  g_signal_connect (key_tol, "value-changed", G_CALLBACK (on_clip_key_spin_value_changed), self);
+  g_signal_connect (key_tol, "activate", G_CALLBACK (on_clip_key_entry_activate), self);
+  self->clip_key_tolerance = key_tol;
+  self->clip_key_tolerance_label = key_tol_label;
+  row++;
+
+  GtkWidget *key_soft_label = inspector_key_label ("Softness (0-1024)");
+
+  gtk_widget_set_halign (key_soft_label, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), key_soft_label, 0, row, 1, 1);
+
+  GtkWidget *key_soft = gtk_spin_button_new_with_range (0, 1024, 1);
+
+  gtk_spin_button_set_digits (GTK_SPIN_BUTTON (key_soft), 0);
+  gtk_widget_set_hexpand (key_soft, TRUE);
+  gtk_grid_attach (GTK_GRID (grid), key_soft, 1, row, 2, 1);
+  g_signal_connect (key_soft, "value-changed", G_CALLBACK (on_clip_key_spin_value_changed), self);
+  g_signal_connect (key_soft, "activate", G_CALLBACK (on_clip_key_entry_activate), self);
+  self->clip_key_softness = key_soft;
+  self->clip_key_softness_label = key_soft_label;
+  row++;
+
+  GtkWidget *key_enabled_label = inspector_key_label ("Enabled");
+
+  gtk_widget_set_halign (key_enabled_label, GTK_ALIGN_START);
+  gtk_grid_attach (GTK_GRID (grid), key_enabled_label, 0, row, 1, 1);
+
+  GtkWidget *key_enabled = gtk_check_button_new ();
+
+  gtk_grid_attach (GTK_GRID (grid), key_enabled, 1, row, 2, 1);
+  g_signal_connect (key_enabled, "toggled", G_CALLBACK (on_clip_key_check_toggled), self);
+  self->clip_key_enabled = key_enabled;
+  self->clip_key_enabled_label = key_enabled_label;
+  row++;
 
   /* One gesture on the grid: releasing the mouse anywhere in the
    * page ends the open stroke. */
@@ -1271,6 +1785,72 @@ show_clip_inspector (OeMainWindow *self, guint track_index, guint clip_index)
   gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_spin[CLIP_SPIN_AUDIO_PAN]),
                              (gdouble) clip.audio.pan);
 
+  /* Wave B: kind-aware sections. Generators carry no media (D3) —
+   * the media-only audio rows hide; the key section exists for media
+   * clips on video tracks only (D4). Track kind comes from the
+   * timeline's current sequence snapshot; when the snapshot is
+   * unavailable the safe default hides the key section. */
+  const OeSequence *sequence = oe_timeline_get_sequence (OE_TIMELINE (self->timeline));
+  const gboolean on_video
+      = sequence != NULL && track_index < sequence->tracks->len
+        && ((const OeTrack *) g_ptr_array_index (sequence->tracks, track_index))->kind
+               == OE_TRACK_VIDEO;
+  const gboolean generated = clip.kind != OE_CLIP_MEDIA;
+
+  for (int i = 0; i < CLIP_SPIN_COUNT; i++)
+    {
+      const gboolean media_row = i == CLIP_SPIN_AUDIO_GAIN || i == CLIP_SPIN_AUDIO_PAN;
+
+      gtk_widget_set_visible (self->clip_spin_label[i], !generated || !media_row);
+      gtk_widget_set_visible (self->clip_spin[i], !generated || !media_row);
+    }
+  gtk_widget_set_visible (self->clip_audio_header, !generated);
+
+  gtk_label_set_text (GTK_LABEL (self->clip_generator_header),
+                      clip.kind == OE_CLIP_TITLE ? "Title" : "Solid");
+  gtk_widget_set_visible (self->clip_generator_header, generated);
+  gtk_widget_set_visible (self->clip_generator_text, clip.kind == OE_CLIP_TITLE);
+  gtk_widget_set_visible (self->clip_generator_text_label, clip.kind == OE_CLIP_TITLE);
+  gtk_widget_set_visible (self->clip_generator_size, clip.kind == OE_CLIP_TITLE);
+  gtk_widget_set_visible (self->clip_generator_size_label, clip.kind == OE_CLIP_TITLE);
+  gtk_widget_set_visible (self->clip_generator_color, generated);
+  gtk_widget_set_visible (self->clip_generator_color_label, generated);
+
+  const gboolean key_ok = !generated && on_video;
+
+  gtk_widget_set_visible (self->clip_key_header, key_ok);
+  gtk_widget_set_visible (self->clip_key_color, key_ok);
+  gtk_widget_set_visible (self->clip_key_color_label, key_ok);
+  gtk_widget_set_visible (self->clip_key_tolerance, key_ok);
+  gtk_widget_set_visible (self->clip_key_tolerance_label, key_ok);
+  gtk_widget_set_visible (self->clip_key_softness, key_ok);
+  gtk_widget_set_visible (self->clip_key_softness_label, key_ok);
+  gtk_widget_set_visible (self->clip_key_enabled, key_ok);
+  gtk_widget_set_visible (self->clip_key_enabled_label, key_ok);
+
+  /* Load the section values with strokes suppressed (visual_loading
+   * is already held): programmatic writes open no stroke and fire no
+   * record. */
+  g_autofree gchar *gen_hex = oe_timeline_clip_color_hex (clip.generator.color_rgb);
+
+  gtk_label_set_text (GTK_LABEL (self->clip_generator_header),
+                      clip.kind == OE_CLIP_TITLE ? "Title" : "Solid");
+  gtk_editable_set_text (
+      GTK_EDITABLE (self->clip_generator_text),
+      clip.kind == OE_CLIP_TITLE && clip.generator.text != NULL ? clip.generator.text : "");
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_generator_size),
+                             (gdouble) clip.generator.size_permille);
+  gtk_editable_set_text (GTK_EDITABLE (self->clip_generator_color), gen_hex);
+
+  g_autofree gchar *key_hex = oe_timeline_clip_color_hex (clip.key.color_rgb);
+
+  gtk_editable_set_text (GTK_EDITABLE (self->clip_key_color), key_hex);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_key_tolerance),
+                             (gdouble) clip.key.tolerance);
+  gtk_spin_button_set_value (GTK_SPIN_BUTTON (self->clip_key_softness),
+                             (gdouble) clip.key.softness);
+  gtk_check_button_set_active (GTK_CHECK_BUTTON (self->clip_key_enabled), clip.key.enabled != 0);
+
   self->visual_loading = 0;
   gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "clip");
 }
@@ -1312,6 +1892,10 @@ populate_inspector (OeMainWindow *self)
     clip_page_commit (self); /* reselecting mid-stroke ends the stroke */
   if (self->audio_in_stroke)
     clip_audio_commit (self); /* the audio section ends its stroke too */
+  if (self->generator_in_stroke)
+    clip_generator_commit (self); /* Wave B sections end their strokes too */
+  if (self->key_in_stroke)
+    clip_key_commit (self);
 
   if (oe_timeline_get_selection (OE_TIMELINE (self->timeline), &track_index, &clip_index))
     {
@@ -2344,8 +2928,94 @@ insert_ready_asset (OeMainWindow *self, guint asset_id)
   oe_asset_info_clear (&asset);
 }
 
-/* Insert from Bin: the selected asset goes through the shared
- * insertion core above. */
+/* Wave B: generated-clip insertion — the media.import precedent. The
+ * command inserts through the validated generator mutator and records
+ * NO undo entry, exactly like media import: this is an affordance
+ * landing new model state, not a stroke replaying a prior state.
+ * Targets the first video track of the default sequence. */
+static void
+insert_generator_clip (OeMainWindow *self, OeClipKind kind, const OeClipGenerator *generator,
+                       const gchar *label)
+{
+  OeSequence sequence;
+  guint track_index = G_MAXUINT;
+
+  /* oe_project_get_sequence overwrites caller storage wholesale —
+   * zeroed storage, never a pre-initialized sequence (leak). */
+  memset (&sequence, 0, sizeof (sequence));
+  oe_project_get_sequence (self->project, &sequence);
+
+  for (guint i = 0; i < sequence.tracks->len; i++)
+    {
+      const OeTrack *track = g_ptr_array_index (sequence.tracks, i);
+
+      if (track->kind == OE_TRACK_VIDEO)
+        {
+          track_index = i;
+          break;
+        }
+    }
+
+  oe_sequence_clear (&sequence);
+
+  if (track_index == G_MAXUINT)
+    {
+      set_status_message (self, "Insert: no video track in the sequence");
+      return;
+    }
+
+  const gint64 playhead_us = oe_timeline_get_playhead (OE_TIMELINE (self->timeline));
+  const gint64 duration_us = OE_PROJECT_STILL_DEFAULT_DURATION_US;
+  GError *error = NULL;
+
+  if (!oe_project_insert_generator_clip (self->project, track_index, kind, playhead_us, duration_us,
+                                         generator, &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Insert rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  /* The playhead advances past the inserted clip so consecutive
+   * inserts stack, like the media insertion core. */
+  oe_timeline_set_playhead (OE_TIMELINE (self->timeline), playhead_us + duration_us);
+
+  g_autofree gchar *msg
+      = g_strdup_printf ("Inserted %s on track %u at the playhead", label, track_index);
+
+  set_status_message (self, msg);
+}
+
+static void
+media_insert_title_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeClipGenerator gen;
+
+  gen.text = g_strdup ("Title");
+  gen.color_rgb = 0xffffff;
+  gen.size_permille = 150;
+
+  insert_generator_clip (command_owner, OE_CLIP_TITLE, &gen, "a title");
+  oe_clip_generator_clear (&gen);
+}
+
+static void
+media_insert_solid_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  const OeClipGenerator gen = {
+    .text = NULL, .color_rgb = 0x808080, .size_permille = 0, /* dormant for solids */
+  };
+
+  insert_generator_clip (command_owner, OE_CLIP_SOLID, &gen, "a solid color");
+}
 static void
 media_insert_from_bin_command_handler (OeCommandId id G_GNUC_UNUSED,
                                        gpointer user_data G_GNUC_UNUSED)
@@ -2769,6 +3439,8 @@ build_menu_bar (void)
   menu_add_command (edit, "Undo", "edit.undo");
   menu_add_command (edit, "Redo", "edit.redo");
   menu_add_command (edit, "Insert from Bin (Ctrl+E)", "media.insert-from-bin");
+  menu_add_command (edit, "Insert Title", "media.insert-title");
+  menu_add_command (edit, "Insert Solid Color", "media.insert-solid");
   menu_add_command (edit, "Delete Selection", "selection.delete");
   menu_add_command (edit, "Snapping (S)", "edit.snap-toggle");
   menu_add_command (edit, "Select Tool (V)", "tool.select");
@@ -2991,6 +3663,8 @@ oe_main_window_dispose (GObject *object)
   oe_command_set_handler (OE_CMD_OPEN_PROJECT, NULL);
   oe_command_set_handler (OE_CMD_SAVE_PROJECT, NULL);
   oe_command_set_handler (OE_CMD_IMPORT_FROM_BIN, NULL);
+  oe_command_set_handler (OE_CMD_INSERT_TITLE, NULL);
+  oe_command_set_handler (OE_CMD_INSERT_SOLID, NULL);
   oe_command_set_handler (OE_CMD_DELETE_SELECTION, NULL);
   oe_command_set_handler (OE_CMD_ZOOM_IN, NULL);
   oe_command_set_handler (OE_CMD_ZOOM_OUT, NULL);
@@ -3204,6 +3878,8 @@ oe_main_window_constructed (GObject *object)
   oe_command_set_handler (OE_CMD_NEW_PROJECT, project_new_command_handler);
   oe_command_set_handler (OE_CMD_OPEN_PROJECT, project_open_command_handler);
   oe_command_set_handler (OE_CMD_SAVE_PROJECT, project_save_command_handler);
+  oe_command_set_handler (OE_CMD_INSERT_TITLE, media_insert_title_command_handler);
+  oe_command_set_handler (OE_CMD_INSERT_SOLID, media_insert_solid_command_handler);
   oe_command_set_handler (OE_CMD_EXPORT, export_command_handler);
   oe_command_set_handler (OE_CMD_IMPORT_FROM_BIN, media_insert_from_bin_command_handler);
   oe_command_set_handler (OE_CMD_DELETE_SELECTION, selection_delete_command_handler);

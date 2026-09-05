@@ -57,6 +57,13 @@ G_BEGIN_DECLS
  * @OE_CMD_EXPORT: export the sequence to an MP4 file (wired in Phase
  *     8); the chooser deep-copies the sequence snapshot and the job
  *     runs on a window-owned worker thread.
+ * @OE_CMD_INSERT_TITLE: insert a generated title clip at the playhead
+ *     on the first video track of the default sequence (wired in
+ *     Phase 11 Wave B); media.import precedent — no undo record.
+ * @OE_CMD_INSERT_SOLID: insert a generated solid-color clip at the
+ *     playhead on the first video track of the default sequence
+ *     (wired in Phase 11 Wave B); media.import precedent — no undo
+ *     record.
  * @OE_CMD_COUNT: sentinel — number of commands, not a valid ID.
  *
  * Enum order is permanent API: IDs must never be renumbered or removed.
@@ -85,6 +92,8 @@ typedef enum
   OE_CMD_SNAP_TOGGLE,
   OE_CMD_SHOW_ABOUT,
   OE_CMD_EXPORT,
+  OE_CMD_INSERT_TITLE,
+  OE_CMD_INSERT_SOLID,
   OE_CMD_COUNT
 } OeCommandId;
 

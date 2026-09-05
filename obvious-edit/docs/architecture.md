@@ -638,6 +638,38 @@ byte-identical save-load-save), and `OE_UNDO_OP_GENERATOR` (owned
 text) and `OE_UNDO_OP_CLIP_KEY` (memory-free) replay only through
 the validated mutators.
 
+## Reaching the user: Wave B surfaces (Phase 11 Wave B)
+
+Wave B makes the model reachable, editable, and visible without
+changing its shape. The inspector's clip page grows kind-aware
+sections on the Phase 10 stroke precedent: the generated-clip section
+(one grid, header reading "Title" or "Solid") shows text/size/color
+for titles and only color for solids, and the chroma-key section
+exists for media clips on video tracks only — generators hide the
+media-only audio rows (D3/D4). Every section rides the house stroke
+contract: baseline captured at the stroke's first change, live
+previews through the validated mutator WITHOUT a record, and exactly
+ONE `OE_UNDO_OP_GENERATOR` / `OE_UNDO_OP_CLIP_KEY` record at commit —
+Enter, focus-out, spin release, grid-gesture release, or reselect.
+A zero-delta stroke records nothing; a rejected commit reloads the
+section from the model, which kept its truth. The window's stroke
+drivers are thin GTK glue over the same calls the 20th GTK-free suite
+(`test_inspector_strokes.c`) replays.
+
+Two `media.*` commands — `media.insert-title`, `media.insert-solid`
+— land a generated clip at the playhead on the first video track
+through `oe_project_insert_generator_clip` (still convention, 5 s),
+advance the playhead so consecutive inserts stack, and record NO
+undo entry: the media.import precedent — an affordance landing new
+model state, not a stroke replaying a prior one. The timeline paints
+generated clips with a distinct teal fill and draws the label from
+the model (the title's text, a solid's color) instead of a media
+basename; drag and trim treat generator ranges like stills — free
+duration, source-range-as-duration. Every edit path fires the model
+observer, and the existing paused-repaint seam renders the fresh
+frame with the dropped generator cache: editing title text changes
+the paused monitor with no transport action.
+
 ## What comes later
 
 `src/core/` is the foundation later phases build on, and the

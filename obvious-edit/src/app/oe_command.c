@@ -36,6 +36,11 @@ static OeCommandEntry command_table[OE_CMD_COUNT] = {
   { OE_CMD_SNAP_TOGGLE, "edit.snap-toggle", "s", TRUE },
   { OE_CMD_SHOW_ABOUT, "help.about", NULL, TRUE },
   { OE_CMD_EXPORT, "project.export", NULL, TRUE },
+  /* Phase 11 Wave B: generated-clip insertion — menu-only like the
+   * project commands; the handler inserts through the same validated
+   * generator mutator and records nothing (media.import precedent). */
+  { OE_CMD_INSERT_TITLE, "media.insert-title", NULL, TRUE },
+  { OE_CMD_INSERT_SOLID, "media.insert-solid", NULL, TRUE },
 };
 
 static OeCommandHandler handlers[OE_CMD_COUNT];
