@@ -61,7 +61,7 @@ environment the verification gates were run against.
 All commands run from this directory (`obvious-edit/`):
 
     meson setup build && ninja -C build     # zero warnings, werror
-    meson test -C build                     # 18 test suites
+    meson test -C build                     # 20 test suites
     ./scripts/run-headless.sh               # headless self-check, exit 0
 
 The headless script opens the Obvious Edit window under Xvfb, quits after
@@ -76,9 +76,14 @@ the first map, and exits 0. To prove the window title on a live run:
     meson test -C build --wrapper "valgrind --tool=memcheck --leak-check=full --error-exitcode=1 --suppressions=$(pwd)/tests/valgrind.supp"
     clang-format --dry-run --Werror src/*.c src/*/*.c src/*/*.h tests/*.c
 
-`tests/valgrind.supp` suppresses only GLib/GObject one-time internal
-allocations; the lifecycle test runs with `SDL_AUDIODRIVER=dummy` so it is
-hermetic (no host audio device, no third-party audio-library noise).
+`tests/valgrind.supp` suppresses GLib/GObject one-time internal allocations
+plus two documented upstream one-time-init exceptions — a scoped libasound
+record (SDL3 device enumeration) and a scoped libfontconfig record (Cairo
+toy font faces) — each for a leak with no upstream free. The ASan/UBSan
+runs carry the same exceptions via the `tests/lsan.supp` companion, wired
+through `LSAN_OPTIONS` in meson.build for the Cairo-linked suite. The
+lifecycle test runs with `SDL_AUDIODRIVER=dummy` so it is hermetic (no
+host audio device, no third-party audio-library noise).
 
 ## Documentation
 

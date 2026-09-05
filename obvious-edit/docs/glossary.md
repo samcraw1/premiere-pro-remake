@@ -60,8 +60,14 @@ byte-identically. The straight-cut parity test pins it.
 
 **Stroke** — one pointer drag from press to release. A stroke previews
 through unrecorded model mutations and commits exactly ONE undo
-record carrying the visual captured at the stroke's first change (the
-stroke baseline), never the last preview state.
+record carrying the value captured at the stroke's first change (the
+stroke baseline), never the last preview state. Phase 11 Wave B
+generalizes the contract from the visual rows to every clip-page
+section: the generated-clip text/size/color controls and the
+chroma-key controls ride it too, committing `OE_UNDO_OP_GENERATOR`
+or `OE_UNDO_OP_CLIP_KEY`; a zero-delta stroke records nothing, and
+committing means Enter, focus-out, spin release, grid-gesture
+release, or reselecting the clip.
 
 **Clip gain** — the per-clip audio level (`OeClipAudio.gain`), fixed
 point on the 1024 scale: 0 = silence, 1024 = unity, 2048 = +6 dB.

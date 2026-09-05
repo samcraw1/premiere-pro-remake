@@ -523,3 +523,31 @@ test('titles-key', test_titles_key,
         # init caches as leaks (see tests/lsan.supp)
         'LSAN_OPTIONS=suppressions=' + join_paths (meson.current_source_dir (),
                                                    'tests', 'lsan.supp')])
+
+# Inspector strokes (Phase 11 Wave B): the 20th suite — the clip
+# page's stroke contract replayed through the validated mutators and
+# the undo helpers the GTK window calls. GTK-free and Cairo-free: the
+test_inspector_strokes = executable('test_inspector_strokes',
+  [
+    'tests/test_inspector_strokes.c',
+    'src/app/oe_undo_stack.c',
+    'src/app/oe_playback_session.c',
+    'src/core/oe_audio_factor.c',
+    'src/core/oe_audio_buffer.c',
+    'src/media/oe_media_playback.c',
+    oe_render_sources,
+    'src/playback/oe_audio_output.c',
+    'src/core/oe_fades.c',
+    'src/core/oe_keyframes.c',
+    'src/core/oe_project.c',
+    'src/core/oe_project_format.c',
+    'src/core/oe_time.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [test_deps, json_glib_dep],
+)
+
+test('inspector-strokes', test_inspector_strokes,
+  timeout: 120,
+  env: ['SDL_AUDIODRIVER=dummy'])

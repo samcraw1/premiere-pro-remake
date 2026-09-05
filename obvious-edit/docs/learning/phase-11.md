@@ -87,10 +87,26 @@ round-trip/backfill/strictness, raster determinism and cache
 refresh, key-math domains and edges, fast-path preservation, and
 export decode-back parity (block means |Δ| ≤ 8).
 
-## 4. Wave B — inspector, timeline paint, commands
+## 4. Wave B — reaching the user
 
-The core renders and persists generators; nothing in the UI can
-create or edit them yet. Wave B adds the inspector's generator page,
-the timeline's title/solid paint (including gizmos if any), the
-command-palette affordances, and the visual dogfood evidence — the
-Wave A delivery deliberately changes no UI.
+Wave B makes the core reachable, editable, and visible without
+changing its shape. The inspector's clip page grows kind-aware
+sections on the Phase 10 stroke precedent — the generated-clip
+section (text/size/color for titles, color only for solids) and the
+chroma-key section (media clips on video tracks only), each with
+baseline-at-first-change, preview-without-record, and exactly one
+undo record at commit; a zero-delta stroke records nothing and a
+rejected commit reloads the model's truth. `media.insert-title` /
+`media.insert-solid` land generated clips at the playhead on the
+first video track and record no undo entry (the media.import
+precedent). The timeline paints generated clips with a distinct
+teal fill, labels them from the model — the title's text, not a
+media basename — and trims them like stills (free duration,
+source-range-as-duration). Every edit fires the model observer, so
+the paused monitor repaints through the existing snapshot-refresh
+seam with the generator cache dropped: editing title text changes
+the paused monitor with no transport action. The 20th GTK-free
+suite (`test_inspector_strokes.c`) replays the stroke contract
+through the same validated mutators, and the Xvfb dogfood captures
+the before/after evidence — no-playback sessions only, per the
+documented transport-playback limitation.
