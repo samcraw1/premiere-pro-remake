@@ -304,7 +304,7 @@ fit_frame (VideoSource *vs, const AVFrame *frame, int canvas_w, int canvas_h, gi
 struct _OeRenderSession
 {
   const OeRenderSource *source;
-  GHashTable *sources;         /* media_ref (as pointer) → owned VideoSource */
+  GHashTable *sources;          /* media_ref (as pointer) → owned VideoSource */
   OeGeneratorCache *generators; /* (clip, payload) → owned sequence raster */
 };
 
@@ -533,8 +533,8 @@ crop_layer (guint8 *layer, int *layer_w, int *layer_h, const OeClipVisual *visua
   guint8 *cropped = g_malloc0 ((gsize) cw * ch * 4);
 
   for (gint y = 0; y < ch; y++)
-    memcpy (cropped + (gsize) y * cw * 4,
-            layer + (gsize) (ct + y) * *layer_w * 4 + (gsize) cl * 4, (gsize) cw * 4);
+    memcpy (cropped + (gsize) y * cw * 4, layer + (gsize) (ct + y) * *layer_w * 4 + (gsize) cl * 4,
+            (gsize) cw * 4);
 
   g_free (layer);
   *layer_w = cw;

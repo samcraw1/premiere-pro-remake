@@ -204,12 +204,12 @@ typedef struct
   gint64 old_b_us;
   gint64 new_a_us;
   gint64 new_b_us;
-  OeClipVisual new_visual;      /* VISUAL only: the post-stroke state */
-  OeClipAudio new_clip_audio;   /* CLIP_AUDIO only: the post-stroke state */
+  OeClipVisual new_visual;       /* VISUAL only: the post-stroke state */
+  OeClipAudio new_clip_audio;    /* CLIP_AUDIO only: the post-stroke state */
   OeClipGenerator new_generator; /* GENERATOR only: owned post-stroke text */
-  OeClipKey new_key;            /* CLIP_KEY only: the post-stroke state */
-  OeTrackAudio old_track_audio; /* TRACK_AUDIO only: the pre-stroke state */
-  OeTrackAudio new_track_audio; /* TRACK_AUDIO only: the post-stroke state */
+  OeClipKey new_key;             /* CLIP_KEY only: the post-stroke state */
+  OeTrackAudio old_track_audio;  /* TRACK_AUDIO only: the pre-stroke state */
+  OeTrackAudio new_track_audio;  /* TRACK_AUDIO only: the post-stroke state */
 
   /* RIPPLE_DELETE only: owned array of OeRippleShift, one entry per
    * shifted suffix clip ordered by pre_index ascending; NULL for every

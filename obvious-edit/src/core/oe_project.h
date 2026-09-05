@@ -151,8 +151,8 @@ typedef struct
 } OeClipGenerator;
 
 /** Packing/domain limits for OeClipGenerator (Phase 11 Wave A). */
-#define OE_CLIP_COLOR_RGB_MAX 0xffffff  /* packed 0xRRGGBB */
-#define OE_CLIP_SIZE_PERMILLE_MAX 1000  /* title height ≤ frame height */
+#define OE_CLIP_COLOR_RGB_MAX 0xffffff /* packed 0xRRGGBB */
+#define OE_CLIP_SIZE_PERMILLE_MAX 1000 /* title height ≤ frame height */
 
 /**
  * OeClipKey: per-clip RGB-distance chroma-key state (Phase 11 Wave

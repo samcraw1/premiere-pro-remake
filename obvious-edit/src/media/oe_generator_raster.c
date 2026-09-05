@@ -61,14 +61,12 @@ oe_generator_raster_title (const gchar *text, gint color_rgb, gint size_permille
   g_return_val_if_fail (text != NULL && text[0] != '\0', NULL);
   g_return_val_if_fail (width > 0 && height > 0, NULL);
 
-  cairo_surface_t *surface
-      = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, width, height);
+  cairo_surface_t *surface = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, width, height);
   cairo_t *cr = cairo_create (surface);
 
   /* The pinned reference family (D12): one slant, one weight, no
    * style fields — D1's single fixed style. */
-  cairo_select_font_face (cr, "DejaVu Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_select_font_face (cr, "DejaVu Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
 
   /* Ink height as permille of frame height: the toy font size in user
    * units maps 1:1 to surface pixels at the identity CTM. */
@@ -124,8 +122,8 @@ oe_generator_raster_solid (gint color_rgb, int width, int height)
 
   for (gsize i = 0; i < pixel_count; i++)
     {
-      out[i * 4 + 0] = (guint8) (color_rgb & 0xff);        /* B */
-      out[i * 4 + 1] = (guint8) ((color_rgb >> 8) & 0xff); /* G */
+      out[i * 4 + 0] = (guint8) (color_rgb & 0xff);         /* B */
+      out[i * 4 + 1] = (guint8) ((color_rgb >> 8) & 0xff);  /* G */
       out[i * 4 + 2] = (guint8) ((color_rgb >> 16) & 0xff); /* R */
       out[i * 4 + 3] = 255;
     }
@@ -247,9 +245,9 @@ oe_generator_cache_raster (OeGeneratorCache *cache, const OeClip *clip, int widt
   guint8 *pixels = NULL;
 
   if (clip->kind == OE_CLIP_TITLE)
-    pixels = oe_generator_raster_title (payload->text != NULL ? payload->text : "",
-                                        payload->color_rgb, payload->size_permille, width, height,
-                                        error);
+    pixels
+        = oe_generator_raster_title (payload->text != NULL ? payload->text : "", payload->color_rgb,
+                                     payload->size_permille, width, height, error);
   else
     pixels = oe_generator_raster_solid (payload->color_rgb, width, height);
 
