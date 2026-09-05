@@ -23,7 +23,6 @@ G_BEGIN_DECLS
  * span — the per-channel peak a meter displays for the span. A NULL or
  * empty span peaks at 0.
  */
-gfloat oe_audio_buffer_peak (const gfloat *interleaved, gsize n_frames, int channels,
-                             int channel);
+gfloat oe_audio_buffer_peak (const gfloat *interleaved, gsize n_frames, int channels, int channel);
 
 G_END_DECLS
