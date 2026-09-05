@@ -16,6 +16,8 @@
 
 #include "oe_export.h"
 
+#include "../core/oe_fades.h"
+
 #include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -475,13 +477,23 @@ export_mixdown (const OeExportSpec *spec, gint64 total_samples, gfloat *mix,
               if (write_idx + n_write > total_samples)
                 n_write = total_samples - write_idx;
 
+              /* Shared gain envelope (Wave B): one implementation
+               * for preview and export. Sequence time of output
+               * sample (skip + i) is clip-relative resample math in
+               * integer µs. */
+              const guint gain = oe_fade_gain (
+                  clip_start_us + (frame_src_us - clip_src_start_us)
+                      + av_rescale (skip, G_USEC_PER_SEC, OE_EXPORT_SAMPLE_RATE),
+                  clip_start_us, clip_end_us, clip->visual.fade_in_us, clip->visual.fade_out_us);
+              const gfloat gain_scale = (gfloat) gain / (gfloat) OE_FADE_SCALE;
+
               for (gint64 i = 0; i < n_write; i++)
                 {
                   const gfloat *s = scratch + (size_t) (skip + i) * OE_EXPORT_CHANNELS;
                   gfloat *d = mix + (size_t) (write_idx + i) * OE_EXPORT_CHANNELS;
 
-                  d[0] += s[0];
-                  d[1] += s[1];
+                  d[0] += s[0] * gain_scale;
+                  d[1] += s[1] * gain_scale;
                 }
 
               g_free (scratch);

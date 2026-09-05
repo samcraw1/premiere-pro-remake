@@ -18,6 +18,7 @@ struct _OeApplication
   gchar **import_media_paths; /* owned; consumed on first activate */
   gchar **insert_media_paths; /* owned; consumed on first activate */
   gboolean insert_media;      /* --insert-media seen in handle-local */
+  gchar *open_path;           /* owned; --open seen in handle-local */
   GtkWidget *main_window;     /* weak; set in activate, cleared on destroy */
 };
 
@@ -156,6 +157,13 @@ oe_application_activate (GApplication *application)
       g_strfreev (self->insert_media_paths);
       self->insert_media_paths = NULL;
     }
+  if (self->open_path != NULL)
+    {
+      oe_log (OE_LOG_LEVEL_INFO, "open seam: firing %s", self->open_path);
+      oe_main_window_open_project_file (OE_MAIN_WINDOW (window), self->open_path);
+      g_free (self->open_path);
+      self->open_path = NULL;
+    }
 }
 
 static void
@@ -242,6 +250,16 @@ oe_application_handle_local_options (GApplication *application, GVariantDict *op
       }
   }
 
+  {
+    g_autoptr (GVariant) open
+        = g_variant_dict_lookup_value (options, "open", G_VARIANT_TYPE_STRING);
+    if (open != NULL)
+      {
+        g_free (self->open_path);
+        self->open_path = g_variant_dup_string (open, NULL);
+      }
+  }
+
   /* -1 continues into the local application instance. */
   return -1;
 }
@@ -287,6 +305,11 @@ oe_application_new (void)
                                  G_OPTION_ARG_STRING_ARRAY,
                                  "Import paths and insert every ready asset at the playhead so a "
                                  "headless run reaches playback (headless dogfood seam)",
+                                 NULL);
+  g_application_add_main_option (G_APPLICATION (self), "open", '\0', G_OPTION_FLAG_NONE,
+                                 G_OPTION_ARG_STRING,
+                                 "Open a project file through the normal flow after the window "
+                                 "maps (headless dogfood seam)",
                                  NULL);
 
   return self;

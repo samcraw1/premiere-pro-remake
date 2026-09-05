@@ -87,7 +87,7 @@ integer tokens only:
 | `rotation-cdeg` | rotation in 1/100 degree | 0 |
 | `opacity` | 0–255 straight-alpha layer opacity | 255 |
 | `crop-l/t/r/b` | crop insets in source pixels | 0 |
-| `fade-in-us`, `fade-out-us` | reserved for Wave B fades (0 in Wave A) | 0 |
+| `fade-in-us`, `fade-out-us` | audio fade envelope lengths in µs, clamped to the clip duration | 0 |
 
 Wrong JSON types are `TYPE` (including float tokens where integers
 are required), out-of-range values are `VALUE`, and unknown or
@@ -97,6 +97,28 @@ bump: a reader that predates `visual` never sees it, and a current
 reader normalizes absence to the identity before the model is built.
 Save-load-save is byte-identical because the writer's emission is
 canonical.
+
+Each clip may also carry a `keyframes` member and each video track a
+`transitions` member (Phase 9 Wave B), following the same recipe:
+every writer emits both unconditionally, and a reader backfills NONE
+when they are absent — absence means "none", which is also exactly
+what a pre-Wave-B file contains. Both keep integer tokens only and
+closed member lists, so unknown members still error.
+
+| `keyframes` member | Meaning |
+|---|---|
+| property name (`opacity`, `pos-x`, `pos-y`, `scale-permille`, `rotation-cdeg`) | array of `{ "time-us": <int>, "value": <int> }`, sorted by `time-us`, times clip-relative raw µs, values in the property's domain (crop is deliberately absent — it stays static) |
+
+| `transitions` member | Meaning |
+|---|---|
+| array of `{ "at-us": <int>, "duration-us": <int>, "kind": "cross-dissolve" \|"dip-to-black" }` | one boundary blend per shared clip edge; `at-us` is the boundary where clip1's end equals clip2's start, `duration-us` the centered window |
+
+Wrong JSON types are `TYPE`, out-of-domain values or times are
+`VALUE`, and unknown property names or transition kinds are
+`UNKNOWN_MEMBER`. No version bump: a reader that predates these
+members never sees them, and a current reader normalizes absence to
+"none" before the model is built. Save-load-save is byte-identical
+because the writer's emission is canonical.
 
 ## Strictness: no silent partial loads
 

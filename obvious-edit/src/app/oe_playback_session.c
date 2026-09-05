@@ -16,6 +16,8 @@
 
 #include "oe_playback_session.h"
 
+#include "../core/oe_fades.h"
+
 #include "../core/oe_time.h"
 #include "../media/oe_render.h"
 #include "../playback/oe_audio_output.h"
@@ -74,7 +76,9 @@ struct _OePlaybackSession
   gint64 audio_clip_position_us;  /* owning clip placement (sequence time) */
   gint64 audio_clip_source_in_us; /* owning clip source origin */
   gint64 audio_clip_end_seq_us;   /* sequence time where the clip ends */
-  gchar *audio_failed_path;       /* media that failed this generation */
+  guint64 audio_clip_fade_in_us;  /* owning clip envelope (Wave B) */
+  guint64 audio_clip_fade_out_us;
+  gchar *audio_failed_path; /* media that failed this generation */
 
   OeRenderSource render_source;    /* sequence snapshot + resolver */
   OeRenderSession *render_session; /* shared seam decoder cache, lazy */
@@ -300,6 +304,8 @@ submit_audio_request (OePlaybackSession *self, gint64 position_us)
   self->audio_clip_position_us = clip->position_us;
   self->audio_clip_source_in_us = clip->source_in_us;
   self->audio_clip_end_seq_us = clip->position_us + clip_length;
+  self->audio_clip_fade_in_us = clip->visual.fade_in_us;
+  self->audio_clip_fade_out_us = clip->visual.fade_out_us;
   self->audio_outstanding = TRUE;
 
   oe_log (OE_LOG_LEVEL_DEBUG, "audio request: '%s' [%lld, %lld) gen %u", path, (long long) src_from,
@@ -379,6 +385,28 @@ on_worker_audio (OePlaybackAudioChunk *chunk, const GError *error, gpointer user
 
   if (keep_frames > 0 && self->stream != NULL)
     {
+      /* Shared gain envelope (Wave B): the same core helper the export
+       * mixdown uses, applied in place before the queue so preview and
+       * export cannot drift. Skipped entirely for unfaded clips. */
+      if (self->audio_clip_fade_in_us > 0 || self->audio_clip_fade_out_us > 0)
+        {
+          const int channels = MAX (self->stream_info.channels, 1);
+          gfloat *frames = chunk->interleaved;
+
+          for (gint64 i = 0; i < keep_frames; i++)
+            {
+              const gint64 t_us
+                  = seq_start + i * G_GINT64_CONSTANT (1000000) / (gint64) chunk->sample_rate;
+              const gfloat g = (gfloat) oe_fade_gain (
+                                   t_us, self->audio_clip_position_us, self->audio_clip_end_seq_us,
+                                   self->audio_clip_fade_in_us, self->audio_clip_fade_out_us)
+                               / (gfloat) OE_FADE_SCALE;
+
+              for (int ch = 0; ch < channels; ch++)
+                frames[(size_t) i * channels + ch] *= g;
+            }
+        }
+
       const gsize pushed
           = oe_audio_output_queue (self->stream, chunk->interleaved, (gsize) keep_frames);
       self->audio_pushed_frames += (gint64) pushed;

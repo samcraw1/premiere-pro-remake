@@ -283,3 +283,81 @@ Wave B inherits the reserved fields and the seam extension point:
    deliberately unused, and the enum append keeps `OE_UNDO_OP_VISUAL`
    stable. Wave B's work is additive on top of a seam that cannot
    silently change Wave A's rendered output.
+
+## 11. Wave B: keyframes, transitions, fades (walkthrough)
+
+Wave B turns Wave A's reserved fields into behavior, one stage at a
+time, each committed conventionally:
+
+1. **Keyframes** (`src/core/oe_keyframes.[ch]`). A store is one
+   `GArray` of `{property, time_us, value}` kept sorted by
+   (property, time); insertion replaces an exact (property, time)
+   match. Sampling is the interpolation contract:
+   `value = va + oe_time_round_ratio ((gint64)(vb - va) * (t - ta),
+   tb - ta)` — one division, one rounding, at the final step only —
+   with clamping outside the keyed range and static-value degradation
+   for empty/single-entry/unsorted/zero-span stores. The
+   keyframeable set v1 is opacity plus the four transform properties;
+   crop is deliberately static. The compositor resolves the per-frame
+   value (`oe_clip_visual_resolve`) before the transform/opacity
+   application, so preview and export animate identically. Inspector
+   plus/minus controls add/remove keys at the frame-snapped playhead
+   through the validated mutators; every keyframe edit commits as
+   exactly one `OE_UNDO_OP_VISUAL` record.
+2. **Transitions** (model + compositor + timeline + ripple). An
+   `OeTransition` is `{track_index (video only), at_us, duration_us,
+   kind}` anchored to the boundary where clip1's end equals clip2's
+   start; the window is centered on `at_us` and clamped to both
+   clips. The validated mutators reject unknown tracks, boundaries
+   without neighbor coverage, and non-positive durations. At
+   composite time `collect_covering` attaches ramp weights to the two
+   covering entries (`out = (A*(255 − w) + B*w)/255` per channel,
+   dip-to-black through a pinned-black intermediate); w = 0/255 and
+   zero-duration windows degenerate to the straight cut, and a
+   transition whose neighbors no longer cover the window degrades
+   gracefully at composite time — no mutator fixups. The GTK-free
+   layout adds the shaded boundary band and extends the snap-target
+   edges; ripple delete re-anchors `at_us` through the validated
+   mutator as one extra replay sub-step (a destroyed boundary keeps
+   its object per the no-fixup design).
+3. **Fades** (`src/core/oe_fades.[ch]`). One shared GTK-free,
+   FFmpeg-free envelope:
+   `g = MIN (1024, oe_time_round_ratio ((t - clip_start)*1024,
+   fade_in_us), oe_time_round_ratio ((clip_end - t)*1024,
+   fade_out_us))`, consumed by BOTH the export mixdown sum loop and
+   the playback chunk path — one implementation so preview and export
+   cannot drift — applied per sample before the unchanged hard clamp.
+4. **Persistence.** The clip-level `keyframes` and track-level
+   `transitions` members follow the width/height backfill recipe:
+   emitted unconditionally, absent-on-read backfills NONE, closed
+   member lists extended at each level, integer tokens only, no
+   version bump, save-load-save byte-identical (pinned by test).
+5. **Tests.** `tests/test_wave_b.c` (13 GTK-free tests) pins the
+   interpolation contract, envelope endpoints, transition
+   windows/mutators, band/snap-edge layout, ripple re-anchor replay,
+   and persistence round trip plus strictness mutations. The export
+   suite gains the transition-blend degenerate/midpoint test, the
+   mixdown fade ratio-band test (AAC-tolerant windowed-mean ratios),
+   and the acceptance parity test: two layers + a boundary
+   transition + an audio fade, preview vs export decode-back at
+   |Δ| ≤ 8 block means.
+
+### Bug log (Wave B)
+
+- **Shallow-getter ownership.** `oe_project_get_clip` is an aliasing
+  value copy; the undo recorder initially cleared the borrowed visual
+  and freed the live keyframe array. Root cause: a misread contract.
+  Fix: the recorder deep-copies into the record and the model keeps
+  ownership; the header now documents aliasing explicitly.
+- **Padding-sensitive equality.** `oe_keyframes_equal` used `memcmp`
+  on structs whose padding was uninitialized (compound literals).
+  Valgrind flagged it. Fix: field-by-field comparison — also
+  semantically correct for arrays.
+- **Aliasing copy.** `oe_keyframes_copy_array` preserved the source
+  pointer instead of allocating a fresh `GArray`. Fix: allocate, then
+  deep-copy — the model's deep-copy boundary stays honest.
+- **Test-side store leak.** A test handed its own `GArray` to
+  `oe_project_set_clip_visual` and never unref'd it after the
+  deep-copying mutator; LeakSanitizer caught it at teardown. The
+  mutator's contract is deep-copy-in, so the caller's transient stays
+  caller-owned.

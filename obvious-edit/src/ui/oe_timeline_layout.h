@@ -125,6 +125,30 @@ gint64 oe_timeline_snap_time (const OeSnapContext *ctx, gint64 candidate_us);
 gint64 oe_timeline_clamp_move_position (const OeSequence *sequence, guint track_index,
                                         guint clip_index, gint64 wanted_position);
 
+/* Phase 9 Wave B: transition boundary bands. The band's horizontal
+ * extent is the transition's EFFECTIVE window, re-derived from the
+ * current clips (an inactive window draws no band and offers no snap
+ * targets). Pure GTK-free geometry: the widget just draws. */
+typedef struct
+{
+  gboolean active;
+  gdouble x_start;
+  gdouble x_end;
+  gdouble y;      /* top of the track lane */
+  gdouble height; /* lane height */
+} OeTransitionBandRect;
+
+OeTransitionBandRect oe_timeline_transition_band (const OeTimelineGeometry *geometry,
+                                                  const OeTransitionWindow *window,
+                                                  guint track_index);
+
+/* Phase 9 Wave B: the two edge targets a transition contributes to
+ * snapping — its effective window's start and end. Returns FALSE when
+ * the window is inactive: no edges. The snap core never touches the
+ * model; callers extend the pre-collected edge list with these. */
+gboolean oe_timeline_transition_edges (const OeTransitionWindow *window, gint64 *start_us,
+                                       gint64 *end_us);
+
 /* Drag bounds for a trim: source-in may slide within
  * [0, source_out - min] and source-out within
  * [source_in + min, max_source_us] — where max_source_us is the probed

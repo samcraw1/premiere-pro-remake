@@ -427,6 +427,13 @@ oe_timeline_zoom_out (OeTimeline *self)
   apply_zoom (self, self->geometry.px_per_us / 2.0, width / 2.0);
 }
 
+const OeSequence *
+oe_timeline_get_sequence (OeTimeline *self)
+{
+  g_return_val_if_fail (OE_IS_TIMELINE (self), NULL);
+  return &self->sequence;
+}
+
 gint64
 oe_timeline_get_playhead (OeTimeline *self)
 {
@@ -635,6 +642,33 @@ paint_clips (cairo_t *cr, OeTimeline *self, gdouble width G_GNUC_UNUSED)
     }
 }
 
+/* Phase 9 Wave B: one shaded band per active transition window,
+ * spanning the effective window on its track lane (GTK-free layout
+ * decides placement; the widget just draws). */
+static void
+paint_transition_bands (cairo_t *cr, OeTimeline *self)
+{
+  const OeRgba band = { 0.55, 0.35, 0.85 };
+
+  for (guint t = 0; t < self->sequence.transitions->len; t++)
+    {
+      const OeTransition *transition = g_ptr_array_index (self->sequence.transitions, t);
+      OeTransitionWindow window = oe_transition_window (&self->sequence, transition);
+      OeTransitionBandRect rect
+          = oe_timeline_transition_band (&self->geometry, &window, transition->track_index);
+
+      if (!rect.active)
+        continue;
+
+      fill_rect (cr, &band, rect.x_start, rect.y, rect.x_end - rect.x_start, rect.height);
+
+      const OeRgba label = { 0.9, 0.85, 1.0 };
+      const gchar *name = oe_transition_kind_get_name (transition->kind);
+
+      draw_text (cr, &label, rect.x_start + 4.0, rect.y + rect.height - 6.0, name);
+    }
+}
+
 static void
 paint_playhead (cairo_t *cr, OeTimeline *self, gdouble height)
 {
@@ -681,6 +715,7 @@ draw_frame (GtkDrawingArea *area G_GNUC_UNUSED, cairo_t *cr, int width, int heig
 
   paint_lanes (cr, self, width, height);
   paint_clips (cr, self, width);
+  paint_transition_bands (cr, self);
   paint_ruler (cr, self, width);
   paint_playhead (cr, self, height);
 }
@@ -826,6 +861,24 @@ collect_neighbour_edges (const OeSequence *sequence, guint track_index, guint sk
 
       g_array_append_vals (edges, (const gint64[]) { start }, 1);
       g_array_append_vals (edges, (const gint64[]) { end }, 1);
+    }
+
+  /* Phase 9 Wave B: transition window edges join the snap targets —
+   * the same pre-collected list, extended; the snap core stays
+   * model-free. */
+  for (guint t = 0; t < sequence->transitions->len; t++)
+    {
+      const OeTransition *transition = g_ptr_array_index (sequence->transitions, t);
+
+      if (transition->track_index != track_index)
+        continue;
+
+      OeTransitionWindow window = oe_transition_window (sequence, transition);
+      gint64 wstart = 0;
+      gint64 wend = 0;
+
+      if (oe_timeline_transition_edges (&window, &wstart, &wend))
+        g_array_append_vals (edges, (const gint64[]) { wstart, wend }, 2);
     }
 }
 

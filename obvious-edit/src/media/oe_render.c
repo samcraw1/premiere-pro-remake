@@ -626,12 +626,27 @@ source_frame_at (VideoSource *vs, gint64 target_tb, GError **error)
 
 /* Covering video clips at @t_us, ascending track order — the blend
  * order. Mirrors oe_playback_session_map's cover rule and source
- * clamp; the array holds borrowed clip pointers. */
+ * clamp; the array holds borrowed clip pointers. A transition window
+ * contributes a SECOND entry for its track (the non-covering neighbor
+ * with its source clamped to the shared boundary edge), and both pair
+ * members carry their ramp weight (255 = not part of a pair). */
 typedef struct
 {
-  const OeClip *clip;
+  const OeClip *clip; /* NULL renders the pinned-black dip side */
   gint64 source_us;
+  gint64 clip_time_us; /* clip-relative sample time for keyframes */
+  guint blend_weight;
 } CoveringClip;
+
+/* The covering entry's source clamp — also the transition partner's
+ * rule: the incoming neighbor freezes on its first frame before the
+ * boundary, the outgoing neighbor on its last frame after it. */
+static gint64
+cover_source_us (const OeClip *clip, gint64 t_us)
+{
+  return CLAMP (clip->source_in_us + (t_us - clip->position_us), clip->source_in_us,
+                clip->source_out_us - 1);
+}
 
 static void
 collect_covering (const OeSequence *sequence, gint64 t_us, GArray *out)
@@ -653,11 +668,74 @@ collect_covering (const OeSequence *sequence, gint64 t_us, GArray *out)
 
           const CoveringClip entry = {
             .clip = clip,
-            .source_us = CLAMP (clip->source_in_us + (t_us - clip->position_us), clip->source_in_us,
-                                clip->source_out_us - 1),
+            .source_us = cover_source_us (clip, t_us),
+            .clip_time_us = CLAMP (t_us - clip->position_us, 0, length - 1),
+            .blend_weight = 255,
           };
 
           g_array_append_val (out, entry);
+        }
+
+      /* Transition windows (D5): the effective window is re-derived
+       * from the current clips every frame — a moved or trimmed
+       * neighbor degrades the transition to the straight cut here, by
+       * simply not contributing a pair. One active window per track
+       * (v1). */
+      for (guint tr = 0; tr < sequence->transitions->len; tr++)
+        {
+          const OeTransition *transition = g_ptr_array_index (sequence->transitions, tr);
+          const OeTransitionWindow w = oe_transition_window (sequence, transition);
+
+          if (!w.active || transition->track_index != t)
+            continue;
+          if (t_us < w.start_us || t_us >= w.end_us)
+            continue;
+
+          gint64 ramp = oe_time_round_ratio ((t_us - w.start_us) * 255, transition->duration_us);
+          ramp = CLAMP (ramp, 0, 255);
+
+          /* w = 0/255 are the documented degenerate points: the ramp
+           * collapses to the straight cut of the covering clip, no
+           * pair contribution at all. */
+          if (ramp == 0 || ramp == 255)
+            break;
+
+          /* Dip-to-black runs the same ramp against a pinned-black
+           * side instead of the neighbor clip (same formula, same
+           * weights — only the partner's pixels differ). */
+          const gboolean dip = transition->kind == OE_TRANSITION_DIP_TO_BLACK;
+
+          if (t_us < transition->at_us)
+            {
+              /* Outgoing half: the covering clip is @out; the partner
+               * fades in frozen on its first frame (or black). */
+              CoveringClip partner = {
+                .clip = dip ? NULL : w.in_clip,
+                .source_us = dip ? 0 : w.in_clip->source_in_us,
+                .clip_time_us = 0, /* frozen head */
+                .blend_weight = (guint) ramp,
+              };
+
+              g_array_append_val (out, partner);
+              g_array_index (out, CoveringClip, out->len - 2).blend_weight = 255 - (guint) ramp;
+            }
+          else
+            {
+              /* Incoming half: the covering clip is @in; the partner
+               * fades out frozen on its last frame (or black). */
+              const gint64 out_len = w.out_clip->source_out_us - w.out_clip->source_in_us;
+              CoveringClip partner = {
+                .clip = dip ? NULL : w.out_clip,
+                .source_us = dip ? 0 : cover_source_us (w.out_clip, t_us),
+                .clip_time_us = dip ? 0 : out_len - 1, /* frozen tail */
+                .blend_weight = 255 - (guint) ramp,
+              };
+
+              g_array_append_val (out, partner);
+              g_array_index (out, CoveringClip, out->len - 2).blend_weight = (guint) ramp;
+            }
+
+          break; /* one active window per track */
         }
     }
 }
@@ -673,96 +751,183 @@ compose_layered (OeRenderSession *session, const GArray *covering, int out_w, in
 
   make_opaque (canvas, (gsize) out_w * out_h);
 
+  /* Transition pair state: the first member's placed canvas waits here
+   * until its partner arrives (pair members are adjacent in the
+   * covering array — collect_covering appends them back to back). */
+  guint8 *pair_a = NULL;
+  guint pair_a_weight = 0;
+
   for (guint i = 0; i < covering->len; i++)
     {
       const CoveringClip *entry = &g_array_index (covering, CoveringClip, i);
-      const OeClipVisual *visual = &entry->clip->visual;
+      /* One resolution point for preview and export alike: keyframed
+       * properties sample at the entry's clip-relative time; a clip
+       * without keyframes passes through unchanged. */
+      OeClipVisual resolved = { 0 };
+      const OeClipVisual *visual = NULL;
 
-      if (visual->opacity == 0)
-        continue; /* invisible layer: nothing to blend */
-
-      VideoSource *vs = ensure_source (session, entry->clip->media_ref, error);
-
-      if (vs == NULL)
+      if (entry->clip != NULL)
         {
-          g_free (canvas);
-          return NULL;
+          oe_clip_visual_resolve (&entry->clip->visual, entry->clip_time_us, &resolved);
+          visual = &resolved;
+        }
+      guint8 *layer = NULL;
+      int layer_w = 0;
+      int layer_h = 0;
+
+      if (visual != NULL && visual->opacity == 0)
+        {
+          /* Invisible layer: a solo entry blends nothing; a pair
+           * member still ramps (its placed canvas is black) — handled
+           * by falling through with a NULL layer only for solos. */
+          if (entry->blend_weight == 255)
+            continue;
         }
 
-      const gint64 target_tb
-          = av_rescale_q (entry->source_us, AV_TIME_BASE_Q, vs->dec.stream->time_base);
-      const AVFrame *frame = source_frame_at (vs, target_tb, error);
-
-      if (frame == NULL)
+      if (visual != NULL)
         {
-          g_free (canvas);
-          return NULL;
+          VideoSource *vs = ensure_source (session, entry->clip->media_ref, error);
+
+          if (vs == NULL)
+            {
+              g_free (canvas);
+              g_free (pair_a);
+              return NULL;
+            }
+
+          const gint64 target_tb
+              = av_rescale_q (entry->source_us, AV_TIME_BASE_Q, vs->dec.stream->time_base);
+          const AVFrame *frame = source_frame_at (vs, target_tb, error);
+
+          if (frame == NULL)
+            {
+              g_free (canvas);
+              g_free (pair_a);
+              return NULL;
+            }
+
+          gint fit_w = 0;
+          gint fit_h = 0;
+
+          if (!fit_frame (vs, frame, out_w, out_h, &fit_w, &fit_h, error))
+            {
+              g_free (canvas);
+              g_free (pair_a);
+              return NULL;
+            }
+
+          /* Own a copy: fit_frame's staging buffer is reused per source,
+           * and the pipeline below frees every intermediate. */
+          layer = g_memdup2 (vs->fitted, (gsize) fit_w * fit_h * 4);
+          layer_w = fit_w;
+          layer_h = fit_h;
+
+          /* Crop first (source pixels, spec D2), then scale, then rotate. */
+          if (visual->crop_l != 0 || visual->crop_t != 0 || visual->crop_r != 0
+              || visual->crop_b != 0)
+            {
+              const gint cl = MIN ((gint) visual->crop_l, layer_w / 2);
+              const gint ct = MIN ((gint) visual->crop_t, layer_h / 2);
+              const gint cr = MIN ((gint) visual->crop_r, layer_w / 2);
+              const gint cb = MIN ((gint) visual->crop_b, layer_h / 2);
+              const gint cw = MAX (layer_w - cl - cr, 1);
+              const gint ch = MAX (layer_h - ct - cb, 1);
+              guint8 *cropped = g_malloc0 ((gsize) cw * ch * 4);
+
+              for (gint y = 0; y < ch; y++)
+                memcpy (cropped + (gsize) y * cw * 4,
+                        layer + (gsize) (ct + y) * layer_w * 4 + (gsize) cl * 4, (gsize) cw * 4);
+
+              g_free (layer);
+              layer = cropped;
+              layer_w = cw;
+              layer_h = ch;
+            }
+
+          if (!oe_clip_visual_is_default (visual))
+            {
+              int scaled_w = 0;
+              int scaled_h = 0;
+              guint8 *scaled = scale_layer (layer, layer_w, layer_h, visual->scale_permille,
+                                            &scaled_w, &scaled_h);
+
+              g_free (layer);
+
+              int rotated_w = 0;
+              int rotated_h = 0;
+              guint8 *rotated = rotate_layer (scaled, scaled_w, scaled_h, visual->rotation_cdeg,
+                                              &rotated_w, &rotated_h);
+
+              g_free (scaled);
+              layer = rotated;
+              layer_w = rotated_w;
+              layer_h = rotated_h;
+            }
+        }
+      else
+        {
+          /* Pinned-black dip side: an opaque black frame. */
+          layer = g_malloc0 ((gsize) out_w * out_h * 4);
+          make_opaque (layer, (gsize) out_w * out_h);
+          layer_w = out_w;
+          layer_h = out_h;
         }
 
-      gint fit_w = 0;
-      gint fit_h = 0;
+      /* Centered anchor, then the frame-pixel position offset. The
+       * pinned-black side spans the whole canvas, so it has no offset
+       * and always renders at full opacity. */
+      const gint pos_x = visual != NULL ? visual->pos_x : 0;
+      const gint pos_y = visual != NULL ? visual->pos_y : 0;
+      const guint opacity = visual != NULL ? visual->opacity : 255;
+      const gint dst_x = (out_w - layer_w) / 2 + pos_x;
+      const gint dst_y = (out_h - layer_h) / 2 + pos_y;
 
-      if (!fit_frame (vs, frame, out_w, out_h, &fit_w, &fit_h, error))
+      if (entry->blend_weight == 255)
         {
-          g_free (canvas);
-          return NULL;
-        }
-
-      /* Own a copy: fit_frame's staging buffer is reused per source,
-       * and the pipeline below frees every intermediate. */
-      guint8 *layer = g_memdup2 (vs->fitted, (gsize) fit_w * fit_h * 4);
-      int layer_w = fit_w;
-      int layer_h = fit_h;
-
-      /* Crop first (source pixels, spec D2), then scale, then rotate. */
-      if (visual->crop_l != 0 || visual->crop_t != 0 || visual->crop_r != 0 || visual->crop_b != 0)
-        {
-          const gint cl = MIN ((gint) visual->crop_l, layer_w / 2);
-          const gint ct = MIN ((gint) visual->crop_t, layer_h / 2);
-          const gint cr = MIN ((gint) visual->crop_r, layer_w / 2);
-          const gint cb = MIN ((gint) visual->crop_b, layer_h / 2);
-          const gint cw = MAX (layer_w - cl - cr, 1);
-          const gint ch = MAX (layer_h - ct - cb, 1);
-          guint8 *cropped = g_malloc0 ((gsize) cw * ch * 4);
-
-          for (gint y = 0; y < ch; y++)
-            memcpy (cropped + (gsize) y * cw * 4,
-                    layer + (gsize) (ct + y) * layer_w * 4 + (gsize) cl * 4, (gsize) cw * 4);
-
+          blend_layer (canvas, out_w, out_h, layer, layer_w, layer_h, dst_x, dst_y, opacity);
           g_free (layer);
-          layer = cropped;
-          layer_w = cw;
-          layer_h = ch;
+          continue;
         }
 
-      if (!oe_clip_visual_is_default (visual))
-        {
-          int scaled_w = 0;
-          int scaled_h = 0;
-          guint8 *scaled
-              = scale_layer (layer, layer_w, layer_h, visual->scale_permille, &scaled_w, &scaled_h);
+      /* Transition pair member: place on its own opaque canvas (the
+       * layer's own opacity still applies), then ramp with the partner
+       * once both are in hand. */
+      guint8 *placed = g_malloc0 ((gsize) out_w * out_h * 4);
 
-          g_free (layer);
-
-          int rotated_w = 0;
-          int rotated_h = 0;
-          guint8 *rotated = rotate_layer (scaled, scaled_w, scaled_h, visual->rotation_cdeg,
-                                          &rotated_w, &rotated_h);
-
-          g_free (scaled);
-          layer = rotated;
-          layer_w = rotated_w;
-          layer_h = rotated_h;
-        }
-
-      /* Centered anchor, then the frame-pixel position offset. */
-      const gint dst_x = (out_w - layer_w) / 2 + visual->pos_x;
-      const gint dst_y = (out_h - layer_h) / 2 + visual->pos_y;
-
-      blend_layer (canvas, out_w, out_h, layer, layer_w, layer_h, dst_x, dst_y, visual->opacity);
+      make_opaque (placed, (gsize) out_w * out_h);
+      blend_layer (placed, out_w, out_h, layer, layer_w, layer_h, dst_x, dst_y, opacity);
       g_free (layer);
+
+      if (pair_a == NULL)
+        {
+          pair_a = placed;
+          pair_a_weight = entry->blend_weight;
+          continue;
+        }
+
+      /* out = (A*(255-w) + B*w)/255 per channel, truncating — the D5
+       * integer ramp; weights come from collect_covering and sum to
+       * 255. Alpha stays opaque: the pair IS the track's frame. */
+      const guint wa = pair_a_weight;
+      const guint wb = entry->blend_weight;
+      const gsize pixels = (gsize) out_w * out_h * 4;
+
+      for (gsize p = 0; p < pixels; p += 4)
+        {
+          canvas[p + 0] = (guint8) ((pair_a[p + 0] * wa + placed[p + 0] * wb) / 255);
+          canvas[p + 1] = (guint8) ((pair_a[p + 1] * wa + placed[p + 1] * wb) / 255);
+          canvas[p + 2] = (guint8) ((pair_a[p + 2] * wa + placed[p + 2] * wb) / 255);
+          canvas[p + 3] = 255;
+        }
+
+      g_free (pair_a);
+      pair_a = NULL;
+      g_free (placed);
     }
 
+  /* Defensive: an unpaired member (collect_covering always appends
+   * both sides, so this is unreachable today) blends as-is. */
+  g_free (pair_a);
   return canvas;
 }
 
