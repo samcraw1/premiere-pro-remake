@@ -13,6 +13,9 @@
  *   /export/container-truth    probe: h264 + aac, size, ±1-frame duration
  *   /export/content-round-trip decode exported frame/audio back in-tree
  *   /export/mixdown-sums       two overlapping tracks sum; gaps silent
+ *   /export/transition-blend   Wave B ramp: degenerate edges + midpoint
+ *   /export/mixdown-fade-ratio shared envelope shapes the mixdown
+ *   /export/parity-transition-fade  2 layers + transition + fade parity
  *   /export/cancellation       cancel mid-run: typed error, no files left
  *   /export/atomic-failure     failed export leaves the destination
  *                              byte-identical and no temp behind
@@ -1434,6 +1437,283 @@ test_parity_two_layer (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
   g_free (red);
   g_free (green);
 }
+
+/* ------------------------------------------------------------------ */
+/* Wave B: transitions, fades, acceptance parity                        */
+/* ------------------------------------------------------------------ */
+
+/* Solid-color layers with a boundary transition between the two lower
+ * clips and a keyed, translucent green layer on top. */
+static OeProject *
+build_transition_project (const OeFixtures *fx, gchar **red_path, gchar **blue_path)
+{
+  write_solid_avi (fx, "red.avi", 0xe0, 0x20, 0x20, TEST_FPS);
+  write_solid_avi (fx, "blue.avi", 0x20, 0x30, 0xe0, TEST_FPS);
+
+  *red_path = g_build_filename (fx->dir, "red.avi", NULL);
+  *blue_path = g_build_filename (fx->dir, "blue.avi", NULL);
+
+  OeProject *project = new_project_25fps ();
+  const guint lower = oe_project_add_track (project, OE_TRACK_VIDEO);
+  const guint upper = oe_project_add_track (project, OE_TRACK_VIDEO);
+  const guint red = add_media (project, *red_path);
+  const guint blue = add_media (project, *blue_path);
+
+  insert_clip (project, lower, red, 0, 480000);
+  insert_clip (project, lower, blue, 480000, 480000);
+  insert_clip (project, upper, red, 0, 480000);
+
+  /* The boundary transition, then the keyed upper layer: opacity ramps
+   * clip-relatively 255 → 0 across [0, 480 ms), so the layer fades
+   * away exactly where the transition window opens. */
+  OeTransition t = { 0, 480000, 100000, OE_TRANSITION_CROSS_DISSOLVE };
+
+  g_assert_true (oe_project_add_transition (project, &t, NULL));
+
+  OeClipVisual v = oe_clip_visual_identity ();
+
+  g_assert_true (oe_project_set_clip_visual (project, upper, 0, &v, NULL));
+  g_assert_true (
+      oe_project_set_clip_keyframe (project, upper, 0, OE_KEYFRAME_OPACITY, 0, 255, NULL));
+  g_assert_true (
+      oe_project_set_clip_keyframe (project, upper, 0, OE_KEYFRAME_OPACITY, 480000, 0, NULL));
+  return project;
+}
+
+/* /export/transition-blend: the compositor's two-input ramp — w=0/255
+ * degenerate to the straight cut, the midpoint mixes 50/50, and
+ * dip-to-black sinks to half-dark at the midpoint. */
+static void
+test_transition_blend (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *blue;
+  OeProject *project = build_transition_project (fx, &red, &blue);
+
+  OeSequence seq = { 0 }; /* zeroed: get_sequence overwrites wholesale */
+
+  oe_project_get_sequence (project, &seq);
+
+  OeRenderSource source = { &seq, test_resolve, project };
+  GError *error = NULL;
+  double mean[3];
+  guint8 *frame;
+
+  /* Window edges are the documented degenerate points: the whole
+   * frame is one clip's picture, straight cut, nothing blended. */
+  frame = oe_render_frame_at (&source, 430000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (frame);
+  window_mean (frame, TEST_W, TEST_H, 0, 0, TEST_W, TEST_H, mean);
+  g_assert_cmpfloat (fabs (mean[0] - 0xe0), <=, 2.0);
+  g_assert_cmpfloat (fabs (mean[1] - 0x20), <=, 2.0);
+  g_assert_cmpfloat (fabs (mean[2] - 0x20), <=, 2.0);
+  g_free (frame);
+
+  frame = oe_render_frame_at (&source, 530000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (frame);
+  window_mean (frame, TEST_W, TEST_H, 0, 0, TEST_W, TEST_H, mean);
+  g_assert_cmpfloat (fabs (mean[0] - 0x20), <=, 2.0);
+  g_assert_cmpfloat (fabs (mean[1] - 0x30), <=, 2.0);
+  g_assert_cmpfloat (fabs (mean[2] - 0xe0), <=, 2.0);
+  g_free (frame);
+
+  /* Midpoint of the cross-dissolve (ramp 128): (red*(255-w)+blue*w)/255
+   * per channel; the keyed upper layer samples to opacity 128 at 240 ms
+   * and is gone by 480 ms. The lower pair dominates: ≈ (128, 40, 128)
+   * with the translucent red on top nudging channels a few counts. */
+  frame = oe_render_frame_at (&source, 480000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (frame);
+  window_mean (frame, TEST_W, TEST_H, 0, 0, TEST_W, TEST_H, mean);
+  g_assert_cmpfloat (mean[0], >, 100.0);
+  g_assert_cmpfloat (mean[0], <, 150.0);
+  g_assert_cmpfloat (mean[1], <, 70.0);
+  g_assert_cmpfloat (mean[2], >, 100.0);
+  g_free (frame);
+
+  oe_sequence_clear (&seq);
+  g_object_unref (project);
+  g_free (red);
+  g_free (blue);
+}
+
+/* /export/mixdown-fade-ratio: the shared envelope shapes the exported
+ * mixdown — windowed-mean amplitude inside the ramps sits at a fraction
+ * of the steady span, in the same AAC-tolerant ratio-band idiom as the
+ * summation test (encoder DC attenuation cancels in ratios). */
+static void
+test_mixdown_fade_ratio (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *blue;
+  OeProject *project = build_two_cut_video (fx, &red, &blue);
+
+  /* One DC clip [0, 600 ms) with 250 ms ramps on both sides: gain is
+   * min(1024, round(t·1024/250000), round((600000−t)·1024/250000)) —
+   * ≈ 0.48 of full across the sampled ramp windows, full mid-clip. */
+  write_dc_wav (fx, "tone.wav", 8192, 600000);
+  gchar *wav = g_build_filename (fx->dir, "tone.wav", NULL);
+  const guint audio = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint ref = add_media (project, wav);
+
+  insert_clip (project, audio, ref, 0, 600000);
+
+  OeClip clip;
+
+  g_assert_true (oe_project_get_clip (project, audio, 0, &clip));
+  OeClipVisual v = clip.visual;
+
+  v.fade_in_us = 250000;
+  v.fade_out_us = 250000;
+  g_assert_true (oe_project_set_clip_visual (project, audio, 0, &v, NULL));
+
+  gchar *dest = g_build_filename (fx->dir, "out.mp4", NULL);
+  GError *error = NULL;
+
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  FloatAudio mix;
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble ramp_in = window_mean_abs (&mix, 60000, 180000);
+  const gdouble steady = window_mean_abs (&mix, 270000, 330000);
+  const gdouble ramp_out = window_mean_abs (&mix, 420000, 540000);
+
+  /* The steady span carries the full level; each ramp window sits at
+   * its envelope mean (≈ 0.48), bounded loosely for AAC's DC filter. */
+  g_assert_cmpfloat (steady, >, 0.12);
+  g_assert_cmpfloat (ramp_in, >, 0.25 * steady);
+  g_assert_cmpfloat (ramp_in, <, 0.75 * steady);
+  g_assert_cmpfloat (ramp_out, >, 0.25 * steady);
+  g_assert_cmpfloat (ramp_out, <, 0.75 * steady);
+
+  float_audio_clear (&mix);
+  g_object_unref (project);
+  g_free (red);
+  g_free (blue);
+  g_free (wav);
+  g_free (dest);
+}
+
+/* /export/parity-transition-fade: the Wave B acceptance sequence — two
+ * video layers, a boundary transition, and an audio fade, rendered by
+ * the one compositor and exported through the one mixdown. Block-mean
+ * parity bounds |Δ| ≤ 8 per channel; the fade rides the same
+ * ratio-band idiom. */
+static void
+test_parity_transition_fade (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *blue;
+  OeProject *project = build_transition_project (fx, &red, &blue);
+
+  /* The audio fade of the acceptance sequence. */
+  write_dc_wav (fx, "tone.wav", 8192, 500000);
+  gchar *wav = g_build_filename (fx->dir, "tone.wav", NULL);
+  const guint audio = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint ref = add_media (project, wav);
+
+  insert_clip (project, audio, ref, 0, 480000);
+
+  OeClip clip;
+
+  g_assert_true (oe_project_get_clip (project, audio, 0, &clip));
+  OeClipVisual av = clip.visual;
+
+  av.fade_in_us = 240000;
+  g_assert_true (oe_project_set_clip_visual (project, audio, 0, &av, NULL));
+
+  OeSequence seq = { 0 }; /* zeroed: get_sequence overwrites wholesale */
+
+  oe_project_get_sequence (project, &seq);
+
+  OeRenderSource source = { &seq, test_resolve, project };
+  GError *error = NULL;
+
+  /* What the seam renders at two instants: mid keyframe fade (240 ms,
+   * upper opacity 128) and mid transition (480 ms, upper gone). */
+  guint8 *rendered_mid = oe_render_frame_at (&source, 240000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (rendered_mid);
+
+  guint8 *rendered_trans = oe_render_frame_at (&source, 480000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (rendered_trans);
+
+  gchar *dest = g_build_filename (fx->dir, "out.mp4", NULL);
+
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  int w = 0, h = 0;
+  guint8 *decoded_mid = decode_video_frame_bgra (dest, 6, &w, &h);
+
+  g_assert_nonnull (decoded_mid);
+  g_assert_cmpint (w, ==, TEST_W);
+  g_assert_cmpint (h, ==, TEST_H);
+
+  guint8 *decoded_trans = decode_video_frame_bgra (dest, 12, &w, &h);
+
+  g_assert_nonnull (decoded_trans);
+
+  /* Block-mean parity at both instants: |Δ| ≤ 8 per channel. */
+  const int BS = 8;
+  const struct
+  {
+    guint8 *rendered, *decoded;
+  } pairs[] = {
+    { rendered_mid, decoded_mid },
+    { rendered_trans, decoded_trans },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (pairs); i++)
+    for (int by = 0; by < TEST_H / BS; by++)
+      for (int bx = 0; bx < TEST_W / BS; bx++)
+        {
+          double rm[3], dm[3];
+
+          window_mean (pairs[i].rendered, TEST_W, TEST_H, bx * BS, by * BS, (bx + 1) * BS,
+                       (by + 1) * BS, rm);
+          window_mean (pairs[i].decoded, TEST_W, TEST_H, bx * BS, by * BS, (bx + 1) * BS,
+                       (by + 1) * BS, dm);
+          for (int c = 0; c < 3; c++)
+            g_assert_cmpfloat (fabs (rm[c] - dm[c]), <=, 8.0);
+        }
+
+  /* Audio: the fade-in shapes the mixdown (same ratio-band idiom as
+   * /export/mixdown-fade-ratio). */
+  FloatAudio mix;
+
+  decode_audio_float (dest, &mix);
+
+  const gdouble ramp = window_mean_abs (&mix, 60000, 180000);
+  const gdouble steady = window_mean_abs (&mix, 300000, 450000);
+
+  g_assert_cmpfloat (steady, >, 0.12);
+  g_assert_cmpfloat (ramp, >, 0.2 * steady);
+  g_assert_cmpfloat (ramp, <, 0.8 * steady);
+
+  float_audio_clear (&mix);
+  g_free (rendered_mid);
+  g_free (rendered_trans);
+  g_free (decoded_mid);
+  g_free (decoded_trans);
+  g_free (dest);
+  oe_sequence_clear (&seq);
+  g_object_unref (project);
+  g_free (red);
+  g_free (blue);
+  g_free (wav);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1447,6 +1727,9 @@ main (int argc, char *argv[])
   g_test_add_func ("/export/blend-unit", test_blend_unit);
   OE_ADD ("/export/two-layer-seam", test_two_layer_seam);
   OE_ADD ("/export/parity-two-layer", test_parity_two_layer);
+  OE_ADD ("/export/transition-blend", test_transition_blend);
+  OE_ADD ("/export/mixdown-fade-ratio", test_mixdown_fade_ratio);
+  OE_ADD ("/export/parity-transition-fade", test_parity_transition_fade);
   OE_ADD ("/export/container-truth", test_container_truth);
   OE_ADD ("/export/content-round-trip", test_content_round_trip);
   OE_ADD ("/export/mixdown-sums", test_mixdown_sums);

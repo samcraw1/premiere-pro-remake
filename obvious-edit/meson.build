@@ -377,6 +377,38 @@ test_snap_ripple = executable('test_snap_ripple',
   dependencies: test_deps + [json_glib_dep],
 )
 
+# Phase 9 Wave B units: the keyframe interpolation contract, the
+# shared fade envelope, transition windows/mutators, timeline band
+# and snap geometry, ripple re-anchor replay, keyframe undo records,
+# and strict keyframes/transitions persistence. Links the layout
+# core, the model, the stack, and the persistence module; no GTK,
+# no media fixtures — compositor blends and decode-back equivalence
+# live in the export suite.
+test_wave_b = executable('test_wave_b',
+  [
+    'tests/test_wave_b.c',
+    'src/ui/oe_timeline_layout.c',
+    'src/app/oe_undo_stack.c',
+    'src/app/oe_playback_session.c',
+    'src/media/oe_media_playback.c',
+    'src/media/oe_render.c',
+    'src/playback/oe_audio_output.c',
+    'src/core/oe_fades.c',
+    'src/core/oe_keyframes.c',
+    'src/core/oe_project.c',
+    'src/core/oe_project_format.c',
+    'src/core/oe_time.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps + [json_glib_dep],
+)
+
+test('wave-b', test_wave_b,
+  timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
+  env: ['SDL_AUDIODRIVER=dummy'])
+
+
 test('snap-ripple', test_snap_ripple,
   timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
   env: ['SDL_AUDIODRIVER=dummy'])
