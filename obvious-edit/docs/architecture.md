@@ -425,8 +425,57 @@ and commit as exactly ONE `OE_UNDO_OP_VISUAL` record per stroke via
 `oe_edit_set_clip_visual` — undo restores the visual captured at the
 stroke's first change, not the last preview state. A paused monitor
 repaints the edited frame when the project notification fires. Wave
-B adds keyframes, transitions, and fade envelopes; the model fields
-and the seam are already in place for them.
+B fills in the keyframes, transitions, and fade envelopes below; the
+model fields and the seam were already in place for them.
+
+## Keyframes, transitions, and fades (Phase 9 Wave B)
+
+Keyframes are per-property sorted `GArray`s of `{gint64 time_us;
+gint32 value;}` inside the clip's visual, stored in raw microseconds
+clip-relative and interpolated linearly through
+`oe_keyframes_sample`: `value = va + oe_time_round_ratio ((gint64)
+(vb - va) * (t - ta), tb - ta)` — one division, one rounding, at the
+final step only. Times outside the run clamp to the first or last
+entry's value; an empty, single-entry, unsorted, or zero-span store
+degrades to the clip's static value. The keyframeable set v1 is
+opacity plus the transform properties (pos-x/pos-y, scale, rotation);
+crop stays static. The compositor resolves the per-frame value with
+`oe_clip_visual_resolve` before the transform/opacity application, so
+preview and export animate identically. Keyframe edits go through the
+validated `oe_project_set_clip_keyframe`/`remove` mutators — the same
+one-`OE_UNDO_OP_VISUAL`-per-stroke discipline as any other visual
+edit, frame-snapped in the inspector only (no timeline gizmos).
+
+Transitions are model objects — `{track_index (video tracks only),
+at_us, duration_us, kind}` with `at_us` the shared boundary where
+clip1's end equals clip2's start and the window centered on it,
+clamped to both clips. The validated add/move/remove mutators reject
+unknown tracks, boundaries without neighbor coverage, and non-positive
+durations; the compositor runs the two-input blend over the window
+with the same integer ramp as everything else: `out = (A*(255 - w) +
+B*w)/255` per channel, dip-to-black running the same ramp against a
+pinned-black intermediate. w = 0/255 and a zero-duration window
+degrade to the straight cut, and a transition exists only while both
+neighbors still cover the window — any moved or trimmed clip degrades
+it gracefully at composite time, with no mutator fixups. The timeline
+draws a shaded band at the boundary (GTK-free layout logic; the widget
+just draws it), the band's edges join the snap-target list, and
+ripple delete re-anchors `at_us` through the validated mutator as one
+extra replay sub-step.
+
+Fades share one GTK-free, FFmpeg-free envelope in `src/core/oe_fades.c`:
+a linear integer ramp on a 0–1024 scale,
+`g = MIN (1024, oe_time_round_ratio ((t - clip_start)*1024,
+fade_in_us), oe_time_round_ratio ((clip_end - t)*1024,
+fade_out_us))`, consumed by BOTH the export mixdown sum loop and the
+playback chunk path — one implementation so preview and export cannot
+drift — applied before the unchanged hard clamp.
+
+Persistence follows the width/height backfill recipe: the clip-level
+`keyframes` and track-level `transitions` members are emitted
+unconditionally, absent-on-read backfills NONE (their absence means
+none), the closed member lists extended at each level, integer tokens
+only, no version bump, and save-load-save is byte-identical.
 
 ## What comes later
 

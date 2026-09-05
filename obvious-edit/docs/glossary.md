@@ -407,5 +407,31 @@ lifecycle (init/shutdown) behind the GError pattern. `oe_ffmpeg` and
 **Self-check** — `obvious-edit --self-check`: open the window, quit
 after the first map, exit 0. The repeatable proof of life.
 
+**Keyframe** — a timed sample for one keyframeable visual property
+(opacity, pos-x/pos-y, scale, rotation) on a clip, stored clip-relative
+in raw microseconds. Between samples the value is linearly interpolated
+with exactly one rounding at the final step; outside the keyed range it
+clamps to the nearest endpoint; a degenerate store degrades to the
+clip's static value.
+
+**Transition** — a boundary object between two adjacent video clips:
+`at_us` (the shared boundary), `duration_us` (the window centered on
+it, clamped to both clips), and a kind. It exists only while both
+neighbors still cover the window; any moved or trimmed clip degrades
+it to the straight cut at composite time.
+
+**Cross-dissolve** — the transition kind that blends the two clips
+over the window with the shared integer ramp,
+`out = (A*(255 − w) + B*w)/255` per channel.
+
+**Dip-to-black** — the transition kind that runs the same ramp
+through a pinned-black intermediate: A fades to black, black fades
+to B.
+
+**Fade envelope** — the shared linear integer audio ramp on a 0–1024
+scale (`oe_fade_gain`), consumed by both the export mixdown and the
+playback chunk path so preview and export cannot drift. Contribution
+per sample: `(sample*g + 512) >> 10`, applied before the hard clamp.
+
 **OE** — the project's module prefix (Obvious Edit) and its logging
 domain.

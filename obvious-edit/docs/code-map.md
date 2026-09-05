@@ -62,6 +62,7 @@ premiere-pro-remake/
     │   ├── test_playback_clock.c  # session clock on a virtual time source
     │   ├── test_undo_stack.c      # undo/redo: inverses, rejection, depth
     │   ├── test_snap_ripple.c     # snapping + ripple: targets, bands, composite records
+    │   ├── test_wave_b.c          # keyframes, fades, transitions, strictness (Wave B)
     │   ├── test_audio_output.c    # SDL dummy-driver adapter contract
     │   ├── fixture_media.[ch]     # runtime media fixtures (WAV/AVI/PNG)
     │   └── valgrind.supp          # GLib/GObject-only suppressions
@@ -94,13 +95,15 @@ premiere-pro-remake/
 | `src/media/oe_ffmpeg.c` | avformat network init/teardown (thread-safe via g_once) | `oe_ffmpeg_init`, `oe_ffmpeg_shutdown` |
 | `src/media/oe_probe.c` | File classification + metadata extraction | `oe_probe_file`, `oe_probe_info_clear/copy` |
 | `src/media/oe_media_jobs.c` | Thumbnail + waveform decode jobs | `oe_media_job_thumbnail`, `oe_media_job_waveform` |
-| `src/media/oe_render.c` | GTK-free frame-at-time render seam: covering-clip collection, per-source sequential decoder cache, layered compositor (ascending track order: crop → scale → rotate → translate → straight integer src-over), single-default-transform fast path, centered even box-fit | `oe_render_blend_channel`, `oe_render_session_new`, `oe_render_session_frame_at`, `oe_render_frame_at` |
-| `src/media/oe_export.c` | Synchronous GTK-free MP4 export: integer frame grid over the render seam, x264/AAC encode, additive 48 kHz stereo mixdown, custom-AVIO temp + fsync + rename atomicity, per-frame cancellation | `oe_export_frame_count`, `oe_export_frame_to_us`, `oe_export_run` |
+| `src/media/oe_render.c` | GTK-free frame-at-time render seam: covering-clip collection (keyframe resolution, transition ramp weights), per-source sequential decoder cache, layered compositor (ascending track order: crop → scale → rotate → translate → straight integer src-over; transition pairs blended `(A*(255-w)+B*w)/255` per channel with w=0/255 degenerating to the cut), single-default-transform fast path, centered even box-fit | `oe_render_blend_channel`, `oe_render_session_new`, `oe_render_session_frame_at`, `oe_render_frame_at` |
+| `src/media/oe_export.c` | Synchronous GTK-free MP4 export: integer frame grid over the render seam, x264/AAC encode, additive 48 kHz stereo mixdown (per-sample shared fade envelope before the hard clamp), custom-AVIO temp + fsync + rename atomicity, per-frame cancellation | `oe_export_frame_count`, `oe_export_frame_to_us`, `oe_export_run` |
 | `src/app/oe_media_cache.c` | Derived-media cache: keys, lookup, atomic store | `oe_media_cache_lookup`, `oe_media_cache_store` |
 | `src/app/oe_media_library.c` | Session asset records, statuses, monitors | `oe_media_library_add`, `oe_media_library_relink`, `…_set_observer` |
 | `src/core/oe_time.c` | Reduced rationals, frame↔µs conversions (nearest, halves away) | `oe_time_rate`, `oe_time_rate_reduce`, `oe_time_frame_to_us`, `oe_time_us_to_frame` |
-| `src/core/oe_project.c` | The document model: sequence/tracks/clips with owned `OeClipVisual` (identity defaults, deep copies), media refs, observer, validated visual mutator | `oe_project_insert_clip`, `oe_project_move_clip`, `oe_project_set_clip_visual`, `oe_project_get_sequence` |
-| `src/core/oe_project_format.c` | Strict JSON v1 load + atomic save; clip `visual` member (always written, identity backfill on read, closed member list) | `oe_project_format_load`, `oe_project_format_save` |
+| `src/core/oe_fades.c` | Shared GTK-free/FFmpeg-free audio fade envelope: linear integer ramp on a 0–1024 scale, one rounding per side, consumed by the mixdown and the playback chunk path | `oe_fade_gain`, `OE_FADE_SCALE` |
+| `src/core/oe_keyframes.c` | Per-property keyframe stores: closed property set, domain validation, sorted insert/remove, deep copy, equality, linear interpolation with one final rounding and endpoint clamping, static-value degradation | `oe_keyframes_sample`, `oe_keyframes_insert`, `oe_keyframes_remove`, `oe_clip_visual_resolve` |
+| `src/core/oe_project.c` | The document model: sequence/tracks/clips with owned `OeClipVisual` (identity defaults, deep copies), media refs, observer, validated visual/transition/keyframe mutators, `OeTransition` boundary objects | `oe_project_insert_clip`, `oe_project_move_clip`, `oe_project_set_clip_visual`, `oe_project_set_clip_keyframe`, `oe_project_add_transition`, `oe_project_get_sequence` |
+| `src/core/oe_project_format.c` | Strict JSON v1 load + atomic save; clip `visual` (always written, identity backfill), `keyframes` and track `transitions` members (always written, absence means none, closed member lists) | `oe_project_format_load`, `oe_project_format_save` |
 | `src/app/oe_import_worker.c` | The decode thread: queue, cancel, dispatch | `oe_import_worker_new`, `oe_import_worker_submit`, `oe_import_worker_free` |
 | `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit + the push-model device stream (queue, depth, flush, pause/resume) | `oe_audio_output_init`, `oe_audio_output_open_stream`, `oe_audio_output_queue`, `oe_audio_output_shutdown` |
 | `src/media/oe_media_playback.c` | Playback decode: audio decode-ahead worker (owned f32 chunks, main-context delivery) + frame-at-time BGRA video | `oe_media_playback_request_audio`, `oe_media_playback_video_open`, `oe_media_playback_video_get_frame` |
@@ -128,7 +131,8 @@ premiere-pro-remake/
 | `tests/test_undo_stack.c` | Per-op inverses, visual stroke records (one record per stroke, stroke-baseline restore, zero-delta suppression), typed rejection at record/apply time, depth eviction, redo clearing, JSON round trips, auto-pause | `/undo/*` |
 | `tests/test_snap_ripple.c` | Pure snap decision (targets, band boundaries, tie-break, zoom scaling, disabled pass-through, snap-then-clamp) + composite ripple records (first/middle/last deletes, typed rejection, JSON round trips, depth, redo clearing, auto-pause) | `/snap-ripple/*` |
 | `tests/test_audio_output.c` | Adapter contract on SDL's dummy driver: init, open, queue depth, pause/resume | `/audio-output/*` |
-| `tests/test_export.c` | Frame-grid math, straight-cut render parity vs the preview seam, compositor equivalence (blend-unit ±1, two-layer seam, two-layer export decode-back parity at |Δ| ≤ 8 block means), MP4 container truth via probe, decoded video/audio round trip (color/amplitude classes), additive two-track mixdown, cancellation cleanup, atomic-failure byte identity | `/export/*` |
+| `tests/test_export.c` | Frame-grid math, straight-cut render parity vs the preview seam, compositor equivalence (blend-unit ±1, two-layer seam, two-layer export decode-back parity at |Δ| ≤ 8 block means), MP4 container truth via probe, decoded video/audio round trip (color/amplitude classes), additive two-track mixdown, cancellation cleanup, atomic-failure byte identity, Wave B transition blend (degenerate edges + midpoint), mixdown fade ratio bands, two-layer + transition + fade parity | `/export/*` |
+| `tests/test_wave_b.c` | Keyframe contract (single rounding, clamping, degradation, per-property resolution, undo record), fade envelope endpoints, transition windows/mutators, GTK-free band/snap-edge layout, ripple re-anchor replay, persistence round trip + strictness mutations | `/wave-b/*` |
 | `tests/fixture_media.c` | Runtime WAV/AVI/PNG/text fixture generator | `oe_fixture_media_create`, `oe_fixture_media_free` |
 
 ## Conventions
