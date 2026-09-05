@@ -94,6 +94,17 @@ track pan pair` per channel, all fixed point with unity 1024, one
 Wave B) the playback mixer consume the same chain, so they cannot
 drift.
 
+**Mix window** — the span of sequence time (one decode ahead of the
+playhead) for which the playback session sums every audible audio
+track's contribution — in track-array order, gaps silent — into one
+interleaved f32 buffer for the queue. The parity seam: the same
+buffer feeds the speakers, the meter, and the parity test.
+
+**Peak meter** — the per-channel level display beside the monitor.
+Peaks are extracted per chunk from the mixed buffer on the main
+context (no locks), held with a short decay, and released to silence
+on pause, stop, and scrub — no paused tap, no timer while paused.
+
 ## Media terms
 
 **Source media** — a file (video, audio, or image) referenced by the

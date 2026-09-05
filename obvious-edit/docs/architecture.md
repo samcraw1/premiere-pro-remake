@@ -528,6 +528,59 @@ member on every audio track, absence on read backfills the identity,
 integer tokens only, closed member lists, no version bump, and
 save-load-save is byte-identical.
 
+## Multi-track playback, metering, mixer (Phase 10 Wave B)
+
+Playback stops being a one-lane pick and becomes a true mixer. Each
+feed cycle the playback session opens a MIX WINDOW — a span of
+sequence time one decode ahead of the playhead — collects every
+audible AUDIO track that intersects it (track-array order, higher
+index later: the same order the export mixdown and the compositor
+use), decodes each track's clip range sequentially through the one
+media worker, and sums the scaled contributions into ONE interleaved
+f32 buffer the session owns. Gaps in any track stay silent (zero);
+track order is deterministic so two runs of the same project mix
+bit-identically. Contributions scale through the SAME shared factor
+chain (buffer-constant clip gain/pan x track volume/pan per channel,
+mute/lose-solo verdicts passed in) while the fade envelope keeps its
+per-sample cadence; the final clamp is the last word, exactly as in
+the mixdown. Stale deliveries from superseded decodes are dropped by
+generation, and the queue's progress gate tracks pushed coverage in
+sequence time (the first window begins LOOKAHEAD ahead of the
+playhead, so pushed frames do not measure coverage from the restart
+position). The session layer stays GTK-free: mixer consumers bind
+two observers — `set_mix_func` (the parity seam: called with the
+finished window) and `set_meter_func` (per-chunk channel peaks).
+
+Decoded chunks are labeled with their SOURCE time. The worker's
+chunk buffer persists across decoder frames, so labels anchor to the
+buffer (stamped when it is empty, advanced by the chunk length at
+each delivery) rather than to per-frame arithmetic — a mid-frame
+residual mislabeled late produces periodic gaps and overlaps in the
+mapped stream, audible as level wobble under real mixing.
+
+Metering (D6) is per-chunk peak extraction over the mixed buffer on
+the GLib main context — no locks, no extra thread, GTK-free math
+(`oe_audio_buffer.c` for per-channel peaks over interleaved f32,
+`oe_meter_math.c` for the decay and bar geometry). The meter widget
+holds each peak with a short documented decay and, because paused,
+stopped, and scrubbed playback delivers no chunks, settles at zero
+without a paused tap or a timer.
+
+The shell gains an inspector stack page 'mixer' — one row per AUDIO
+track: volume slider (0–2048, unity 1024), pan slider (0–1024,
+center 512), mute and solo toggles — plus a clip-audio section on
+the clip page (gain and pan). Both edit through the validated
+mutators with the stroke pattern: preview without record, baseline
+captured at stroke begin, exactly ONE undo record at commit,
+zero-delta strokes record nothing. Repaints are notify-driven; no
+refresh timers exist.
+
+Preview and export parity is a standing test: a two-audio-track
+project with distinct levels and pans plays through the virtual
+clock (its mixed chunks captured via the mix observer) and must
+match the export mixdown per channel. The test fails by construction
+on single-lane playback; its pass is the proof the mixer landed.
+
 ## What comes later
 
 `src/core/` is the foundation later phases build on, and the
