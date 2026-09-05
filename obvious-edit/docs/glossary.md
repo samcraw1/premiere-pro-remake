@@ -63,6 +63,37 @@ through unrecorded model mutations and commits exactly ONE undo
 record carrying the visual captured at the stroke's first change (the
 stroke baseline), never the last preview state.
 
+**Clip gain** — the per-clip audio level (`OeClipAudio.gain`), fixed
+point on the 1024 scale: 0 = silence, 1024 = unity, 2048 = +6 dB.
+Owned by the clip beside its visual, deep-copied with it, and edited
+only through the validated mutator.
+
+**Clip pan / track pan** — the per-clip and per-track audio position
+on the 1024 scale: 0 = hard left, 512 = center, 1024 = hard right.
+The pan pair is linear (`2 × (1024 − pan)` and `2 × pan`), so the L+R
+sum is constant at every position.
+
+**Center unity** — the pan law's compatibility contract: a centered
+pan contributes exactly 1024 per channel, so a centered channel sits
+−6 dB below a hard-panned one and an all-default project mixes
+exactly as it did before audio state existed.
+
+**Track audio state** — `OeTrackAudio` on audio tracks only:
+fixed-point volume (0–2048), pan (0–1024), and binary mute/solo.
+Video tracks carry no audio state and the mutators reject them.
+
+**Mute/solo matrix** — the track-level audibility rule (D5): with ANY
+audio track soloed, only soloed tracks contribute; with none soloed,
+mute zeroes the track. Serialized project state honored identically
+by preview and export — never monitoring-only.
+
+**Factor chain** — the one shared integer scaling every audio
+contribution: `fade × clip gain × clip pan pair × track volume ×
+track pan pair` per channel, all fixed point with unity 1024, one
+64-bit product and one final rounding. The export mixdown and (from
+Wave B) the playback mixer consume the same chain, so they cannot
+drift.
+
 ## Media terms
 
 **Source media** — a file (video, audio, or image) referenced by the

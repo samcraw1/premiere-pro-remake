@@ -477,6 +477,57 @@ unconditionally, absent-on-read backfills NONE (their absence means
 none), the closed member lists extended at each level, integer tokens
 only, no version bump, and save-load-save is byte-identical.
 
+## Audio state and the factor chain (Phase 10 Wave A)
+
+Every clip owns an `OeClipAudio` — fixed-point `gain` on the 1024
+scale (0 = silence, 1024 = unity, 2048 = +6 dB) and `pan` on the 1024
+scale (0 = hard left, 512 = center, 1024 = hard right) — and every
+AUDIO track owns an `OeTrackAudio` with `volume` (0–2048), `pan`
+(0–1024), `mute`, and `solo`. Video tracks carry no audio state at
+all: the track-level mutators reject them with
+`OE_PROJECT_ERROR_BAD_TRACK`. Both substructs are memory-free, so the
+deep-copied-never-aliased ownership rule costs the copy trios one
+extra value copy per struct. Like the visual, the identity is the
+zero-value default: an all-default Phase 10 project mixes exactly
+like a Phase 9 one.
+
+One shared integer chain in `src/core/oe_audio_factor.c` scales every
+audio contribution — the export mixdown today, the playback mixer
+from Wave B:
+
+    factor[ch] = fade x clip_gain x pan_pair(clip_pan)[ch]
+                 x track_volume x pan_pair(track_pan)[ch]
+
+All stages are fixed point with unity 1024 (the fade envelope's scale
+convention); the product is computed exactly in 64-bit integers and
+normalized with one rounding. The pan pair is linear —
+`2 x (1024 - pan)` and `2 x pan` — so the L+R sum is constant and
+CENTER PAN IS UNITY: a centered channel sits −6 dB below a
+hard-panned one, and the identity pan contributes exactly 1024, which
+is what keeps the all-default mix identical to Phase 9. Mute and
+lose-solo zero the whole chain: `oe_audio_audible` resolves the
+track-level matrix (any soloed audio track → only soloed ones
+contribute; none soloed → mute zeroes the track) and the caller
+passes the verdict in. The mixdown recomputes the chain per AVFrame
+with the existing fade value — the envelope's cadence is unchanged —
+and the single final hard clamp stays the last word. Integer end to
+end: no floats in the model, the serialized state, or the chain.
+
+The mixdown honors the matrix before touching media: a silenced
+track is skipped before its source is even opened, so a muted project
+exports exactly what it will play. Audio edits go through the
+validated mutators `oe_project_set_clip_audio` /
+`oe_project_set_track_audio` (typed `OE_PROJECT_ERROR_BAD_AUDIO`
+rejections; validate first, deep-copy second, swap last, notify
+last) and commit as one `OE_UNDO_OP_CLIP_AUDIO` /
+`OE_UNDO_OP_TRACK_AUDIO` record per stroke — the track payload is
+keyed by track index alone, no sentinel clip index, and a zero-delta
+stroke records nothing. Persistence follows the backfill recipe: the
+clip-level `audio` member on every clip and the track-level `audio`
+member on every audio track, absence on read backfills the identity,
+integer tokens only, closed member lists, no version bump, and
+save-load-save is byte-identical.
+
 ## What comes later
 
 `src/core/` is the foundation later phases build on, and the
