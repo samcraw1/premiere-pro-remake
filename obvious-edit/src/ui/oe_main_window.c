@@ -197,6 +197,10 @@ report_to_status_bar (OeCommandId id G_GNUC_UNUSED, const gchar *message, gpoint
  * bare Xvfb session cannot drive a modal file chooser. */
 static void import_paths (OeMainWindow *self, const gchar *const *paths);
 
+/* The chooser-driven project-open flow; the headless --open seam lands
+ * on the same path, so it is declared up here beside its import twin. */
+static void open_project_path (OeMainWindow *self, const gchar *path);
+
 void
 oe_main_window_import_files (OeMainWindow *window, const gchar *const *paths)
 {
@@ -214,6 +218,15 @@ oe_main_window_import_and_insert_files (OeMainWindow *window, const gchar *const
 
   window->insert_all_pending = TRUE;
   import_paths (window, paths);
+}
+
+void
+oe_main_window_open_project_file (OeMainWindow *window, const gchar *path)
+{
+  g_return_if_fail (OE_IS_MAIN_WINDOW (window));
+  g_return_if_fail (path != NULL);
+
+  open_project_path (window, path);
 }
 
 /* ------------------------------------------------------------------ */

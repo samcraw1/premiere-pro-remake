@@ -54,6 +54,18 @@ void oe_main_window_import_files (OeMainWindow *window, const gchar *const *path
 void oe_main_window_import_and_insert_files (OeMainWindow *window, const gchar *const *paths);
 
 /**
+ * oe_main_window_open_project_file:
+ * @window: the editor shell
+ * @path: a project file path
+ *
+ * Loads @path through the same flow the file chooser uses (strict
+ * parse, session replacement, status-bar feedback). The headless
+ * dogfood seam for project files: --open reaches it without the
+ * chooser, which cannot be driven under bare Xvfb.
+ */
+void oe_main_window_open_project_file (OeMainWindow *window, const gchar *path);
+
+/**
  * oe_main_window_get_snapping:
  * @window: the editor shell
  *
