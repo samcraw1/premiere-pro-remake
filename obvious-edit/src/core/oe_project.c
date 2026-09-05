@@ -152,6 +152,142 @@ oe_clip_visual_is_valid (const OeClipVisual *visual)
 }
 
 /* ------------------------------------------------------------------ */
+/* Generated-clip value types (Phase 11 Wave A): kind names, identity, */
+/* domain, equality. The generator owns its text — the visual-trio     */
+/* discipline applies; the key owns no memory, a struct copy is the    */
+/* deep copy.                                                          */
+/* ------------------------------------------------------------------ */
+
+const gchar *
+oe_clip_kind_get_name (OeClipKind kind)
+{
+  switch (kind)
+    {
+    case OE_CLIP_TITLE:
+      return "title";
+    case OE_CLIP_SOLID:
+      return "solid";
+    case OE_CLIP_MEDIA:
+    default:
+      return "media";
+    }
+}
+
+OeClipGenerator
+oe_clip_generator_identity (void)
+{
+  OeClipGenerator generator;
+
+  generator.text = NULL;
+  generator.color_rgb = 0;
+  generator.size_permille = 0;
+  return generator;
+}
+
+void
+oe_clip_generator_clear (OeClipGenerator *generator)
+{
+  g_return_if_fail (generator != NULL);
+
+  g_clear_pointer (&generator->text, g_free);
+  generator->color_rgb = 0;
+  generator->size_permille = 0;
+}
+
+void
+oe_clip_generator_copy (OeClipGenerator *dst, const OeClipGenerator *src)
+{
+  g_return_if_fail (dst != NULL);
+  g_return_if_fail (src != NULL);
+
+  g_free (dst->text);
+  dst->text = g_strdup (src->text); /* g_strdup (NULL) is NULL */
+  dst->color_rgb = src->color_rgb;
+  dst->size_permille = src->size_permille;
+}
+
+gboolean
+oe_clip_generator_equal (const OeClipGenerator *a, const OeClipGenerator *b)
+{
+  g_return_val_if_fail (a != NULL, FALSE);
+  g_return_val_if_fail (b != NULL, FALSE);
+
+  /* NULL and "" are the same state: no text. */
+  const gboolean a_empty = a->text == NULL || a->text[0] == '\0';
+  const gboolean b_empty = b->text == NULL || b->text[0] == '\0';
+
+  if (a_empty != b_empty)
+    return FALSE;
+  if (!a_empty && g_strcmp0 (a->text, b->text) != 0)
+    return FALSE;
+
+  return a->color_rgb == b->color_rgb && a->size_permille == b->size_permille;
+}
+
+gboolean
+oe_clip_generator_is_valid_for (OeClipKind kind, const OeClipGenerator *generator)
+{
+  g_return_val_if_fail (generator != NULL, FALSE);
+
+  if (generator->color_rgb < 0 || generator->color_rgb > OE_CLIP_COLOR_RGB_MAX
+      || generator->size_permille < 0 || generator->size_permille > OE_CLIP_SIZE_PERMILLE_MAX)
+    return FALSE;
+
+  switch (kind)
+    {
+    case OE_CLIP_TITLE:
+      /* D1: one fixed style — non-empty valid UTF-8 text and a title
+       * height inside the frame (1..1000 permille). */
+      if (generator->size_permille < 1)
+        return FALSE;
+      if (generator->text == NULL || generator->text[0] == '\0')
+        return FALSE;
+      return g_utf8_validate (generator->text, -1, NULL);
+    case OE_CLIP_SOLID:
+      /* Solids carry color only; text and size stay dormant. */
+      return generator->text == NULL || generator->text[0] == '\0';
+    case OE_CLIP_MEDIA:
+    default:
+      /* Dormant on media clips: any structurally valid fields are
+       * kept (the kind decides liveness; the mutators reject media
+       * kinds outright). */
+      return TRUE;
+    }
+}
+
+OeClipKey
+oe_clip_key_identity (void)
+{
+  OeClipKey key;
+
+  key.color_rgb = 0;
+  key.tolerance = 0;
+  key.softness = 0;
+  key.enabled = 0;
+  return key;
+}
+
+gboolean
+oe_clip_key_is_valid (const OeClipKey *key)
+{
+  g_return_val_if_fail (key != NULL, FALSE);
+
+  return key->color_rgb >= 0 && key->color_rgb <= OE_CLIP_COLOR_RGB_MAX && key->tolerance >= 0
+         && key->tolerance <= OE_CLIP_KEY_DOMAIN_MAX && key->softness >= 0
+         && key->softness <= OE_CLIP_KEY_DOMAIN_MAX && (key->enabled == 0 || key->enabled == 1);
+}
+
+gboolean
+oe_clip_key_equal (const OeClipKey *a, const OeClipKey *b)
+{
+  g_return_val_if_fail (a != NULL, FALSE);
+  g_return_val_if_fail (b != NULL, FALSE);
+
+  return a->color_rgb == b->color_rgb && a->tolerance == b->tolerance && a->softness == b->softness
+         && a->enabled == b->enabled;
+}
+
+/* ------------------------------------------------------------------ */
 /* Audio state value types (Phase 10 Wave A): identity, domain,        */
 /* equality. Both own no memory — a struct copy is the deep copy.      */
 /* ------------------------------------------------------------------ */
@@ -226,6 +362,9 @@ clip_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint m
   clip->media_ref = media_ref;
   clip->visual = oe_clip_visual_identity ();
   clip->audio = oe_clip_audio_identity ();
+  clip->kind = OE_CLIP_MEDIA; /* generators ride insert_generator_clip */
+  clip->generator = oe_clip_generator_identity ();
+  clip->key = oe_clip_key_identity ();
   return clip;
 }
 
@@ -235,6 +374,7 @@ clip_free (gpointer data)
   OeClip *clip = data;
 
   oe_clip_visual_clear (&clip->visual);
+  oe_clip_generator_clear (&clip->generator);
   g_free (clip);
 }
 
@@ -283,10 +423,13 @@ oe_track_copy (OeTrack *dst, const OeTrack *src)
       OeClip *copy
           = clip_new (clip->position_us, clip->source_in_us, clip->source_out_us, clip->media_ref);
 
-      /* Deep-copy the owned visual too: track copies must never alias
-       * clip state (sequence snapshots hand these to the renderer). */
+      /* Deep-copy the owned members too: track copies must never
+       * alias clip state (sequence snapshots hand these to the
+       * renderer). */
       oe_clip_visual_copy (&copy->visual, &clip->visual);
+      oe_clip_generator_copy (&copy->generator, &clip->generator);
       copy->audio = clip->audio; /* owns no memory — value copy */
+      copy->key = clip->key;     /* owns no memory — value copy */
       g_ptr_array_add (dst->clips, copy);
     }
 }
@@ -773,6 +916,118 @@ oe_project_set_clip_audio (OeProject *self, guint track_index, guint clip_index,
 }
 
 gboolean
+oe_project_set_clip_generator (OeProject *self, guint track_index, guint clip_index,
+                               const OeClipGenerator *generator, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (generator != NULL, FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip index %u out of range on track %u", clip_index, track_index);
+      return FALSE;
+    }
+
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+
+  /* The payload is a generator member: dormant on media clips, and
+   * always validated against the clip's own kind. */
+  if (clip->kind == OE_CLIP_MEDIA)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
+                   "media clips carry no generated payload (clip %u on track %u is %s)",
+                   clip_index, track_index, oe_clip_kind_get_name (clip->kind));
+      return FALSE;
+    }
+
+  if (!oe_clip_generator_is_valid_for (clip->kind, generator))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
+                   "generator payload out of domain for %s clips (text \"%s\", color %d, size %d)",
+                   oe_clip_kind_get_name (clip->kind),
+                   generator->text != NULL ? generator->text : "", generator->color_rgb,
+                   generator->size_permille);
+      return FALSE;
+    }
+
+  /* Validate first, deep-copy second, swap last: a rejected call never
+   * mutates the model (owned text included). */
+  oe_clip_generator_copy (&clip->generator, generator);
+
+  notify (self);
+  return TRUE;
+}
+
+gboolean
+oe_project_set_clip_key (OeProject *self, guint track_index, guint clip_index, const OeClipKey *key,
+                         GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (key != NULL, FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip index %u out of range on track %u", clip_index, track_index);
+      return FALSE;
+    }
+
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+
+  /* D4: keying is media-clips-on-video-tracks only — a generated clip
+   * has no source pixels to key. */
+  if (clip->kind != OE_CLIP_MEDIA)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
+                   "keying applies to media clips only (D4); clip %u on track %u is %s",
+                   clip_index, track_index, oe_clip_kind_get_name (clip->kind));
+      return FALSE;
+    }
+
+  if (track->kind != OE_TRACK_VIDEO)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "keying applies to video tracks only (D4); track %u is %s", track_index,
+                   oe_track_kind_get_name (track->kind));
+      return FALSE;
+    }
+
+  if (!oe_clip_key_is_valid (key))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
+                   "clip key out of domain (color %d, tolerance %d, softness %d, enabled %d)",
+                   key->color_rgb, key->tolerance, key->softness, key->enabled);
+      return FALSE;
+    }
+
+  /* Validate first, swap last: OeClipKey owns no memory, so the staged
+   * copy is a plain struct value. */
+  clip->key = *key;
+
+  notify (self);
+  return TRUE;
+}
+
+gboolean
 oe_project_set_track_audio (OeProject *self, guint track_index, const OeTrackAudio *audio,
                             GError **error)
 {
@@ -1130,8 +1385,9 @@ track_at (OeProject *self, guint track_index)
 }
 
 static gboolean
-validate_placement (OeProject *self, guint track_index, guint media_ref, gint64 position_us,
-                    gint64 source_in_us, gint64 source_out_us, OeTrack **track_out, GError **error)
+validate_placement (OeProject *self, guint track_index, OeClipKind kind, guint media_ref,
+                    gint64 position_us, gint64 source_in_us, gint64 source_out_us,
+                    OeTrack **track_out, GError **error)
 {
   OeTrack *track = track_at (self, track_index);
 
@@ -1143,10 +1399,22 @@ validate_placement (OeProject *self, guint track_index, guint media_ref, gint64 
       return FALSE;
     }
 
-  if (find_media_by_ref (self, media_ref) == NULL)
+  /* The media reference is a media-clip member: generated clips carry
+   * none (D3) and instead demand a video track. */
+  if (kind == OE_CLIP_MEDIA)
     {
-      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_UNKNOWN_MEDIA,
-                   "media reference %u is not in the project", media_ref);
+      if (find_media_by_ref (self, media_ref) == NULL)
+        {
+          g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_UNKNOWN_MEDIA,
+                       "media reference %u is not in the project", media_ref);
+          return FALSE;
+        }
+    }
+  else if (track->kind != OE_TRACK_VIDEO)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "generated clips live on video tracks (D3); track %u is %s", track_index,
+                   oe_track_kind_get_name (track->kind));
       return FALSE;
     }
 
@@ -1181,8 +1449,8 @@ oe_project_insert_clip (OeProject *self, guint track_index, guint media_ref, gin
 
   OeTrack *track = NULL;
 
-  if (!validate_placement (self, track_index, media_ref, position_us, source_in_us, source_out_us,
-                           &track, error))
+  if (!validate_placement (self, track_index, OE_CLIP_MEDIA, media_ref, position_us, source_in_us,
+                           source_out_us, &track, error))
     return FALSE;
 
   gint64 duration = source_out_us - source_in_us;
@@ -1197,6 +1465,59 @@ oe_project_insert_clip (OeProject *self, guint track_index, guint media_ref, gin
     }
 
   OeClip *clip = clip_new (position_us, source_in_us, source_out_us, media_ref);
+
+  g_ptr_array_add (track->clips, clip);
+  g_ptr_array_sort (track->clips, clip_compare);
+  notify (self);
+
+  return TRUE;
+}
+
+gboolean
+oe_project_insert_generator_clip (OeProject *self, guint track_index, OeClipKind kind,
+                                  gint64 position_us, gint64 duration_us,
+                                  const OeClipGenerator *generator, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (generator != NULL, FALSE);
+
+  if (kind == OE_CLIP_MEDIA)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
+                   "media clips are inserted through oe_project_insert_clip — the "
+                   "generator path places titles and solids only");
+      return FALSE;
+    }
+
+  if (!oe_clip_generator_is_valid_for (kind, generator))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
+                   "generator payload out of domain for %s clips (text \"%s\", color %d, size %d)",
+                   oe_clip_kind_get_name (kind),
+                   generator->text != NULL ? generator->text : "", generator->color_rgb,
+                   generator->size_permille);
+      return FALSE;
+    }
+
+  /* Still-image convention: the source range IS the screen duration. */
+  OeTrack *track = NULL;
+
+  if (!validate_placement (self, track_index, kind, 0, position_us, 0, duration_us, &track, error))
+    return FALSE;
+
+  if (placement_overlaps (track, position_us, duration_us, NULL))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_OVERLAP,
+                   "clip [%lld, %lld) overlaps an existing clip on %s track %u",
+                   (long long) position_us, (long long) (position_us + duration_us),
+                   oe_track_kind_get_name (track->kind), track_index);
+      return FALSE;
+    }
+
+  OeClip *clip = clip_new (position_us, 0, duration_us, 0);
+
+  clip->kind = kind;
+  oe_clip_generator_copy (&clip->generator, generator);
 
   g_ptr_array_add (track->clips, clip);
   g_ptr_array_sort (track->clips, clip_compare);
