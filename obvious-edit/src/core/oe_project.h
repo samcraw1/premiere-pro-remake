@@ -153,6 +153,18 @@ gboolean oe_clip_visual_is_default (const OeClipVisual *visual);
 gboolean oe_clip_visual_is_valid (const OeClipVisual *visual);
 
 /**
+ * oe_clip_visual_resolve: the clip's EFFECTIVE visual at clip-relative
+ * @clip_time_us (0 = the clip's first frame). Keyframed properties
+ * (opacity, position, scale, rotation — crop stays static) sample
+ * through oe_keyframes_sample, so degradation and single rounding are
+ * the store's documented contract. @out never owns memory: its
+ * keyframes pointer is NULL and the struct is safe to use transiently
+ * without clearing. Both preview and export resolve through this one
+ * function so animation cannot drift between paths.
+ */
+void oe_clip_visual_resolve (const OeClipVisual *visual, gint64 clip_time_us, OeClipVisual *out);
+
+/**
  * OeTrackKind: the two parallel lane kinds of a sequence.
  * @OE_TRACK_VIDEO: compositing order = array order (higher index above).
  * @OE_TRACK_AUDIO: mixing order = array order (higher index wins ties).

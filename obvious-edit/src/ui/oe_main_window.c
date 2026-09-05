@@ -36,6 +36,7 @@
 #include "../app/oe_undo_stack.h"
 #include "../core/oe_project.h"
 #include "../core/oe_project_format.h"
+#include "../core/oe_time.h"
 #include "../media/oe_export.h"
 #include "oe_media_bin.h"
 #include "oe_program_monitor.h"
@@ -586,8 +587,125 @@ on_clip_grid_released (GtkGestureClick *gesture G_GNUC_UNUSED, gint n_press G_GN
   clip_page_commit (OE_MAIN_WINDOW (user_data));
 }
 
+/* Phase 9 Wave B: keyframe editing. The +/− buttons key the spin's
+ * property at the frame-snapped playhead, clip-relative (D7). Each
+ * stroke is ONE OE_UNDO_OP_VISUAL record through the validated
+ * mutator wrapper — a keyframe edit is a visual-property edit. */
+static const OeKeyframeProperty keyframe_for_spin[CLIP_SPIN_COUNT] = {
+  [CLIP_SPIN_POS_X] = OE_KEYFRAME_POS_X,          [CLIP_SPIN_POS_Y] = OE_KEYFRAME_POS_Y,
+  [CLIP_SPIN_SCALE] = OE_KEYFRAME_SCALE_PERMILLE, [CLIP_SPIN_ROTATION] = OE_KEYFRAME_ROTATION_CDEG,
+  [CLIP_SPIN_OPACITY] = OE_KEYFRAME_OPACITY,
+};
+
+static const char *keyframe_spin_names[CLIP_SPIN_COUNT] = {
+  [CLIP_SPIN_POS_X] = "position X",  [CLIP_SPIN_POS_Y] = "position Y", [CLIP_SPIN_SCALE] = "scale",
+  [CLIP_SPIN_ROTATION] = "rotation", [CLIP_SPIN_OPACITY] = "opacity",
+};
+
+static gboolean
+spin_is_keyframeable (int spin)
+{
+  return spin >= CLIP_SPIN_POS_X && spin <= CLIP_SPIN_OPACITY;
+}
+
+/* The keyframe time the +/− buttons act on: the playhead snapped to
+ * the frame grid, converted to clip-relative microseconds and clamped
+ * into the clip's span. */
+static gint64
+keyframe_time_us (OeMainWindow *self, const OeClip *clip)
+{
+  const gint64 playhead = oe_timeline_get_playhead (OE_TIMELINE (self->timeline));
+  const OeSequence *sequence = oe_timeline_get_sequence (OE_TIMELINE (self->timeline));
+  gint64 t = playhead;
+
+  /* Frame grid: interval = 1e6 * den / num (µs), computed in integer
+   * math to stay deterministic. */
+  const OeRational rate = sequence->frame_rate;
+
+  if (rate.num > 0 && rate.den > 0)
+    {
+      const gint64 interval = (gint64) ((1000000.0 * (gdouble) rate.den) / (gdouble) rate.num);
+
+      if (interval > 0)
+        t = oe_time_round_ratio (playhead, interval) * interval;
+    }
+
+  return CLAMP (t - clip->position_us, 0, clip->source_out_us - clip->source_in_us - 1);
+}
+
+static void
+keyframe_edit_finish (OeMainWindow *self, const gchar *action, const gchar *prop,
+                      const OeUndoStack *stack G_GNUC_UNUSED)
+{
+  g_autofree gchar *msg = g_strdup_printf ("Key %s: %s at playhead", action, prop);
+
+  set_status_message (self, msg);
+}
+
+static void
+on_key_add_clicked (GtkButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  const int spin = GPOINTER_TO_INT (user_data);
+  OeClip clip;
+  GError *error = NULL;
+
+  if (!spin_is_keyframeable (spin))
+    return;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  const gint64 time_us = keyframe_time_us (self, &clip);
+  const gint32 value = (gint32) gtk_spin_button_get_value (GTK_SPIN_BUTTON (self->clip_spin[spin]));
+
+  if (!oe_edit_set_clip_keyframe (self->project, self->undo_stack, self->clip_track_index,
+                                  self->clip_clip_index, keyframe_for_spin[spin], time_us, value,
+                                  &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Key add rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  keyframe_edit_finish (self, "add", keyframe_spin_names[spin], self->undo_stack);
+}
+
+static void
+on_key_remove_clicked (GtkButton *button G_GNUC_UNUSED, gpointer user_data)
+{
+  OeMainWindow *self = OE_MAIN_WINDOW (user_data);
+  const int spin = GPOINTER_TO_INT (user_data);
+  OeClip clip;
+  GError *error = NULL;
+
+  if (!spin_is_keyframeable (spin))
+    return;
+
+  if (!oe_project_get_clip (self->project, self->clip_track_index, self->clip_clip_index, &clip))
+    return;
+
+  const gint64 time_us = keyframe_time_us (self, &clip);
+
+  if (!oe_edit_remove_clip_keyframe (self->project, self->undo_stack, self->clip_track_index,
+                                     self->clip_clip_index, keyframe_for_spin[spin], time_us,
+                                     &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Key remove: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  keyframe_edit_finish (self, "remove", keyframe_spin_names[spin], self->undo_stack);
+}
+
 /* Builds the clip page: one spin button per visual property, bound at
- * repopulate time to the selected clip's current values. */
+ * repopulate time to the selected clip's current values; keyframeable
+ * properties carry +/− key buttons at the playhead. */
 static GtkWidget *
 inspector_clip_new (OeMainWindow *self)
 {
@@ -632,6 +750,23 @@ inspector_clip_new (OeMainWindow *self)
       g_signal_connect (spin, "value-changed", G_CALLBACK (on_clip_spin_value_changed), self);
       g_signal_connect (spin, "activate", G_CALLBACK (on_clip_spin_activate), self);
       self->clip_spin[i] = spin;
+
+      if (spin_is_keyframeable (i))
+        {
+          GtkWidget *key_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
+          GtkWidget *add_btn = gtk_button_new_with_label ("+");
+          GtkWidget *rm_btn = gtk_button_new_with_label ("−");
+
+          gtk_widget_set_tooltip_text (add_btn, "Add keyframe at playhead with this value");
+          gtk_widget_set_tooltip_text (rm_btn, "Remove keyframe at playhead");
+          g_signal_connect (add_btn, "clicked", G_CALLBACK (on_key_add_clicked),
+                            GINT_TO_POINTER (i));
+          g_signal_connect (rm_btn, "clicked", G_CALLBACK (on_key_remove_clicked),
+                            GINT_TO_POINTER (i));
+          gtk_box_append (GTK_BOX (key_box), add_btn);
+          gtk_box_append (GTK_BOX (key_box), rm_btn);
+          gtk_grid_attach (GTK_GRID (grid), key_box, 2, i, 1, 1);
+        }
     }
 
   /* One gesture on the grid: releasing the mouse anywhere in the

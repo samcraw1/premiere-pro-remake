@@ -111,6 +111,27 @@ oe_clip_visual_is_default (const OeClipVisual *visual)
   return oe_clip_visual_equal (visual, &identity);
 }
 
+void
+oe_clip_visual_resolve (const OeClipVisual *visual, gint64 clip_time_us, OeClipVisual *out)
+{
+  g_return_if_fail (visual != NULL);
+  g_return_if_fail (out != NULL);
+
+  *out = *visual;
+  out->keyframes = NULL; /* the resolved visual is transient, owns nothing */
+
+  out->opacity
+      = oe_keyframes_sample (visual->keyframes, OE_KEYFRAME_OPACITY, clip_time_us, visual->opacity);
+  out->pos_x
+      = oe_keyframes_sample (visual->keyframes, OE_KEYFRAME_POS_X, clip_time_us, visual->pos_x);
+  out->pos_y
+      = oe_keyframes_sample (visual->keyframes, OE_KEYFRAME_POS_Y, clip_time_us, visual->pos_y);
+  out->scale_permille = oe_keyframes_sample (visual->keyframes, OE_KEYFRAME_SCALE_PERMILLE,
+                                             clip_time_us, visual->scale_permille);
+  out->rotation_cdeg = oe_keyframes_sample (visual->keyframes, OE_KEYFRAME_ROTATION_CDEG,
+                                            clip_time_us, visual->rotation_cdeg);
+}
+
 gboolean
 oe_clip_visual_is_valid (const OeClipVisual *visual)
 {

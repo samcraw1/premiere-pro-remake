@@ -9,6 +9,7 @@
  */
 
 #include "oe_undo_stack.h"
+#include "../core/oe_keyframes.h"
 
 #include "../app/oe_log.h"
 #include "oe_playback_session.h"
@@ -586,6 +587,106 @@ oe_edit_set_clip_visual (OeProject *project, OeUndoStack *stack, guint track_ind
     }
 
   return TRUE;
+}
+
+/* Shared keyframe-stroke recorder: the validated mutator has ALREADY
+ * run when this is called; @before is the deep-captured pre-stroke
+ * visual. The post state is read back from the project (the mutator
+ * owns the new keyframe store), and one OE_UNDO_OP_VISUAL record is
+ * pushed unless the stroke changed nothing. */
+static gboolean
+record_keyframe_stroke (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
+                        OeClip *before, const gchar *property_name, GError **error)
+{
+  OeClip after = { 0 };
+
+  if (!oe_project_get_clip (project, track_index, clip_index, &after))
+    {
+      /* The mutation landed; only the read-back failed — keep the
+       * state, lose the history entry. */
+      g_clear_error (error);
+      oe_clip_visual_clear (&before->visual);
+      return TRUE;
+    }
+
+  if (oe_clip_visual_equal (&before->visual, &after.visual))
+    {
+      oe_clip_visual_clear (&before->visual);
+      oe_clip_visual_clear (&after.visual);
+      return TRUE; /* zero-delta stroke leaves no history entry */
+    }
+
+  OeUndoRecord *rec = record_new (
+      OE_UNDO_OP_VISUAL,
+      g_strdup_printf ("Keyframe %s on clip %u (track %u)", property_name, clip_index, track_index),
+      track_index, clip_index);
+
+  rec->clip = *before; /* baseline visual moves with the record */
+  visual_value_store (&rec->new_visual, &after.visual);
+  oe_clip_visual_clear (&after.visual);
+  stack_push (stack, rec);
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_clip_keyframe (OeProject *project, OeUndoStack *stack, guint track_index,
+                           guint clip_index, OeKeyframeProperty property, gint64 time_us,
+                           gint32 value, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (project), FALSE);
+
+  OeClip before = { 0 };
+
+  if (stack != NULL && !oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  /* The capture aliases the live store; a private copy must exist
+   * before the mutator can release the original. */
+  if (stack != NULL)
+    clip_capture (&before);
+
+  if (!oe_project_set_clip_keyframe (project, track_index, clip_index, property, time_us, value,
+                                     error))
+    {
+      if (stack != NULL)
+        oe_clip_visual_clear (&before.visual);
+      return FALSE;
+    }
+
+  if (stack == NULL)
+    return TRUE;
+
+  return record_keyframe_stroke (project, stack, track_index, clip_index, &before,
+                                 oe_keyframe_property_get_name (property), error);
+}
+
+gboolean
+oe_edit_remove_clip_keyframe (OeProject *project, OeUndoStack *stack, guint track_index,
+                              guint clip_index, OeKeyframeProperty property, gint64 time_us,
+                              GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (project), FALSE);
+
+  OeClip before = { 0 };
+
+  if (stack != NULL && !oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  if (stack != NULL)
+    clip_capture (&before);
+
+  if (!oe_project_remove_clip_keyframe (project, track_index, clip_index, property, time_us, error))
+    {
+      if (stack != NULL)
+        oe_clip_visual_clear (&before.visual);
+      return FALSE;
+    }
+
+  if (stack == NULL)
+    return TRUE;
+
+  return record_keyframe_stroke (project, stack, track_index, clip_index, &before,
+                                 oe_keyframe_property_get_name (property), error);
 }
 
 gboolean

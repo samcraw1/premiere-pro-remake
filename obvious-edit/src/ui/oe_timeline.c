@@ -427,6 +427,13 @@ oe_timeline_zoom_out (OeTimeline *self)
   apply_zoom (self, self->geometry.px_per_us / 2.0, width / 2.0);
 }
 
+const OeSequence *
+oe_timeline_get_sequence (OeTimeline *self)
+{
+  g_return_val_if_fail (OE_IS_TIMELINE (self), NULL);
+  return &self->sequence;
+}
+
 gint64
 oe_timeline_get_playhead (OeTimeline *self)
 {

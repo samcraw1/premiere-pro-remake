@@ -634,6 +634,7 @@ typedef struct
 {
   const OeClip *clip; /* NULL renders the pinned-black dip side */
   gint64 source_us;
+  gint64 clip_time_us; /* clip-relative sample time for keyframes */
   guint blend_weight;
 } CoveringClip;
 
@@ -668,6 +669,7 @@ collect_covering (const OeSequence *sequence, gint64 t_us, GArray *out)
           const CoveringClip entry = {
             .clip = clip,
             .source_us = cover_source_us (clip, t_us),
+            .clip_time_us = CLAMP (t_us - clip->position_us, 0, length - 1),
             .blend_weight = 255,
           };
 
@@ -710,6 +712,7 @@ collect_covering (const OeSequence *sequence, gint64 t_us, GArray *out)
               CoveringClip partner = {
                 .clip = dip ? NULL : w.in_clip,
                 .source_us = dip ? 0 : w.in_clip->source_in_us,
+                .clip_time_us = 0, /* frozen head */
                 .blend_weight = (guint) ramp,
               };
 
@@ -720,9 +723,11 @@ collect_covering (const OeSequence *sequence, gint64 t_us, GArray *out)
             {
               /* Incoming half: the covering clip is @in; the partner
                * fades out frozen on its last frame (or black). */
+              const gint64 out_len = w.out_clip->source_out_us - w.out_clip->source_in_us;
               CoveringClip partner = {
                 .clip = dip ? NULL : w.out_clip,
                 .source_us = dip ? 0 : cover_source_us (w.out_clip, t_us),
+                .clip_time_us = dip ? 0 : out_len - 1, /* frozen tail */
                 .blend_weight = 255 - (guint) ramp,
               };
 
@@ -755,7 +760,17 @@ compose_layered (OeRenderSession *session, const GArray *covering, int out_w, in
   for (guint i = 0; i < covering->len; i++)
     {
       const CoveringClip *entry = &g_array_index (covering, CoveringClip, i);
-      const OeClipVisual *visual = entry->clip != NULL ? &entry->clip->visual : NULL;
+      /* One resolution point for preview and export alike: keyframed
+       * properties sample at the entry's clip-relative time; a clip
+       * without keyframes passes through unchanged. */
+      OeClipVisual resolved = { 0 };
+      const OeClipVisual *visual = NULL;
+
+      if (entry->clip != NULL)
+        {
+          oe_clip_visual_resolve (&entry->clip->visual, entry->clip_time_us, &resolved);
+          visual = &resolved;
+        }
       guint8 *layer = NULL;
       int layer_w = 0;
       int layer_h = 0;

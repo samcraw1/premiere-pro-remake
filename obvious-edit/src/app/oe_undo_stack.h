@@ -314,6 +314,24 @@ gboolean oe_edit_set_clip_visual_with_old (OeProject *project, OeUndoStack *stac
                                            const OeClipVisual *new_visual, GError **error);
 
 /**
+ * oe_edit_set_clip_keyframe / oe_edit_remove_clip_keyframe: inspector
+ * keyframe strokes (Phase 9 Wave B).
+ *
+ * Mutate through the validated keyframe mutators and record ONE
+ * #OE_UNDO_OP_VISUAL record — a keyframe edit IS a visual-property
+ * edit, so undo restores the whole pre-stroke visual (keyframe stores
+ * included) and redo re-applies the post-stroke one. A stroke that
+ * leaves the visual unchanged (e.g. replacing a key with an identical
+ * value, removing a key that is not there) records nothing.
+ */
+gboolean oe_edit_set_clip_keyframe (OeProject *project, OeUndoStack *stack, guint track_index,
+                                    guint clip_index, OeKeyframeProperty property, gint64 time_us,
+                                    gint32 value, GError **error);
+gboolean oe_edit_remove_clip_keyframe (OeProject *project, OeUndoStack *stack, guint track_index,
+                                       guint clip_index, OeKeyframeProperty property,
+                                       gint64 time_us, GError **error);
+
+/**
  * oe_undo_stack_undo:
  * @out: receives the applied record (borrowed — valid until the next
  *     stack mutation), or NULL to ignore

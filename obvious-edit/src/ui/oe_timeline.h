@@ -146,6 +146,13 @@ gboolean oe_timeline_get_snapping (OeTimeline *timeline);
 /** Session playhead in microseconds (ruler click / insert advance;
  * never persisted — Phase 5 owns the clock). */
 gint64 oe_timeline_get_playhead (OeTimeline *timeline);
+
+/**
+ * oe_timeline_get_sequence: borrowed view of the widget's deep
+ * sequence copy (repainted per project notification). GTK-free — the
+ * inspector reads the frame rate for keyframe-time snapping.
+ */
+const OeSequence *oe_timeline_get_sequence (OeTimeline *timeline);
 void oe_timeline_set_playhead (OeTimeline *timeline, gint64 playhead_us);
 
 G_END_DECLS
