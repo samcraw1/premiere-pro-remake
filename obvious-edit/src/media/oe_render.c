@@ -25,7 +25,10 @@
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 
+#include "../core/oe_time.h"
+
 #include "../app/oe_playback_session.h"
+#include "oe_generator_raster.h"
 
 GQuark
 oe_render_error_quark (void)
@@ -301,7 +304,8 @@ fit_frame (VideoSource *vs, const AVFrame *frame, int canvas_w, int canvas_h, gi
 struct _OeRenderSession
 {
   const OeRenderSource *source;
-  GHashTable *sources; /* media_ref (as pointer) → owned VideoSource */
+  GHashTable *sources;         /* media_ref (as pointer) → owned VideoSource */
+  OeGeneratorCache *generators; /* (clip, payload) → owned sequence raster */
 };
 
 OeRenderSession *
@@ -315,6 +319,7 @@ oe_render_session_new (const OeRenderSource *source)
 
   session->source = source;
   session->sources = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, video_source_free);
+  session->generators = oe_generator_cache_new ();
   return session;
 }
 
@@ -325,6 +330,7 @@ oe_render_session_free (OeRenderSession *session)
     return;
 
   g_clear_pointer (&session->sources, g_hash_table_unref);
+  g_clear_pointer (&session->generators, oe_generator_cache_free);
   g_free (session);
 }
 
@@ -437,6 +443,130 @@ scale_layer (const guint8 *src, int src_w, int src_h, guint scale_permille, int 
   *out_w = dw;
   *out_h = dh;
   return dst;
+}
+
+/* Exact floor square root by the bit-by-bit binary digit method — no
+ * floating point anywhere in the pixel math. The squared RGB distance
+ * stays under 2^18, so a single 16-bit seed covers the domain. */
+static guint32
+isqrt32 (guint32 v)
+{
+  guint32 res = 0;
+  guint32 bit = 1u << 16;
+
+  while (bit > v)
+    bit >>= 2;
+
+  while (bit != 0)
+    {
+      const guint32 t = res + bit;
+
+      if (v >= t)
+        {
+          v -= t;
+          res = (res >> 1) + bit;
+        }
+      else
+        res >>= 1;
+
+      bit >>= 2;
+    }
+
+  return res;
+}
+
+/* The per-pixel chroma-key rule (Phase 11 Wave A, spec D6/D14),
+ * exported for the titles-key suite: the alpha @key assigns to one
+ * pixel with RGB (@r, @g, @b). Pure and integer-exact.
+ *
+ * The metric is the Euclidean RGB distance in 255ths fixed point:
+ * isqrt of the squared channel distances scaled exactly by 255
+ * (isqrt(255²·d²) = 255·isqrt(d²)), landing in [0, ~442*255].
+ * Tolerance and softness ride the 0-1024 fade/gain domain, converted
+ * into the same fixed-point domain; the ramp rounds exactly once,
+ * through oe_time_round_ratio. ALPHA ONLY — RGB channels are never
+ * touched and there is no spill suppression. */
+guint8
+oe_render_chroma_key_alpha (const OeClipKey *key, gint r, gint g, gint b)
+{
+  const gint64 tol = ((gint64) key->tolerance * 65025 + 512) / 1024;
+  const gint64 soft = ((gint64) key->softness * 65025 + 512) / 1024;
+  const gint dr = r - ((key->color_rgb >> 16) & 0xff);
+  const gint dg = g - ((key->color_rgb >> 8) & 0xff);
+  const gint db = b - (key->color_rgb & 0xff);
+  const gint64 dist = (gint64) isqrt32 ((guint32) (dr * dr + dg * dg + db * db)) * 255;
+
+  if (dist <= tol)
+    return 0;
+
+  if (dist >= tol + soft)
+    return 255;
+
+  return (guint8) oe_time_round_ratio ((dist - tol) * 255, soft);
+}
+
+/* Applies @key across @layer (BGRA straight alpha): alpha-only
+ * rewrite, source-space — runs post-crop and pre-scale. */
+static void
+apply_chroma_key (guint8 *layer, int layer_w, int layer_h, const OeClipKey *key)
+{
+  for (gint64 p = 0; p < (gint64) layer_w * layer_h; p++)
+    {
+      guint8 *px = layer + (gsize) p * 4;
+
+      px[3] = oe_render_chroma_key_alpha (key, px[2], px[1], px[0]);
+    }
+}
+
+/* Crops @layer (taking ownership) by the visual's per-edge pixel
+ * amounts, clamped to half the layer per axis (crop is in source
+ * pixels). Shared by the decoded and generated pipelines. */
+static guint8 *
+crop_layer (guint8 *layer, int *layer_w, int *layer_h, const OeClipVisual *visual)
+{
+  const gint cl = MIN ((gint) visual->crop_l, *layer_w / 2);
+  const gint ct = MIN ((gint) visual->crop_t, *layer_h / 2);
+  const gint cr = MIN ((gint) visual->crop_r, *layer_w / 2);
+  const gint cb = MIN ((gint) visual->crop_b, *layer_h / 2);
+  const gint cw = MAX (*layer_w - cl - cr, 1);
+  const gint ch = MAX (*layer_h - ct - cb, 1);
+  guint8 *cropped = g_malloc0 ((gsize) cw * ch * 4);
+
+  for (gint y = 0; y < ch; y++)
+    memcpy (cropped + (gsize) y * cw * 4,
+            layer + (gsize) (ct + y) * *layer_w * 4 + (gsize) cl * 4, (gsize) cw * 4);
+
+  g_free (layer);
+  *layer_w = cw;
+  *layer_h = ch;
+  return cropped;
+}
+
+/* Defined below (rotation needs its own bounding-box pass). */
+static guint8 *rotate_layer (const guint8 *src, int src_w, int src_h, int rotation_cdeg, int *out_w,
+                             int *out_h);
+
+/* Scales then rotates @layer (taking ownership) — the shared tail of
+ * both pipelines, in that order (spec D2/D9). */
+static guint8 *
+scale_rotate_layer (guint8 *layer, int *layer_w, int *layer_h, guint scale_permille,
+                    int rotation_cdeg)
+{
+  int scaled_w = 0;
+  int scaled_h = 0;
+  guint8 *scaled = scale_layer (layer, *layer_w, *layer_h, scale_permille, &scaled_w, &scaled_h);
+
+  g_free (layer);
+
+  int rotated_w = 0;
+  int rotated_h = 0;
+  guint8 *rotated
+      = rotate_layer (scaled, scaled_w, scaled_h, rotation_cdeg, &rotated_w, &rotated_h);
+
+  g_free (scaled);
+  *layer_w = rotated_w;
+  *layer_h = rotated_h;
+  return rotated;
 }
 
 /* Rotates @src about its center by @rotation_cdeg (clockwise, 1/100
@@ -784,7 +914,9 @@ compose_layered (OeRenderSession *session, const GArray *covering, int out_w, in
             continue;
         }
 
-      if (visual != NULL)
+      const gboolean generated = entry->clip != NULL && entry->clip->kind != OE_CLIP_MEDIA;
+
+      if (visual != NULL && !generated)
         {
           VideoSource *vs = ensure_source (session, entry->clip->media_ref, error);
 
@@ -825,44 +957,56 @@ compose_layered (OeRenderSession *session, const GArray *covering, int out_w, in
           /* Crop first (source pixels, spec D2), then scale, then rotate. */
           if (visual->crop_l != 0 || visual->crop_t != 0 || visual->crop_r != 0
               || visual->crop_b != 0)
-            {
-              const gint cl = MIN ((gint) visual->crop_l, layer_w / 2);
-              const gint ct = MIN ((gint) visual->crop_t, layer_h / 2);
-              const gint cr = MIN ((gint) visual->crop_r, layer_w / 2);
-              const gint cb = MIN ((gint) visual->crop_b, layer_h / 2);
-              const gint cw = MAX (layer_w - cl - cr, 1);
-              const gint ch = MAX (layer_h - ct - cb, 1);
-              guint8 *cropped = g_malloc0 ((gsize) cw * ch * 4);
+            layer = crop_layer (layer, &layer_w, &layer_h, visual);
 
-              for (gint y = 0; y < ch; y++)
-                memcpy (cropped + (gsize) y * cw * 4,
-                        layer + (gsize) (ct + y) * layer_w * 4 + (gsize) cl * 4, (gsize) cw * 4);
-
-              g_free (layer);
-              layer = cropped;
-              layer_w = cw;
-              layer_h = ch;
-            }
+          /* Chroma key (D6/D14): source-space, post-crop and
+           * pre-scale, alpha-only — keyed pixels rewrite alpha only,
+           * and opacity composes downstream for free. Generated
+           * clips are never keyed (D4). */
+          if (entry->clip->key.enabled != 0)
+            apply_chroma_key (layer, layer_w, layer_h, &entry->clip->key);
 
           if (!oe_clip_visual_is_default (visual))
+            layer = scale_rotate_layer (layer, &layer_w, &layer_h, visual->scale_permille,
+                                        visual->rotation_cdeg);
+        }
+      else if (generated)
+        {
+          /* Generated source (D12/D13): the produced buffer replaces
+           * the decode step — rasterized once per (clip identity,
+           * text, size, color) at sequence resolution, cached by the
+           * session (dropped on snapshot refresh), never per frame,
+           * never per canvas size. */
+          const OeSequence *seq = session->source->sequence;
+          const guint8 *raster = oe_generator_cache_raster (session->generators, entry->clip,
+                                                            seq->width, seq->height, error);
+
+          if (raster == NULL)
             {
-              int scaled_w = 0;
-              int scaled_h = 0;
-              guint8 *scaled = scale_layer (layer, layer_w, layer_h, visual->scale_permille,
-                                            &scaled_w, &scaled_h);
-
-              g_free (layer);
-
-              int rotated_w = 0;
-              int rotated_h = 0;
-              guint8 *rotated = rotate_layer (scaled, scaled_w, scaled_h, visual->rotation_cdeg,
-                                              &rotated_w, &rotated_h);
-
-              g_free (scaled);
-              layer = rotated;
-              layer_w = rotated_w;
-              layer_h = rotated_h;
+              g_free (canvas);
+              g_free (pair_a);
+              return NULL;
             }
+
+          layer = g_memdup2 (raster, (gsize) seq->width * seq->height * 4);
+          layer_w = seq->width;
+          layer_h = seq->height;
+
+          /* Generators honor crop/scale/rotate as ordinary layers
+           * (D9): crop in raster pixels, then the nearest-neighbor
+           * scale — the out-size factor rides the same scale step as
+           * the visual transform (generators are SCALED, never
+           * box-fitted) — then the visual rotation. */
+          if (visual->crop_l != 0 || visual->crop_t != 0 || visual->crop_r != 0
+              || visual->crop_b != 0)
+            layer = crop_layer (layer, &layer_w, &layer_h, visual);
+
+          const gint out_permille = (gint) ((gint64) out_w * 1000 / seq->width);
+          const gint eff_permille = (gint) ((gint64) visual->scale_permille * out_permille / 1000);
+
+          if (eff_permille != 1000 || visual->rotation_cdeg != 0)
+            layer = scale_rotate_layer (layer, &layer_w, &layer_h, (guint) eff_permille,
+                                        visual->rotation_cdeg);
         }
       else
         {
@@ -959,11 +1103,16 @@ oe_render_session_frame_at (OeRenderSession *session, gint64 t_us, int out_w, in
 
   guint8 *canvas = NULL;
 
-  /* Fast path: exactly one covering clip with the default transform
-   * composites through the untouched single-layer pipeline — the
-   * pre-Phase-9 byte-identical presentation (straight cuts, parity). */
+  /* Fast path: exactly one covering clip with the default transform,
+   * MEDIA kind, and a disabled key composites through the untouched
+   * single-layer pipeline — the pre-Phase-9 byte-identical
+   * presentation (straight cuts, parity). The kind and key conjuncts
+   * (Phase 11 D11) route keyed clips and generators to the layered
+   * path; every pre-Phase-11 project satisfies both trivially. */
   if (covering->len == 1
-      && oe_clip_visual_is_default (&g_array_index (covering, CoveringClip, 0).clip->visual))
+      && oe_clip_visual_is_default (&g_array_index (covering, CoveringClip, 0).clip->visual)
+      && g_array_index (covering, CoveringClip, 0).clip->kind == OE_CLIP_MEDIA
+      && g_array_index (covering, CoveringClip, 0).clip->key.enabled == 0)
     {
       const CoveringClip *entry = &g_array_index (covering, CoveringClip, 0);
       VideoSource *vs = ensure_source (session, entry->clip->media_ref, error);

@@ -31,6 +31,7 @@ avfilter_dep = dependency('libavfilter', version: '>= 9')
 swscale_dep = dependency('libswscale', version: '>= 7')
 swresample_dep = dependency('libswresample', version: '>= 4')
 sdl3_dep = dependency('sdl3', version: '>= 3.2')
+cairo_dep = dependency('cairo')
 
 # One structured-logging domain for the whole project.
 oe_log_cargs = ['-DG_LOG_DOMAIN="oe"']
@@ -38,9 +39,18 @@ oe_log_cargs = ['-DG_LOG_DOMAIN="oe"']
 # The fixture generator synthesises sine tones: libm for sin/cos.
 math_dep = meson.get_compiler('c').find_library('m')
 
+# The render seam shared by preview and export: GTK-free but
+# Cairo-based (titles rasterize through the toy font API, D12).
+oe_render_sources = [
+  'src/media/oe_generator_raster.c',
+  'src/media/oe_render.c',
+]
+
+
 oe_deps = [
   gtk4_dep,
   glib_dep,
+  cairo_dep,
   gobject_dep,
   json_glib_dep,
   avformat_dep,
@@ -76,7 +86,7 @@ executable('obvious-edit',
     'src/media/oe_probe.c',
     'src/media/oe_media_jobs.c',
     'src/media/oe_media_playback.c',
-    'src/media/oe_render.c',
+    oe_render_sources,
     'src/media/oe_export.c',
     'src/playback/oe_audio_output.c',
     'src/ui/oe_main_window.c',
@@ -98,6 +108,7 @@ executable('obvious-edit',
 test_deps = [
   glib_dep,
   gio_dep,
+  cairo_dep,
   gobject_dep,
   avformat_dep,
   avcodec_dep,
@@ -247,7 +258,7 @@ test('project', test_project)
 
 # Project format: strict v1 parse, integer-only serialization, and the
 # atomic-save contract. json-glib is in oe_deps but not test_deps, so
-# it is an explicit dependency of this suite (meson.build:80-92).
+# it is an explicit dependency of this suite (see oe_render_sources above).
 test_project_format = executable('test_project_format',
   [
     'tests/test_project_format.c',
@@ -294,7 +305,7 @@ test_playback_clock = executable('test_playback_clock',
     'src/core/oe_audio_factor.c',
     'src/core/oe_audio_buffer.c',
     'src/media/oe_media_playback.c',
-    'src/media/oe_render.c',
+    oe_render_sources,
     'src/playback/oe_audio_output.c',
     'src/core/oe_fades.c',
     'src/core/oe_keyframes.c',
@@ -341,7 +352,7 @@ test_undo_stack = executable('test_undo_stack',
     'src/core/oe_audio_factor.c',
     'src/core/oe_audio_buffer.c',
     'src/media/oe_media_playback.c',
-    'src/media/oe_render.c',
+    oe_render_sources,
     'src/playback/oe_audio_output.c',
     'src/core/oe_fades.c',
     'src/core/oe_keyframes.c',
@@ -376,7 +387,7 @@ test_snap_ripple = executable('test_snap_ripple',
     'src/core/oe_audio_factor.c',
     'src/core/oe_audio_buffer.c',
     'src/media/oe_media_playback.c',
-    'src/media/oe_render.c',
+    oe_render_sources,
     'src/playback/oe_audio_output.c',
     'src/core/oe_fades.c',
     'src/core/oe_keyframes.c',
@@ -405,7 +416,7 @@ test_wave_b = executable('test_wave_b',
     'src/core/oe_audio_factor.c',
     'src/core/oe_audio_buffer.c',
     'src/media/oe_media_playback.c',
-    'src/media/oe_render.c',
+    oe_render_sources,
     'src/playback/oe_audio_output.c',
     'src/core/oe_fades.c',
     'src/core/oe_keyframes.c',
@@ -455,7 +466,7 @@ test_export = executable('test_export',
   [
     'tests/test_export.c',
     'tests/fixture_media.c',
-    'src/media/oe_render.c',
+    oe_render_sources,
     'src/media/oe_export.c',
     'src/media/oe_probe.c',
     'src/media/oe_media_playback.c',
