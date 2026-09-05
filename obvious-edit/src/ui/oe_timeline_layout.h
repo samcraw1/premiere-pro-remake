@@ -157,4 +157,23 @@ gboolean oe_timeline_transition_edges (const OeTransitionWindow *window, gint64 
 void oe_timeline_trim_bounds (const OeClip *clip, gint64 max_source_us, gint64 *min_in,
                               gint64 *max_in, gint64 *min_out, gint64 *max_out);
 
+/* Phase 11 Wave B: the model-side label a timeline clip draws — GTK-free
+ * so tests pin it at the model seam. Generated clips label from their
+ * own payload (the title's text, or the solid's packed color); media
+ * clips label from the media path's basename (NULL path → NULL: the
+ * caller draws no label, the missing-media hatch speaks instead). A
+ * title with empty text falls back to "Title" so an empty entry can
+ * never erase the label.
+ *
+ * Returns a heap string (transfer full), NULL when there is no label. */
+gchar *oe_timeline_clip_label (const OeClip *clip, const gchar *media_path);
+
+/* Phase 11 Wave B: packed-0xRRGGBB ↔ "#rrggbb" text. The hex spelling
+ * is shared by the timeline's solid labels and the inspector's color
+ * entries, so both spellings always agree. The parser accepts an
+ * optional leading '#' followed by exactly six hex digits and answers
+ * FALSE (touching nothing) for anything else. */
+gchar *oe_timeline_clip_color_hex (gint color_rgb);
+gboolean oe_timeline_clip_color_parse_hex (const gchar *text, gint *color_rgb);
+
 G_END_DECLS

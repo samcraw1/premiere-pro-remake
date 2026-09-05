@@ -121,6 +121,9 @@ static const OeRgba COLOR_LANE_BORDER = { 0.220, 0.220, 0.235 };
 static const OeRgba COLOR_CLIP_VIDEO = { 0.227, 0.431, 0.647 };
 static const OeRgba COLOR_CLIP_AUDIO = { 0.184, 0.561, 0.357 };
 static const OeRgba COLOR_CLIP_STILL = { 0.478, 0.373, 0.627 };
+/* Wave B: generated clips paint a distinct teal — neither video nor
+ * still nor audio, so the kind reads at a glance. */
+static const OeRgba COLOR_CLIP_GENERATED = { 0.129, 0.549, 0.561 };
 static const OeRgba COLOR_CLIP_BORDER = { 0.066, 0.066, 0.075 };
 static const OeRgba COLOR_EDGE_BAND = { 0.980, 0.816, 0.360 };
 static const OeRgba COLOR_HATCH = { 0.541, 0.227, 0.227 };
@@ -550,7 +553,14 @@ paint_lanes (cairo_t *cr, OeTimeline *self, gdouble width, gdouble height)
 static void
 paint_clip (cairo_t *cr, OeTimeline *self, guint track_index, guint clip_index, const OeClip *clip)
 {
-  OeTimelineMediaInfo media = resolve_media (self, clip->media_ref);
+  /* Generated clips (Wave B) answer no media question: media_ref is
+   * dormant (D3), so the resolver's missing answer would hatch them
+   * wrongly. They paint from their own kind instead. */
+  const gboolean generated = clip->kind != OE_CLIP_MEDIA;
+  OeTimelineMediaInfo media
+      = generated
+            ? (OeTimelineMediaInfo) { .missing = FALSE, .has_audio = FALSE, .is_still = FALSE }
+            : resolve_media (self, clip->media_ref);
   gint64 position = clip->position_us;
   gint64 source_in = clip->source_in_us;
   gint64 source_out = clip->source_out_us;
@@ -576,8 +586,9 @@ paint_clip (cairo_t *cr, OeTimeline *self, guint track_index, guint clip_index, 
   if (x + w < 0.0)
     return;
 
-  const OeRgba *body = media.missing ? &COLOR_MISSING_BODY
-                                     : (media.is_still ? &COLOR_CLIP_STILL : &COLOR_CLIP_VIDEO);
+  const OeRgba *body = generated       ? &COLOR_CLIP_GENERATED
+                       : media.missing ? &COLOR_MISSING_BODY
+                                       : (media.is_still ? &COLOR_CLIP_STILL : &COLOR_CLIP_VIDEO);
 
   fill_rect (cr, body, x, y, w, body_h);
 
@@ -601,29 +612,32 @@ paint_clip (cairo_t *cr, OeTimeline *self, guint track_index, guint clip_index, 
       && (guint) self->selected_clip == clip_index)
     stroke_rect (cr, &COLOR_SELECTION, x + 1.0, y + 1.0, w - 2.0, OE_TIMELINE_TRACK_HEIGHT - 2.0);
 
-  /* Label: basename of the media path, drawn inside the body. */
-  gchar *path
-      = self->project != NULL ? oe_project_dup_media_path (self->project, clip->media_ref) : NULL;
+  /* Label (Wave B): the model-side kind-aware label — a title's text,
+   * a solid's packed color, or a media path's basename — drawn inside
+   * the body. */
+  gchar *path = !generated && self->project != NULL
+                    ? oe_project_dup_media_path (self->project, clip->media_ref)
+                    : NULL;
+  g_autofree gchar *label = oe_timeline_clip_label (clip, path);
 
-  if (path != NULL)
+  g_free (path);
+
+  if (label != NULL)
     {
-      g_autofree gchar *basename = g_path_get_basename (path);
       cairo_text_extents_t extents;
 
       cairo_select_font_face (cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size (cr, 11.0);
-      cairo_text_extents (cr, basename, &extents);
+      cairo_text_extents (cr, label, &extents);
 
       if (extents.width + 12.0 < w)
         {
           cairo_save (cr);
           cairo_rectangle (cr, x, y, w, body_h);
           cairo_clip (cr);
-          draw_text (cr, &COLOR_TEXT, x + 8, y + body_h - 6, basename);
+          draw_text (cr, &COLOR_TEXT, x + 8, y + body_h - 6, label);
           cairo_restore (cr);
         }
-
-      g_free (path);
     }
 }
 
@@ -780,13 +794,18 @@ arm_drag (OeTimeline *self, gdouble x, gdouble y)
         self->selected_clip = (gint) hit.clip_index;
         g_signal_emit (self, timeline_signals[SELECTION_CHANGED], 0);
 
-        OeTimelineMediaInfo media = resolve_media (self, clip.media_ref);
-
-        if (hit.kind != OE_TIMELINE_HIT_MOVE && media.missing)
+        /* Generated clips carry no media reference (D3): the missing
+         * question never applies, so trims arm freely (Wave B). */
+        if (clip.kind == OE_CLIP_MEDIA)
           {
-            /* Missing media renders hatched and refuses trims. */
-            report (self, "Missing media cannot be trimmed");
-            return;
+            OeTimelineMediaInfo media = resolve_media (self, clip.media_ref);
+
+            if (hit.kind != OE_TIMELINE_HIT_MOVE && media.missing)
+              {
+                /* Missing media renders hatched and refuses trims. */
+                report (self, "Missing media cannot be trimmed");
+                return;
+              }
           }
 
         self->drag.track_index = hit.track_index;
@@ -971,7 +990,10 @@ update_drag (OeTimeline *self, gdouble x)
         gint64 min_in = 0, max_in = 0, min_out = 0, max_out = 0;
         gint64 max_source_us = 0;
 
-        if (self->project != NULL)
+        /* Generated clips share the still convention (Wave B): the
+         * source range encodes screen duration, so there is no source
+         * ceiling to consult — free duration in both directions. */
+        if (self->project != NULL && clip.kind == OE_CLIP_MEDIA)
           oe_project_get_media_source_duration (self->project, clip.media_ref, &max_source_us);
 
         /* Stills are unbounded (uniform-duration rule): the session

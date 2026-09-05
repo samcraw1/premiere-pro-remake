@@ -402,3 +402,69 @@ oe_timeline_transition_edges (const OeTransitionWindow *window, gint64 *start_us
     *end_us = window->end_us;
   return TRUE;
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 11 Wave B: clip labels and packed-color hex spelling.         */
+/* ------------------------------------------------------------------ */
+
+gchar *
+oe_timeline_clip_color_hex (gint color_rgb)
+{
+  return g_strdup_printf ("#%06x", color_rgb & 0xffffff);
+}
+
+gboolean
+oe_timeline_clip_color_parse_hex (const gchar *text, gint *color_rgb)
+{
+  if (text == NULL)
+    return FALSE;
+
+  const gchar *digits = text[0] == '#' ? text + 1 : text;
+
+  if (digits[0] == '\0')
+    return FALSE;
+
+  gint value = 0;
+
+  for (gint i = 0; i < 6; i++)
+    {
+      const gint c = (gint) g_ascii_tolower (digits[i]);
+      const gint digit = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+
+      if (digit < 0)
+        return FALSE; /* too short or a non-hex character */
+      value = value * 16 + digit;
+    }
+
+  if (digits[6] != '\0')
+    return FALSE; /* trailing garbage after the six digits */
+
+  if (color_rgb != NULL)
+    *color_rgb = value;
+  return TRUE;
+}
+
+gchar *
+oe_timeline_clip_label (const OeClip *clip, const gchar *media_path)
+{
+  g_return_val_if_fail (clip != NULL, NULL);
+
+  if (clip->kind == OE_CLIP_TITLE)
+    {
+      /* The label IS the model payload. An empty text (the entry can
+       * be cleared mid-edit) falls back so the clip never loses its
+       * label entirely. */
+      if (clip->generator.text != NULL && clip->generator.text[0] != '\0')
+        return g_strdup (clip->generator.text);
+      return g_strdup ("Title");
+    }
+
+  if (clip->kind == OE_CLIP_SOLID)
+    return oe_timeline_clip_color_hex (clip->generator.color_rgb);
+
+  /* Media: the basename of the media path; no path (unprobed or
+   * missing) draws no label — the hatch already tells the story. */
+  if (media_path == NULL || media_path[0] == '\0')
+    return NULL;
+  return g_path_get_basename (media_path);
+}
