@@ -503,11 +503,11 @@ typedef struct
   gint64 source_in_us;
   gint64 source_out_us;
   guint media_ref;
-  OeClipKind kind;     /* OE_CLIP_MEDIA when the file omitted the member */
+  OeClipKind kind;           /* OE_CLIP_MEDIA when the file omitted the member */
   OeClipGenerator generator; /* dormant identity when the file omitted the member */
-  OeClipKey key;       /* disabled identity when the file omitted the member */
-  OeClipVisual visual; /* identity when the file omitted the member */
-  OeClipAudio audio;   /* identity when the file omitted the member */
+  OeClipKey key;             /* disabled identity when the file omitted the member */
+  OeClipVisual visual;       /* identity when the file omitted the member */
+  OeClipAudio audio;         /* identity when the file omitted the member */
 } ClipEntry;
 
 typedef struct
@@ -1127,6 +1127,8 @@ parse_clip_generator (JsonNode *node, const gchar *where, OeClipKind kind,
 
   *generator = oe_clip_generator_identity ();
 
+  /* Text first (the title domain predicate below needs it); every
+   * later failure jumps to fail:, which releases the owned string. */
   JsonNode *text_node = json_object_get_member (obj, "text");
 
   if (text_node != NULL)
@@ -1149,16 +1151,15 @@ parse_clip_generator (JsonNode *node, const gchar *where, OeClipKind kind,
       || !require_node (obj, "size", JSON_NODE_VALUE, where, &size_node, error)
       || !node_get_int (color_node, where, "color", &color, error)
       || !node_get_int (size_node, where, "size", &size, error))
-    return FALSE;
+    goto fail;
 
-  if (color < 0 || color > OE_CLIP_COLOR_RGB_MAX || size < 0
-      || size > OE_CLIP_SIZE_PERMILLE_MAX)
+  if (color < 0 || color > OE_CLIP_COLOR_RGB_MAX || size < 0 || size > OE_CLIP_SIZE_PERMILLE_MAX)
     {
       g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
                    "%s: generator color %lld / size %lld out of range (0..%d / 0..%d)", where,
                    (long long) color, (long long) size, OE_CLIP_COLOR_RGB_MAX,
                    OE_CLIP_SIZE_PERMILLE_MAX);
-      return FALSE;
+      goto fail;
     }
 
   generator->color_rgb = (gint) color;
@@ -1169,7 +1170,7 @@ parse_clip_generator (JsonNode *node, const gchar *where, OeClipKind kind,
       g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
                    "%s: generator payload out of domain for %s clips", where,
                    oe_clip_kind_get_name (kind));
-      return FALSE;
+      goto fail;
     }
 
   if (kind == OE_CLIP_MEDIA)
@@ -1182,11 +1183,15 @@ parse_clip_generator (JsonNode *node, const gchar *where, OeClipKind kind,
                        "%s: media clips carry no generator state (a tolerated payload would be "
                        "silently dropped on re-save)",
                        where);
-          return FALSE;
+          goto fail;
         }
     }
 
   return TRUE;
+
+fail:
+  oe_clip_generator_clear (generator);
+  return FALSE;
 }
 
 /* The optional clip "key" member (Phase 11 Wave A): per-clip
@@ -1196,8 +1201,7 @@ parse_clip_generator (JsonNode *node, const gchar *where, OeClipKind kind,
  * predicate — and a generated clip carrying a non-identity key is a
  * VALUE error (D4: keying applies to media clips only). */
 static gboolean
-parse_clip_key (JsonNode *node, const gchar *where, OeClipKind kind, OeClipKey *key,
-                GError **error)
+parse_clip_key (JsonNode *node, const gchar *where, OeClipKind kind, OeClipKey *key, GError **error)
 {
   static const gchar *const members[] = { "color", "tolerance", "softness", "enabled" };
 
@@ -1420,8 +1424,7 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
       if (!ref_known)
         {
           g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
-                       "%s: media-ref %u names no entry in \"media\"", where,
-                       (guint) media_ref);
+                       "%s: media-ref %u names no entry in \"media\"", where, (guint) media_ref);
           return FALSE;
         }
     }
@@ -1442,27 +1445,41 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
 
   JsonNode *audio_node = json_object_get_member (obj, "audio");
 
-  if (audio_node != NULL && !parse_clip_audio (audio_node, where, &audio, error))
-    return FALSE;
-
+  /* Declared before the fail-gotos below: a goto that skips the
+   * declaration would leave the struct uninitialized at fail:. */
   OeClipGenerator generator = oe_clip_generator_identity ();
+
+  if (audio_node != NULL && !parse_clip_audio (audio_node, where, &audio, error))
+    goto fail; /* the parsed keyframe store above still needs releasing */
 
   JsonNode *generator_node = json_object_get_member (obj, "generator");
 
   if (generator_node != NULL
       && !parse_clip_generator (generator_node, where, kind, &generator, error))
-    return FALSE;
+    goto fail; /* same — plus parse_clip_generator clears its own text */
 
   OeClipKey key = oe_clip_key_identity ();
 
   JsonNode *key_node = json_object_get_member (obj, "key");
 
   if (key_node != NULL && !parse_clip_key (key_node, where, kind, &key, error))
-    return FALSE;
+    goto fail;
 
   *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref, kind,
                          &generator, &key, &visual, &audio);
+  /* The entry deep-copied the generator text; the parse local's owned
+   * string ends here. The visual keyframes ALIASED into the entry —
+   * they must not be cleared. */
+  oe_clip_generator_clear (&generator);
   return TRUE;
+
+fail:
+  /* Ownership check: the keyframe store frees itself on its own
+   * failure paths, the generator text does not — and the audio/key
+   * locals are plain values. */
+  oe_clip_generator_clear (&generator);
+  oe_clip_visual_clear (&visual);
+  return FALSE;
 }
 
 /* The optional track "transitions" member (Phase 9 Wave B). Absent
@@ -1972,9 +1989,8 @@ oe_project_format_load (const gchar *path, GError **error)
            * insert. Both route through the validated mutators. */
           if (clip->kind == OE_CLIP_MEDIA)
             {
-              if (!oe_project_insert_clip (project, track_index, clip->media_ref,
-                                           clip->position_us, clip->source_in_us,
-                                           clip->source_out_us, &insert_error))
+              if (!oe_project_insert_clip (project, track_index, clip->media_ref, clip->position_us,
+                                           clip->source_in_us, clip->source_out_us, &insert_error))
                 {
                   g_propagate_error (error, insert_error);
                   g_clear_object (&project);
@@ -1983,10 +1999,9 @@ oe_project_format_load (const gchar *path, GError **error)
             }
           else
             {
-              if (!oe_project_insert_generator_clip (project, track_index, clip->kind,
-                                                     clip->position_us,
-                                                     clip->source_out_us - clip->source_in_us,
-                                                     &clip->generator, &insert_error))
+              if (!oe_project_insert_generator_clip (
+                      project, track_index, clip->kind, clip->position_us,
+                      clip->source_out_us - clip->source_in_us, &clip->generator, &insert_error))
                 {
                   g_propagate_error (error, insert_error);
                   g_clear_object (&project);
