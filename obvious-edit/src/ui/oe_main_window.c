@@ -656,10 +656,10 @@ keyframe_edit_finish (OeMainWindow *self, const gchar *action, const gchar *prop
 }
 
 static void
-on_key_add_clicked (GtkButton *button G_GNUC_UNUSED, gpointer user_data)
+on_key_add_clicked (GtkButton *button, gpointer user_data)
 {
   OeMainWindow *self = OE_MAIN_WINDOW (user_data);
-  const int spin = GPOINTER_TO_INT (user_data);
+  const int spin = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (button), "spin-index"));
   OeClip clip;
   GError *error = NULL;
 
@@ -687,10 +687,10 @@ on_key_add_clicked (GtkButton *button G_GNUC_UNUSED, gpointer user_data)
 }
 
 static void
-on_key_remove_clicked (GtkButton *button G_GNUC_UNUSED, gpointer user_data)
+on_key_remove_clicked (GtkButton *button, gpointer user_data)
 {
   OeMainWindow *self = OE_MAIN_WINDOW (user_data);
-  const int spin = GPOINTER_TO_INT (user_data);
+  const int spin = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (button), "spin-index"));
   OeClip clip;
   GError *error = NULL;
 
@@ -772,10 +772,12 @@ inspector_clip_new (OeMainWindow *self)
 
           gtk_widget_set_tooltip_text (add_btn, "Add keyframe at playhead with this value");
           gtk_widget_set_tooltip_text (rm_btn, "Remove keyframe at playhead");
-          g_signal_connect (add_btn, "clicked", G_CALLBACK (on_key_add_clicked),
-                            GINT_TO_POINTER (i));
-          g_signal_connect (rm_btn, "clicked", G_CALLBACK (on_key_remove_clicked),
-                            GINT_TO_POINTER (i));
+          /* Row index rides on the button; the callback receives the
+           * window like every other inspector handler. */
+          g_object_set_data (G_OBJECT (add_btn), "spin-index", GINT_TO_POINTER (i));
+          g_object_set_data (G_OBJECT (rm_btn), "spin-index", GINT_TO_POINTER (i));
+          g_signal_connect (add_btn, "clicked", G_CALLBACK (on_key_add_clicked), self);
+          g_signal_connect (rm_btn, "clicked", G_CALLBACK (on_key_remove_clicked), self);
           gtk_box_append (GTK_BOX (key_box), add_btn);
           gtk_box_append (GTK_BOX (key_box), rm_btn);
           gtk_grid_attach (GTK_GRID (grid), key_box, 2, i, 1, 1);
