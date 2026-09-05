@@ -1,3 +1,4 @@
+
 /* oe_playback_session.c — the GTK-free playback clock (Phase 5).
  *
  * Time discipline: integer µs end to end. The position while playing is
@@ -16,6 +17,7 @@
 #include "oe_playback_session.h"
 
 #include "../core/oe_time.h"
+#include "../media/oe_render.h"
 #include "../playback/oe_audio_output.h"
 #include "oe_log.h"
 
@@ -74,8 +76,8 @@ struct _OePlaybackSession
   gint64 audio_clip_end_seq_us;   /* sequence time where the clip ends */
   gchar *audio_failed_path;       /* media that failed this generation */
 
-  OeMediaVideoDecoder *video_dec;
-  gchar *video_dec_path;
+  OeRenderSource render_source;    /* sequence snapshot + resolver */
+  OeRenderSession *render_session; /* shared seam decoder cache, lazy */
   gchar *video_failed_path;        /* media that failed to open this run */
   gint64 video_frame_index;        /* sequence frame index last decoded */
   gboolean video_active;           /* a video clip covers the position */
@@ -211,6 +213,23 @@ fire_event (OePlaybackSession *self, OePlaybackEvent event, const gchar *detail)
     self->event_func (self, event, detail, self->event_data);
 }
 
+/* Render seam: the shared compositor (per-source decoder cache +
+ * layered blend) rendered lazily against the deep-copied sequence
+ * snapshot. The resolver hands the seam the project's media paths. */
+static gchar *
+resolve_media_path (guint media_ref, gpointer user_data)
+{
+  OePlaybackSession *self = user_data;
+
+  return oe_project_dup_media_path ((OeProject *) self->project, media_ref);
+}
+
+static void
+close_render_session (OePlaybackSession *self)
+{
+  g_clear_pointer (&self->render_session, oe_render_session_free);
+}
+
 /* ------------------------------------------------------------------ */
 /* Sequence snapshot                                                   */
 /* ------------------------------------------------------------------ */
@@ -226,6 +245,13 @@ refresh_sequence (OePlaybackSession *self)
   oe_project_get_sequence ((OeProject *) self->project, &self->sequence);
   self->sequence_valid = TRUE;
   self->sequence_end_us = compute_sequence_end (&self->sequence);
+
+  /* The decoder cache keys to the outgoing snapshot; a stale session
+   * would serve frames from files the new snapshot no longer maps. */
+  self->render_source.sequence = &self->sequence;
+  self->render_source.resolve_path = resolve_media_path;
+  self->render_source.resolve_data = self;
+  close_render_session (self);
 }
 
 /* ------------------------------------------------------------------ */
@@ -422,25 +448,29 @@ ensure_stream (OePlaybackSession *self)
 }
 
 /* ------------------------------------------------------------------ */
-/* Video: decoder lifecycle, frame-at-position                         */
+/* Video: shared-seam frame delivery                                   */
 /* ------------------------------------------------------------------ */
 
 #define VIDEO_DECODE_BOX_W 1280
 #define VIDEO_DECODE_BOX_H 720
 
-static void
-close_video_decoder (OePlaybackSession *self)
+static OeRenderSession *
+ensure_render_session (OePlaybackSession *self)
 {
-  g_clear_pointer (&self->video_dec, oe_media_playback_video_free);
-  g_clear_pointer (&self->video_dec_path, g_free);
-  g_clear_pointer (&self->video_failed_path, g_free);
+  if (self->render_session == NULL)
+    self->render_session = oe_render_session_new (&self->render_source);
+
+  return self->render_session;
 }
 
 /* Decode and deliver the frame at @position, or clear the monitor when
- * no video is scheduled. Missing media reports once per run and the
- * transport continues. */
+ * no video is scheduled. Rendering runs through the shared render seam
+ * (decoder cache + layered compositor); missing media reports once per
+ * run and the transport continues. With @force the same-frame dedup is
+ * bypassed — the paused repaint path needs a fresh render even though
+ * the frame index did not move. */
 static void
-update_video (OePlaybackSession *self, gint64 position_us)
+update_video_full (OePlaybackSession *self, gint64 position_us, gboolean force)
 {
   OePlaybackMapping map;
   const gboolean active
@@ -459,72 +489,73 @@ update_video (OePlaybackSession *self, gint64 position_us)
 
   const gint64 frame_index = oe_time_us_to_frame (position_us, self->sequence.frame_rate);
 
-  if (self->video_active && frame_index == self->video_frame_index)
+  if (!force && self->video_active && frame_index == self->video_frame_index)
     return; /* same frame — stills decode once per source frame */
 
-  const OeTrack *track = g_ptr_array_index (self->sequence.tracks, map.track_index);
-  const OeClip *clip = g_ptr_array_index (track->clips, map.clip_index);
-  gchar *path = oe_project_dup_media_path ((OeProject *) self->project, clip->media_ref);
+  OeRenderSession *render = ensure_render_session (self);
 
-  if (path == NULL)
-    return;
-
-  /* One failing file per play run: skip further opens, keep the
-   * transport going (mirrors the audio guard). */
-  if (g_strcmp0 (path, self->video_failed_path) == 0)
-    {
-      g_free (path);
-      return;
-    }
-
-  if (self->video_dec == NULL || g_strcmp0 (self->video_dec_path, path) != 0)
-    {
-      GError *open_error = NULL;
-      OeMediaVideoDecoder *dec = oe_media_playback_video_open (path, &open_error);
-
-      if (dec == NULL)
-        {
-          if (!self->video_missing_reported)
-            {
-              self->video_missing_reported = TRUE;
-              self->video_failed_path = g_strdup (path);
-              fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED, open_error->message);
-            }
-          g_error_free (open_error);
-          g_free (path);
-          return;
-        }
-
-      close_video_decoder (self);
-      self->video_dec = dec;
-      self->video_dec_path = g_strdup (path);
-    }
-
-  GError *decode_error = NULL;
-  OePlaybackVideoFrame *frame = NULL;
-
-  if (oe_media_playback_video_decode_at (self->video_dec, map.source_us, VIDEO_DECODE_BOX_W,
-                                         VIDEO_DECODE_BOX_H, &frame, &decode_error))
-    {
-      self->video_active = TRUE;
-      self->video_frame_index = frame_index;
-
-      if (self->frame_func != NULL)
-        self->frame_func (self, frame, self->frame_data); /* ownership transfers */
-      else
-        oe_playback_video_frame_free (frame);
-    }
-  else
+  if (render == NULL)
     {
       if (!self->video_missing_reported)
         {
           self->video_missing_reported = TRUE;
-          fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED, decode_error->message);
+          fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED,
+                      "cannot open any media for the sequence");
         }
-      g_error_free (decode_error);
+      return;
     }
 
-  g_free (path);
+  GError *error = NULL;
+  guint8 *canvas = oe_render_session_frame_at (render, position_us, VIDEO_DECODE_BOX_W,
+                                               VIDEO_DECODE_BOX_H, &error);
+
+  if (canvas == NULL)
+    {
+      if (!self->video_missing_reported)
+        {
+          self->video_missing_reported = TRUE;
+          fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED, error->message);
+        }
+      g_error_free (error);
+      return;
+    }
+
+  OePlaybackVideoFrame *frame = g_new0 (OePlaybackVideoFrame, 1);
+
+  frame->source_us = map.source_us;
+  frame->width = VIDEO_DECODE_BOX_W;
+  frame->height = VIDEO_DECODE_BOX_H;
+  frame->rgba = canvas;
+
+  self->video_active = TRUE;
+  self->video_frame_index = frame_index;
+
+  if (self->frame_func != NULL)
+    self->frame_func (self, frame, self->frame_data); /* ownership transfers */
+  else
+    oe_playback_video_frame_free (frame);
+}
+
+static void
+update_video (OePlaybackSession *self, gint64 position_us)
+{
+  update_video_full (self, position_us, FALSE);
+}
+
+void
+oe_playback_session_repaint_paused (OePlaybackSession *session)
+{
+  g_return_if_fail (session != NULL);
+
+  if (session->state == OE_PLAYBACK_PLAYING)
+    return; /* the tick owns the frame while playing */
+
+  /* A visual edit mutated the live project since the last play/seek:
+   * re-snapshot before rendering, or the repaint serves the frozen
+   * pre-edit sequence and the monitor never shows the edit. */
+  refresh_sequence (session);
+
+  update_video_full (session, session->last_position_us, TRUE);
 }
 
 /* ------------------------------------------------------------------ */
@@ -592,7 +623,7 @@ oe_playback_session_free (OePlaybackSession *session)
   halt_streaming (session);
   g_clear_pointer (&session->stream, oe_audio_output_close_stream);
   g_clear_pointer (&session->worker, oe_media_playback_worker_free);
-  close_video_decoder (session);
+  close_render_session (session);
 
   if (session->sequence_valid)
     oe_sequence_clear (&session->sequence);

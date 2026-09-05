@@ -106,6 +106,10 @@ typedef enum
  *     re-inserts the primary; redo removes the primary and re-shifts
  *     (ascending index order). The sub-step orderings keep every
  *     intermediate state inside the model's typed validation.
+ * @OE_UNDO_OP_VISUAL: a clip's picture geometry/opacity changed
+ *     (Phase 9 Wave A); undo restores the pre-stroke #OeClipVisual,
+ *     redo re-applies the post-stroke one. One inspector stroke = one
+ *     record, whatever the control count involved.
  */
 typedef enum
 {
@@ -114,6 +118,7 @@ typedef enum
   OE_UNDO_OP_MOVE,
   OE_UNDO_OP_TRIM,
   OE_UNDO_OP_RIPPLE_DELETE,
+  OE_UNDO_OP_VISUAL,
 } OeUndoOpKind;
 
 /**
@@ -149,6 +154,7 @@ typedef struct
   gint64 old_b_us;
   gint64 new_a_us;
   gint64 new_b_us;
+  OeClipVisual new_visual; /* VISUAL only: the post-stroke state */
 
   /* RIPPLE_DELETE only: owned array of OeRippleShift, one entry per
    * shifted suffix clip ordered by pre_index ascending; NULL for every
@@ -250,6 +256,36 @@ gboolean oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_
 gboolean oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index,
                             guint clip_index, gint64 source_in_us, gint64 source_out_us,
                             GError **error);
+
+/**
+ * oe_edit_set_clip_visual: visual edit (Phase 9 Wave A).
+ *
+ * Mutates through oe_project_set_clip_visual() and records ONE
+ * #OE_UNDO_OP_VISUAL record whose old state is the project's visual
+ * captured immediately before the mutation. Right for one-shot edits
+ * (numeric entry); interactive strokes must call the _with_old
+ * variant instead — a drag previews through unrecorded mutations, so
+ * the pre-capture baseline here would be the last preview state, not
+ * the stroke's start.
+ */
+gboolean oe_edit_set_clip_visual (OeProject *project, OeUndoStack *stack, guint track_index,
+                                  guint clip_index, const OeClipVisual *visual, GError **error);
+
+/**
+ * oe_edit_set_clip_visual_with_old:
+ * @old_visual: the pre-stroke baseline, captured when the stroke began
+ * @new_visual: the post-stroke state
+ *
+ * Mutates to @new_visual through oe_project_set_clip_visual() and
+ * records ONE #OE_UNDO_OP_VISUAL record restoring @old_visual — the
+ * true stroke start, immune to how many preview mutations happened in
+ * between. A @new_visual equal to @old_visual records nothing: a
+ * zero-delta stroke leaves no history entry.
+ */
+gboolean oe_edit_set_clip_visual_with_old (OeProject *project, OeUndoStack *stack,
+                                           guint track_index, guint clip_index,
+                                           const OeClipVisual *old_visual,
+                                           const OeClipVisual *new_visual, GError **error);
 
 /**
  * oe_undo_stack_undo:

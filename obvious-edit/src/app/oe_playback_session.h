@@ -167,6 +167,18 @@ void oe_playback_session_set_time_source (OePlaybackSession *session,
                                           OePlaybackTimeSourceFunc time_func, gpointer user_data);
 
 /**
+ * oe_playback_session_repaint_paused:
+ * @session: the session
+ *
+ * Re-renders the paused monitor frame through the shared render seam,
+ * bypassing same-frame dedup. Property edits on the paused timeline
+ * call this once per committed change so the monitor reflects the new
+ * visual state without starting playback. No-op while playing — the
+ * tick owns the frame there.
+ */
+void oe_playback_session_repaint_paused (OePlaybackSession *session);
+
+/**
  * oe_playback_session_play:
  * @error: return location for a #GError, or NULL to ignore
  *

@@ -118,6 +118,14 @@ void oe_timeline_set_undo_stack (OeTimeline *timeline, OeUndoStack *stack);
 /** Selected clip indices; FALSE when the selection is empty. */
 gboolean oe_timeline_get_selection (OeTimeline *timeline, guint *track_index, guint *clip_index);
 
+/** Emitted whenever the clip selection moves or empties (widget
+ * signal "selection-changed", no arguments). The inspector listens to
+ * swap its clip page in and out. */
+/** Emitted after every project model notification the timeline
+ * observes (widget signal "project-changed", no arguments) — the
+ * paused monitor repaint hook rides this instead of stealing the
+ * project's single observer slot. */
+
 /** Drops the selection (after a delete, before a session swap). */
 void oe_timeline_clear_selection (OeTimeline *timeline);
 

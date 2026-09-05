@@ -90,6 +90,40 @@ append_int (GString *out, gint64 v)
   g_string_append_printf (out, "%" G_GINT64_FORMAT, v);
 }
 
+/* The clip-level visual member (Phase 9 Wave A): written always —
+ * every field, every clip — so a current writer's output is stable and
+ * a save-load-save round trip is byte-identical. Readers backfill the
+ * identity when the member is absent (pre-Phase-9 file). Integer
+ * tokens only: the fixed-point fields never serialize as floats. */
+static void
+append_clip_visual (GString *out, const OeClipVisual *v)
+{
+  g_string_append (out, ",\n          \"visual\": {\n");
+  g_string_append (out, "            \"pos-x\": ");
+  append_int (out, v->pos_x);
+  g_string_append (out, ",\n            \"pos-y\": ");
+  append_int (out, v->pos_y);
+  g_string_append (out, ",\n            \"scale-permille\": ");
+  append_int (out, (gint64) v->scale_permille);
+  g_string_append (out, ",\n            \"rotation-cdeg\": ");
+  append_int (out, v->rotation_cdeg);
+  g_string_append (out, ",\n            \"opacity\": ");
+  append_int (out, v->opacity);
+  g_string_append (out, ",\n            \"crop-l\": ");
+  append_int (out, (gint64) v->crop_l);
+  g_string_append (out, ",\n            \"crop-t\": ");
+  append_int (out, (gint64) v->crop_t);
+  g_string_append (out, ",\n            \"crop-r\": ");
+  append_int (out, (gint64) v->crop_r);
+  g_string_append (out, ",\n            \"crop-b\": ");
+  append_int (out, (gint64) v->crop_b);
+  g_string_append (out, ",\n            \"fade-in-us\": ");
+  append_int (out, (gint64) v->fade_in_us);
+  g_string_append (out, ",\n            \"fade-out-us\": ");
+  append_int (out, (gint64) v->fade_out_us);
+  g_string_append (out, "\n          }");
+}
+
 static gchar *
 serialize_project (OeProject *project)
 {
@@ -162,6 +196,7 @@ serialize_project (OeProject *project)
           append_int (out, clip->source_in_us);
           g_string_append (out, ",\n          \"source-out-us\": ");
           append_int (out, clip->source_out_us);
+          append_clip_visual (out, &clip->visual);
           g_string_append (out, "\n        }");
         }
       if (track->clips->len > 0)
@@ -296,6 +331,7 @@ typedef struct
   gint64 source_in_us;
   gint64 source_out_us;
   guint media_ref;
+  OeClipVisual visual; /* identity when the file omitted the member */
 } ClipEntry;
 
 typedef struct
@@ -305,7 +341,8 @@ typedef struct
 } TrackEntry;
 
 static ClipEntry *
-clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint media_ref)
+clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, guint media_ref,
+                const OeClipVisual *visual)
 {
   ClipEntry *clip = g_new0 (ClipEntry, 1);
 
@@ -313,6 +350,10 @@ clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, g
   clip->source_in_us = source_in_us;
   clip->source_out_us = source_out_us;
   clip->media_ref = media_ref;
+  if (visual != NULL)
+    clip->visual = *visual; /* Wave A visuals own no memory: value copy is deep */
+  else
+    clip->visual = oe_clip_visual_identity ();
   return clip;
 }
 
@@ -526,12 +567,100 @@ parse_media (JsonNode *node, GPtrArray *media_out, GError **error)
   return TRUE;
 }
 
+/* The optional clip "visual" member (Phase 9 Wave A). Absent means
+ * identity — the width/height backfill recipe applied per clip: no
+ * version bump, older files load unchanged. Present means strict: a
+ * closed member list, integer tokens only, and the same domain ranges
+ * the validated mutator enforces. Wave A serializes no keyframe store,
+ * so an owned-memory visual can never arrive here. */
+static gboolean
+parse_clip_visual (JsonNode *node, const gchar *where, OeClipVisual *visual, GError **error)
+{
+  static const gchar *const members[]
+      = { "pos-x",  "pos-y",  "scale-permille", "rotation-cdeg", "opacity",    "crop-l",
+          "crop-t", "crop-r", "crop-b",         "fade-in-us",    "fade-out-us" };
+
+  static const struct
+  {
+    const gchar *name;
+    gint64 min;
+    gint64 max;
+  } ranges[] = {
+    { "pos-x", G_MININT64, G_MAXINT64 },
+    { "pos-y", G_MININT64, G_MAXINT64 },
+    { "scale-permille", 1, 32000 },
+    { "rotation-cdeg", -36000, 36000 },
+    { "opacity", 0, 255 },
+    { "crop-l", 0, G_MAXINT },
+    { "crop-t", 0, G_MAXINT },
+    { "crop-r", 0, G_MAXINT },
+    { "crop-b", 0, G_MAXINT },
+    { "fade-in-us", 0, G_MAXINT64 },
+    { "fade-out-us", 0, G_MAXINT64 },
+  };
+
+  if (!JSON_NODE_HOLDS_OBJECT (node))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                   "%s.visual: must be an object", where);
+      return FALSE;
+    }
+
+  JsonObject *obj = json_node_get_object (node);
+  gchar *visual_where = g_strdup_printf ("%s.visual", where);
+
+  if (!check_members (obj, members, G_N_ELEMENTS (members), visual_where, error))
+    {
+      g_free (visual_where);
+      return FALSE;
+    }
+
+  *visual = oe_clip_visual_identity ();
+  gint64 values[G_N_ELEMENTS (ranges)] = { 0 };
+
+  for (guint i = 0; i < G_N_ELEMENTS (ranges); i++)
+    {
+      JsonNode *value_node = NULL;
+
+      if (!require_node (obj, ranges[i].name, JSON_NODE_VALUE, visual_where, &value_node, error)
+          || !node_get_int (value_node, visual_where, ranges[i].name, &values[i], error))
+        {
+          g_free (visual_where);
+          return FALSE;
+        }
+
+      if (values[i] < ranges[i].min || values[i] > ranges[i].max)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: %s %lld is out of range (must be %lld..%lld)", visual_where,
+                       ranges[i].name, (long long) values[i], (long long) ranges[i].min,
+                       (long long) ranges[i].max);
+          g_free (visual_where);
+          return FALSE;
+        }
+    }
+
+  g_free (visual_where);
+  visual->pos_x = (gint) values[0];
+  visual->pos_y = (gint) values[1];
+  visual->scale_permille = (guint) values[2];
+  visual->rotation_cdeg = (gint) values[3];
+  visual->opacity = (guint8) values[4];
+  visual->crop_l = (guint) values[5];
+  visual->crop_t = (guint) values[6];
+  visual->crop_r = (guint) values[7];
+  visual->crop_b = (guint) values[8];
+  visual->fade_in_us = (guint64) values[9];
+  visual->fade_out_us = (guint64) values[10];
+  return TRUE;
+}
+
 static gboolean
 parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEntry **out,
             GError **error)
 {
   static const gchar *const members[]
-      = { "media-ref", "position-us", "source-in-us", "source-out-us" };
+      = { "media-ref", "position-us", "source-in-us", "source-out-us", "visual" };
 
   JsonNode *media_ref_node = NULL;
   JsonNode *position_node = NULL;
@@ -620,7 +749,14 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
       return FALSE;
     }
 
-  *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref);
+  OeClipVisual visual = oe_clip_visual_identity ();
+
+  JsonNode *visual_node = json_object_get_member (obj, "visual");
+
+  if (visual_node != NULL && !parse_clip_visual (visual_node, where, &visual, error))
+    return FALSE;
+
+  *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref, &visual);
   return TRUE;
 }
 
@@ -992,6 +1128,22 @@ oe_project_format_load (const gchar *path, GError **error)
               g_propagate_error (error, insert_error);
               g_clear_object (&project);
               goto out;
+            }
+
+          /* Only non-default visuals touch the mutator: the insert
+           * already produced the identity state, and the load path stays
+           * free of per-clip observer noise. */
+          if (!oe_clip_visual_is_default (&clip->visual))
+            {
+              GError *visual_error = NULL;
+
+              if (!oe_project_set_clip_visual (project, track_index, c, &clip->visual,
+                                               &visual_error))
+                {
+                  g_propagate_error (error, visual_error);
+                  g_clear_object (&project);
+                  goto out;
+                }
             }
         }
     }

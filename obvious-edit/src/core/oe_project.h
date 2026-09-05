@@ -56,6 +56,38 @@ G_DECLARE_FINAL_TYPE (OeProject, oe_project, OE, PROJECT, GObject)
 #define OE_SEQUENCE_DEFAULT_HEIGHT 1080
 
 /**
+ * OeClipVisual: per-clip picture geometry and opacity (Phase 9 Wave A).
+ *
+ * Integers only, locked decision D1: @pos_x/@pos_y are frame-pixel
+ * offsets from the frame center (centered anchor), @scale_permille is a
+ * uniform scale in permille (1000 = 1.0x), @rotation_cdeg is rotation
+ * in 1/100 degree (clockwise), @opacity is 0-255 straight alpha,
+ * @crop_l/@crop_t/@crop_r/@crop_b are source-pixel crop edges trimmed
+ * before scaling, and @fade_in_us/@fade_out_us are audio fade lengths
+ * (dormant: consumed by Wave B envelopes, never by Wave A rendering).
+ * @keyframes is the Wave B per-property keyframe store — NULL in Wave
+ * A, an invariant every copy path enforces.
+ *
+ * The identity state (oe_clip_visual_identity) reproduces the
+ * pre-Phase-9 render exactly.
+ */
+typedef struct
+{
+  gint pos_x;
+  gint pos_y;
+  guint scale_permille;
+  gint rotation_cdeg;
+  guint8 opacity;
+  guint crop_l;
+  guint crop_t;
+  guint crop_r;
+  guint crop_b;
+  guint64 fade_in_us;
+  guint64 fade_out_us;
+  GArray *keyframes; /* NULL in Wave A: the store arrives in Wave B */
+} OeClipVisual;
+
+/**
  * OeClip: one non-destructive source-range placement on a track.
  * @position_us: sequence position (>= 0) of the clip's start.
  * @source_in_us: first source microsecond played (>= 0).
@@ -65,6 +97,9 @@ G_DECLARE_FINAL_TYPE (OeProject, oe_project, OE, PROJECT, GObject)
  *     included (a still's source range encodes screen duration).
  * @media_ref: file-stable media reference owned by the project — never
  *     a session asset id (those are transient and never serialize).
+ * @visual: owned picture geometry/opacity; deep-copied with the clip,
+ *     never aliased (Wave B keyframes included via the NULL-store
+ *     invariant enforced in Wave A).
  */
 typedef struct
 {
@@ -72,7 +107,48 @@ typedef struct
   gint64 source_in_us;
   gint64 source_out_us;
   guint media_ref;
+  OeClipVisual visual;
 } OeClip;
+
+/**
+ * oe_clip_visual_identity: the default state — zeroed position/crop,
+ * 1000 permille scale, 0 rotation, full opacity, no fades, no
+ * keyframes. Every OeClip starts here.
+ */
+OeClipVisual oe_clip_visual_identity (void);
+
+/**
+ * oe_clip_visual_clear: frees owned members and zeroes @visual (safe
+ * on a zeroed struct, like the model's other clear helpers).
+ */
+void oe_clip_visual_clear (OeClipVisual *visual);
+
+/**
+ * oe_clip_visual_copy: deep-copies @src into @dst, clearing @dst's
+ * owned members first. Wave A enforces the NULL keyframe-store
+ * invariant on both sides.
+ */
+void oe_clip_visual_copy (OeClipVisual *dst, const OeClipVisual *src);
+
+/**
+ * oe_clip_visual_equal: field equality; owned stores compared by the
+ * Wave A invariant (both NULL).
+ */
+gboolean oe_clip_visual_equal (const OeClipVisual *a, const OeClipVisual *b);
+
+/**
+ * oe_clip_visual_is_default: TRUE when @visual is exactly the identity
+ * state (the compositor's fast-path trigger).
+ */
+gboolean oe_clip_visual_is_default (const OeClipVisual *visual);
+
+/**
+ * oe_clip_visual_is_valid: domain check for the validated mutator and
+ * the persistence reader — scale in [1, 32000] permille, rotation in
+ * [-36000, 36000] centidegrees, opacity 0-255, non-negative crops and
+ * fades, NULL keyframe store.
+ */
+gboolean oe_clip_visual_is_valid (const OeClipVisual *visual);
 
 /**
  * OeTrackKind: the two parallel lane kinds of a sequence.
@@ -140,6 +216,9 @@ GQuark oe_project_error_quark (void);
  *     already taken.
  * @OE_PROJECT_ERROR_BAD_SIZE: a sequence width or height is out of
  *     domain (must be positive and even).
+ * @OE_PROJECT_ERROR_BAD_VISUAL: a clip visual is out of domain —
+ *     scale, rotation, opacity, crop, or fade beyond the documented
+ *     ranges (see oe_clip_visual_is_valid).
  */
 typedef enum
 {
@@ -150,6 +229,7 @@ typedef enum
   OE_PROJECT_ERROR_UNKNOWN_MEDIA,
   OE_PROJECT_ERROR_DUPLICATE_REF,
   OE_PROJECT_ERROR_BAD_SIZE,
+  OE_PROJECT_ERROR_BAD_VISUAL,
 } OeProjectError;
 
 /**
@@ -242,6 +322,18 @@ guint oe_project_get_clip_count (OeProject *project, guint track_index);
  * Returns: TRUE when both indices are in range.
  */
 gboolean oe_project_get_clip (OeProject *project, guint track_index, guint clip_index, OeClip *out);
+
+/**
+ * oe_project_set_clip_visual: the validated mutator for a clip's
+ * visual state. Rejects out-of-domain visuals with
+ * #OE_PROJECT_ERROR_BAD_VISUAL (and out-of-range indices with the
+ * usual typed errors) without touching the model; on success swaps in
+ * a deep copy and notifies the observer exactly once.
+ *
+ * Returns FALSE (with @error set) when the mutation was rejected.
+ */
+gboolean oe_project_set_clip_visual (OeProject *project, guint track_index, guint clip_index,
+                                     const OeClipVisual *visual, GError **error);
 
 /**
  * oe_project_add_track:

@@ -72,6 +72,32 @@ older file (it has none to reject) and a current reader never loses
 data it read (absence is normalized to defaults before the model is
 built).
 
+Each clip also carries a `visual` member (Phase 9 Wave A) following
+the same recipe: every writer emits it on every clip, and a reader
+backfills the identity visual when it is absent — a Phase 8 file
+loads unchanged and a Phase 9 file loads in a Phase 8 reader only by
+dropping the member, which is exactly what the version does NOT do
+(see below for why that is safe). The member is a closed object with
+integer tokens only:
+
+| `visual` member | Meaning | Identity |
+|---|---|---|
+| `pos-x`, `pos-y` | frame-pixel offsets from the centered anchor | 0 |
+| `scale-permille` | uniform scale, 1000 = 1.0× (never a float) | 1000 |
+| `rotation-cdeg` | rotation in 1/100 degree | 0 |
+| `opacity` | 0–255 straight-alpha layer opacity | 255 |
+| `crop-l/t/r/b` | crop insets in source pixels | 0 |
+| `fade-in-us`, `fade-out-us` | reserved for Wave B fades (0 in Wave A) | 0 |
+
+Wrong JSON types are `TYPE` (including float tokens where integers
+are required), out-of-range values are `VALUE`, and unknown or
+missing members inside `visual` are `UNKNOWN_MEMBER` / `MISSING` —
+the member list is closed like the rest of the schema. No version
+bump: a reader that predates `visual` never sees it, and a current
+reader normalizes absence to the identity before the model is built.
+Save-load-save is byte-identical because the writer's emission is
+canonical.
+
 ## Strictness: no silent partial loads
 
 Loading is strict and closed-schema. Any defect fails the whole load

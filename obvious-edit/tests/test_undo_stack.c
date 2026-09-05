@@ -240,10 +240,181 @@ test_undo_trim_inverse (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
   g_assert_cmpint (clip_at (fx, 0).source_out_us, ==, 3 * US);
 }
 
+/* Builds a sample stroke: a non-default visual, previewed twice, and
+ * handed to the caller as the stroke baseline. */
+static void
+visual_stroke_prepare (UndoFixture *fx, OeClipVisual *baseline_out)
+{
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 0, 0, 5 * US);
+
+  OeClipVisual baseline = oe_clip_visual_identity ();
+
+  baseline.pos_x = 40;
+  baseline.scale_permille = 1250;
+  baseline.opacity = 128;
+
+  /* Two preview mutations (no record): the drag's intermediate states. */
+  OeClipVisual first = baseline;
+
+  first.pos_x = 12;
+  g_assert_true (oe_project_set_clip_visual (fx->project, fx->track, 0, &first, NULL));
+
+  OeClipVisual second = first;
+
+  second.pos_x = 33;
+  second.rotation_cdeg = 900;
+  g_assert_true (oe_project_set_clip_visual (fx->project, fx->track, 0, &second, NULL));
+
+  /* Size 1: the insert. The two previews added nothing. */
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1);
+  *baseline_out = baseline;
+}
+
+static void
+test_undo_visual_inverse (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  OeClipVisual baseline;
+
+  visual_stroke_prepare (fx, &baseline);
+
+  OeClipVisual final = baseline;
+
+  final.pos_x = 33;
+  final.rotation_cdeg = 900;
+  final.opacity = 200;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_clip_visual_with_old (fx->project, fx->stack, fx->track, 0, &baseline,
+                                                   &final, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 2); /* insert + one visual stroke */
+
+  const OeUndoRecord *record = NULL;
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+  g_assert_cmpstr (record->label, ==, "Visual clip 0 on track 0");
+  g_assert_cmpuint (record->kind, ==, OE_UNDO_OP_VISUAL);
+
+  OeClip restored = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_visual_equal (&restored.visual, &baseline)); /* not the last preview */
+
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  restored = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_visual_equal (&restored.visual, &final));
+}
+
+static void
+test_undo_visual_stroke_one_record (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  OeClipVisual baseline;
+
+  visual_stroke_prepare (fx, &baseline);
+
+  /* A long stroke with many preview states still lands as ONE record. */
+  for (int pos = 5; pos < 30; pos += 7)
+    {
+      OeClipVisual preview = baseline;
+
+      preview.pos_x = pos;
+      g_assert_true (oe_project_set_clip_visual (fx->project, fx->track, 0, &preview, NULL));
+    }
+
+  OeClipVisual committed = baseline;
+
+  committed.pos_x = 28;
+  committed.crop_l = 4;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_clip_visual_with_old (fx->project, fx->stack, fx->track, 0, &baseline,
+                                                   &committed, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 2); /* insert + ONE visual stroke */
+
+  const OeUndoRecord *record = NULL;
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  OeClip restored = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_visual_equal (&restored.visual, &baseline));
+}
+
+static void
+test_undo_visual_zero_delta (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 0, 0, 5 * US);
+
+  OeClipVisual identity = oe_clip_visual_identity ();
+  GError *error = NULL;
+
+  /* A stroke that ends where it started mutates (idempotent) but
+   * leaves no history entry. */
+  g_assert_true (oe_edit_set_clip_visual_with_old (fx->project, fx->stack, fx->track, 0, &identity,
+                                                   &identity, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1); /* still just the insert */
+
+  /* The one-shot recorder also refuses to record a no-op. */
+  g_assert_true (oe_edit_set_clip_visual (fx->project, fx->stack, fx->track, 0, &identity, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1); /* unchanged */
+  g_assert_true (oe_undo_stack_can_undo (fx->stack));
+}
+
+static void
+test_undo_visual_plain_baseline (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 0, 0, 5 * US);
+
+  /* One-shot numeric entry: the recorder captures the visual
+   * immediately before the mutation as the undo baseline. */
+  OeClipVisual visual = oe_clip_visual_identity ();
+
+  visual.scale_permille = 2500;
+  visual.opacity = 64;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_edit_set_clip_visual (fx->project, fx->stack, fx->track, 0, &visual, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 2); /* insert + one visual record */
+
+  OeClip after = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_visual_equal (&after.visual, &visual));
+
+  const OeUndoRecord *record = NULL;
+  OeClipVisual identity = oe_clip_visual_identity ();
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  after = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_visual_equal (&after.visual, &identity));
+
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  after = clip_at (fx, 0);
+
+  g_assert_true (oe_clip_visual_equal (&after.visual, &visual));
+}
+
 /* ------------------------------------------------------------------ */
 /* Typed rejection at record time.                                     */
 /* ------------------------------------------------------------------ */
-
 static void
 test_undo_record_rejection (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
 {
@@ -669,6 +840,10 @@ main (int argc, char *argv[])
   ADD_UNDO_TEST ("/undo/delete-inverse", test_undo_delete_inverse);
   ADD_UNDO_TEST ("/undo/move-inverse", test_undo_move_inverse);
   ADD_UNDO_TEST ("/undo/trim-inverse", test_undo_trim_inverse);
+  ADD_UNDO_TEST ("/undo/visual-inverse", test_undo_visual_inverse);
+  ADD_UNDO_TEST ("/undo/visual-stroke-one-record", test_undo_visual_stroke_one_record);
+  ADD_UNDO_TEST ("/undo/visual-zero-delta", test_undo_visual_zero_delta);
+  ADD_UNDO_TEST ("/undo/visual-plain-baseline", test_undo_visual_plain_baseline);
   ADD_UNDO_TEST ("/undo/record-rejection", test_undo_record_rejection);
   ADD_UNDO_TEST ("/undo/interleaved-roundtrip", test_undo_interleaved_roundtrip);
   ADD_UNDO_TEST ("/undo/depth-eviction", test_undo_depth_eviction);

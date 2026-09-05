@@ -26,6 +26,43 @@ playhead, or marker within a tolerance.
 **Ripple edit** — see Trim and Ripple; the combination that closes gaps
 automatically after removing material.
 
+## Compositing terms (Phase 9)
+
+**Compositing** — combining every covering video track's clip into one
+frame. Track order IS the layering order: the compositor blends
+ascending, bottom track first, so the highest-index track wins where
+clips overlap.
+
+**Visual properties** — the per-clip transform state (`OeClipVisual`):
+position offsets, uniform scale, rotation, opacity, and crop. Owned by
+the clip, deep-copied with it, and edited only through the validated
+mutator.
+
+**Identity visual** — the all-default visual: position (0, 0), scale
+1000‰, rotation 0, opacity 255, no crop. A clip with the identity
+visual renders exactly as a pre-Phase-9 clip did; "zero-value equals
+today's behavior" is the model's compatibility contract.
+
+**Permille scale** — uniform scale expressed in thousandths (1000 =
+1.0×) so the model and the JSON stay integer-only: `scale-permille:
+1250`, never a float like 1.25.
+
+**Centidegree** — rotation in hundredths of a degree (`rotation-cdeg:
+900` = 9.0°), keeping angles exact in integers.
+
+**Src-over** — the straight, non-premultiplied alpha blend the
+compositor uses: `out = (src·a + dst·(255−a)) / 255` per channel,
+computed in integers and exact to within ±1 of the formula.
+
+**Fast path** — the single-covering-clip, identity-visual render that
+goes through the untouched Phase 8 pipeline (box-fit + centered copy)
+byte-identically. The straight-cut parity test pins it.
+
+**Stroke** — one pointer drag from press to release. A stroke previews
+through unrecorded model mutations and commits exactly ONE undo
+record carrying the visual captured at the stroke's first change (the
+stroke baseline), never the last preview state.
+
 ## Media terms
 
 **Source media** — a file (video, audio, or image) referenced by the

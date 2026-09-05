@@ -384,6 +384,83 @@ oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
   return TRUE;
 }
 
+/* The visual recorders share the stroke assembly: mutate through the
+ * validated mutator, then record ONE VISUAL record restoring the
+ * stroke baseline. A zero-delta stroke mutates the model (idempotent)
+ * but records nothing — history never carries a no-op step. */
+static gboolean
+record_visual_stroke (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
+                      const OeClipVisual *old_visual, const OeClipVisual *new_visual,
+                      GError **error)
+{
+  OeClip before;
+
+  if (stack == NULL)
+    return oe_project_set_clip_visual (project, track_index, clip_index, new_visual, error);
+
+  if (!oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  if (!oe_project_set_clip_visual (project, track_index, clip_index, new_visual, error))
+    return FALSE;
+
+  if (oe_clip_visual_equal (old_visual, new_visual))
+    return TRUE; /* zero-delta stroke: the model already holds the state */
+
+  OeUndoRecord *rec = record_new (
+      OE_UNDO_OP_VISUAL, g_strdup_printf ("Visual clip %u on track %u", clip_index, track_index),
+      track_index, clip_index);
+
+  rec->clip = before;
+  /* The undo payload is the STROKE baseline, not the project state at
+   * record time — a previewed stroke leaves the model at its last
+   * preview, and undo must restore where the stroke began. */
+  rec->clip.visual = *old_visual;
+  rec->new_visual = *new_visual; /* Wave A: no owned memory, value copy is deep */
+  stack_push (stack, rec);
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_clip_visual (OeProject *project, OeUndoStack *stack, guint track_index,
+                         guint clip_index, const OeClipVisual *visual, GError **error)
+{
+  g_return_val_if_fail (visual != NULL, FALSE);
+
+  OeClip before;
+
+  if (stack != NULL && !oe_project_get_clip (project, track_index, clip_index, &before))
+    return FALSE;
+
+  if (!oe_project_set_clip_visual (project, track_index, clip_index, visual, error))
+    return FALSE;
+
+  if (stack != NULL && !oe_clip_visual_equal (&before.visual, visual))
+    {
+      OeUndoRecord *rec
+          = record_new (OE_UNDO_OP_VISUAL,
+                        g_strdup_printf ("Visual clip %u on track %u", clip_index, track_index),
+                        track_index, clip_index);
+
+      rec->clip = before;
+      rec->new_visual = *visual;
+      stack_push (stack, rec);
+    }
+
+  return TRUE;
+}
+
+gboolean
+oe_edit_set_clip_visual_with_old (OeProject *project, OeUndoStack *stack, guint track_index,
+                                  guint clip_index, const OeClipVisual *old_visual,
+                                  const OeClipVisual *new_visual, GError **error)
+{
+  g_return_val_if_fail (old_visual != NULL && new_visual != NULL, FALSE);
+
+  return record_visual_stroke (project, stack, track_index, clip_index, old_visual, new_visual,
+                               error);
+}
+
 /* ------------------------------------------------------------------ */
 /* History application: inverse replay through the model mutators.     */
 /* ------------------------------------------------------------------ */
@@ -457,6 +534,9 @@ apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
     case OE_UNDO_OP_TRIM:
       return oe_project_trim_clip (project, rec->track_index, rec->clip_index, rec->old_a_us,
                                    rec->old_b_us, error);
+    case OE_UNDO_OP_VISUAL:
+      return oe_project_set_clip_visual (project, rec->track_index, rec->clip_index,
+                                         &rec->clip.visual, error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_undo (project, rec, error);
     }
@@ -481,6 +561,9 @@ apply_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
     case OE_UNDO_OP_TRIM:
       return oe_project_trim_clip (project, rec->track_index, rec->clip_index, rec->new_a_us,
                                    rec->new_b_us, error);
+    case OE_UNDO_OP_VISUAL:
+      return oe_project_set_clip_visual (project, rec->track_index, rec->clip_index,
+                                         &rec->new_visual, error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_redo (project, rec, error);
     }

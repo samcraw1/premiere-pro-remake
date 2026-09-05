@@ -1152,6 +1152,288 @@ test_atomic_failure_unwritable_dir (OeFixtures *fx, gconstpointer user_data G_GN
 /* Suite                                                               */
 /* ------------------------------------------------------------------ */
 
+/* Channel means over a rectangle — the window-mean idiom. */
+static void
+window_mean (const guint8 *bgra, int w, int h, int x0, int y0, int x1, int y1, double out[3])
+{
+  glong r = 0, g = 0, b = 0;
+
+  g_assert_cmpint (x1, <=, w);
+  g_assert_cmpint (y1, <=, h);
+
+  for (int y = y0; y < y1; y++)
+    for (int x = x0; x < x1; x++)
+      {
+        const guint8 *px = bgra + ((gsize) y * w + x) * 4;
+
+        r += px[2];
+        g += px[1];
+        b += px[0];
+      }
+
+  const int n = (x1 - x0) * (y1 - y0);
+
+  out[0] = (double) r / n;
+  out[1] = (double) g / n;
+  out[2] = (double) b / n;
+}
+
+/* Channel dominance over a rectangle: assert_dominant restricted to a
+ * sub-window, for per-region seam verdicts. */
+static void
+assert_rect_dominant (const guint8 *bgra, int w, int h, int x0, int y0, int x1, int y1,
+                      const gchar *what, guint8 r, guint8 g, guint8 b)
+{
+  double mean[3];
+
+  window_mean (bgra, w, h, x0, y0, x1, y1, mean);
+  g_assert_cmpstr (what, !=, NULL);
+
+  if (r >= g && r >= b)
+    {
+      g_assert_cmpfloat (mean[0], >, mean[1]);
+      g_assert_cmpfloat (mean[0], >, mean[2]);
+    }
+  else if (g >= r && g >= b)
+    {
+      g_assert_cmpfloat (mean[1], >, mean[0]);
+      g_assert_cmpfloat (mean[1], >, mean[2]);
+    }
+  else
+    {
+      g_assert_cmpfloat (mean[2], >, mean[0]);
+      g_assert_cmpfloat (mean[2], >, mean[1]);
+    }
+}
+
+/* /export/blend-unit: the pure channel blend is straight integer
+ * src-over and stays within ±1 of the exact alpha formula. */
+static void
+test_blend_unit (void)
+{
+  static const struct
+  {
+    guint8 dst, src, a;
+  } cases[] = {
+    { 0x20, 0xe0, 128 },                  /* red over blue, half opacity: the spec case */
+    { 0xe0, 0x20, 128 }, { 0, 255, 255 }, /* full opacity: passthrough of the source */
+    { 255, 0, 0 },                        /* zero opacity: passthrough of the backdrop */
+    { 0, 255, 1 },                        /* one step of transparency */
+    { 255, 0, 254 },     { 10, 245, 64 }, { 245, 10, 64 }, { 128, 128, 128 },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      const double exact = (cases[i].src * cases[i].a + cases[i].dst * (255 - cases[i].a)) / 255.0;
+      const int got = oe_render_blend_channel (cases[i].dst, cases[i].src, cases[i].a);
+
+      g_assert_cmpint (got, >=, (int) exact - 1);
+      g_assert_cmpint (got, <=, (int) exact + 1);
+      g_assert_cmpint (got, >=, 0);
+      g_assert_cmpint (got, <=, 255);
+    }
+
+  /* Monotone in alpha for fixed endpoints: more opacity moves the
+   * result toward the source, never past it. */
+  int prev = 0;
+
+  for (int a = 0; a <= 255; a++)
+    {
+      const int got = oe_render_blend_channel (0, 255, (guint8) a);
+
+      g_assert_cmpint (got, >=, prev);
+      prev = got;
+    }
+}
+
+/* Two video tracks over the same time window: red beneath green. */
+static OeProject *
+build_two_layer_video (const OeFixtures *fx, gchar **red_path, gchar **green_path)
+{
+  write_solid_avi (fx, "red.avi", 0xe0, 0x20, 0x20, TEST_FPS / 2);
+  write_solid_avi (fx, "green.avi", 0x20, 0xe0, 0x20, TEST_FPS / 2);
+
+  *red_path = g_build_filename (fx->dir, "red.avi", NULL);
+  *green_path = g_build_filename (fx->dir, "green.avi", NULL);
+
+  OeProject *project = new_project_25fps ();
+  const guint red_track = oe_project_add_track (project, OE_TRACK_VIDEO);
+  const guint green_track = oe_project_add_track (project, OE_TRACK_VIDEO);
+  const guint red = add_media (project, *red_path);
+  const guint green = add_media (project, *green_path);
+
+  insert_clip (project, red_track, red, 0, 480000);
+  insert_clip (project, green_track, green, 0, 480000);
+  return project;
+}
+
+/* /export/two-layer-seam: track order decides the layering; a
+ * transformed upper clip wins only inside its footprint; opacity-0
+ * layers skip out; half opacity blends to the exact src-over value. */
+static void
+test_two_layer_seam (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *green;
+  OeProject *project = build_two_layer_video (fx, &red, &green);
+
+  OeSequence seq = { 0 }; /* zeroed: get_sequence overwrites wholesale */
+
+  oe_project_get_sequence (project, &seq);
+
+  OeRenderSource source = { &seq, test_resolve, project };
+  GError *error = NULL;
+
+  /* Default transforms: the topmost covering clip wins everywhere. */
+  guint8 *frame = oe_render_frame_at (&source, 240000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (frame);
+  assert_dominant (frame, TEST_W, TEST_H, "topmost wins under default transforms", 0x20, 0xe0,
+                   0x20);
+  g_free (frame);
+
+  /* A half-frame upper clip (scale 500, centered): green inside its
+   * bounds, fallthrough to the lower track outside them. Each visual
+   * edit must be re-snapshotted into the render source — the sequence
+   * copy is deep, like the monitor's session snapshot. */
+  OeClipVisual v = oe_clip_visual_identity ();
+
+  v.scale_permille = 500;
+  g_assert_true (oe_project_set_clip_visual (project, 1, 0, &v, NULL));
+  oe_sequence_clear (&seq);
+  oe_project_get_sequence (project, &seq);
+
+  frame = oe_render_frame_at (&source, 240000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (frame);
+  assert_rect_dominant (frame, TEST_W, TEST_H, 60, 40, 100, 80, "inside the scaled clip is green",
+                        0x20, 0xe0, 0x20);
+  assert_rect_dominant (frame, TEST_W, TEST_H, 4, 4, 20, 20, "outside it falls through to red",
+                        0xe0, 0x20, 0x20);
+  g_free (frame);
+
+  /* Opacity 0 skips the layer out of the blend entirely. */
+  v.scale_permille = 1000;
+  v.opacity = 0;
+  g_assert_true (oe_project_set_clip_visual (project, 1, 0, &v, NULL));
+  oe_sequence_clear (&seq);
+  oe_project_get_sequence (project, &seq);
+
+  frame = oe_render_frame_at (&source, 240000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (frame);
+  assert_dominant (frame, TEST_W, TEST_H, "opacity-0 layer skips out", 0xe0, 0x20, 0x20);
+  g_free (frame);
+
+  /* Half opacity: the interior blends green over red to ≈ (128, 128, 32). */
+  v.opacity = 128;
+  g_assert_true (oe_project_set_clip_visual (project, 1, 0, &v, NULL));
+  oe_sequence_clear (&seq);
+  oe_project_get_sequence (project, &seq);
+
+  frame = oe_render_frame_at (&source, 240000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (frame);
+
+  double mean[3];
+
+  window_mean (frame, TEST_W, TEST_H, 60, 40, 100, 80, mean);
+  g_assert_cmpfloat (fabs (mean[0] - 128.0), <=, 4.0);
+  g_assert_cmpfloat (fabs (mean[1] - 128.0), <=, 4.0);
+  g_assert_cmpfloat (fabs (mean[2] - 32.0), <=, 4.0);
+  g_free (frame);
+
+  oe_sequence_clear (&seq);
+  g_object_unref (project);
+  g_free (red);
+  g_free (green);
+}
+
+/* /export/parity-two-layer: the exported file decodes back to what the
+ * shared seam renders — one compositor, equal canvas sizes, medium
+ * preset. yuv420p chroma subsampling plus x264 quantization make
+ * per-pixel equality impossible; 8x8 block means bound |Δ| ≤ 8 per
+ * channel (the documented export tolerance) while the dominant-color
+ * class must agree with the seam exactly. */
+static void
+test_parity_two_layer (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  gchar *red, *green;
+  OeProject *project = build_two_layer_video (fx, &red, &green);
+
+  /* A transformed, translucent upper clip: geometry, blending, and
+   * fallthrough all in one frame. */
+  OeClipVisual v = oe_clip_visual_identity ();
+
+  v.scale_permille = 625;
+  v.pos_x = 20;
+  v.pos_y = 10;
+  v.opacity = 200;
+  g_assert_true (oe_project_set_clip_visual (project, 1, 0, &v, NULL));
+
+  OeSequence seq = { 0 }; /* zeroed: get_sequence overwrites wholesale */
+
+  oe_project_get_sequence (project, &seq);
+
+  OeRenderSource source = { &seq, test_resolve, project };
+
+  /* What the seam renders at the mid-clip instant. */
+  GError *error = NULL;
+  guint8 *rendered = oe_render_frame_at (&source, 240000, TEST_W, TEST_H, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (rendered);
+
+  /* What the export put in the file at the same instant (frame 6 of
+   * 25 fps = 240 ms, mid-stream decoded like the other parity tests). */
+  gchar *dest = g_build_filename (fx->dir, "out.mp4", NULL);
+
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  int w = 0, h = 0;
+  guint8 *decoded = decode_video_frame_bgra (dest, 6, &w, &h);
+
+  g_assert_nonnull (decoded);
+  g_assert_cmpint (w, ==, TEST_W);
+  g_assert_cmpint (h, ==, TEST_H);
+
+  /* Dominant class agrees per region through the seam. */
+  assert_rect_dominant (rendered, TEST_W, TEST_H, 40, 30, 100, 70, "render center is green", 0x20,
+                        0xe0, 0x20);
+  assert_rect_dominant (decoded, TEST_W, TEST_H, 40, 30, 100, 70, "export center is green", 0x20,
+                        0xe0, 0x20);
+  assert_rect_dominant (rendered, TEST_W, TEST_H, 4, 4, 16, 16, "render corner is red", 0xe0, 0x20,
+                        0x20);
+  assert_rect_dominant (decoded, TEST_W, TEST_H, 4, 4, 16, 16, "export corner is red", 0xe0, 0x20,
+                        0x20);
+
+  /* Block-mean parity: |Δ| ≤ 8 per channel in every 8x8 block. */
+  const int BS = 8;
+
+  for (int by = 0; by < TEST_H / BS; by++)
+    for (int bx = 0; bx < TEST_W / BS; bx++)
+      {
+        double rm[3], dm[3];
+
+        window_mean (rendered, TEST_W, TEST_H, bx * BS, by * BS, (bx + 1) * BS, (by + 1) * BS, rm);
+        window_mean (decoded, TEST_W, TEST_H, bx * BS, by * BS, (bx + 1) * BS, (by + 1) * BS, dm);
+        for (int c = 0; c < 3; c++)
+          g_assert_cmpfloat (fabs (rm[c] - dm[c]), <=, 8.0);
+      }
+
+  g_free (rendered);
+  g_free (decoded);
+  g_free (dest);
+  oe_sequence_clear (&seq);
+  g_object_unref (project);
+  g_free (red);
+  g_free (green);
+}
 int
 main (int argc, char *argv[])
 {
@@ -1162,6 +1444,9 @@ main (int argc, char *argv[])
 
   OE_ADD ("/export/frame-grid", test_frame_grid);
   OE_ADD ("/export/parity-straight-cut", test_parity_straight_cut);
+  g_test_add_func ("/export/blend-unit", test_blend_unit);
+  OE_ADD ("/export/two-layer-seam", test_two_layer_seam);
+  OE_ADD ("/export/parity-two-layer", test_parity_two_layer);
   OE_ADD ("/export/container-truth", test_container_truth);
   OE_ADD ("/export/content-round-trip", test_content_round_trip);
   OE_ADD ("/export/mixdown-sums", test_mixdown_sums);
