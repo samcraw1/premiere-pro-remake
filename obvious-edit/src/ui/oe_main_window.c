@@ -142,7 +142,7 @@ struct _OeMainWindow
    * on the timeline automatically (headless runs cannot click the bin). */
   gboolean insert_all_pending;
 
-  GtkWidget *inspector_stack; /* "empty" | "media" | "clip" */
+  GtkWidget *inspector_stack; /* "empty" | "media" | "clip" | "mixer" */
   GtkWidget *inspector_media; /* grid rebuilt per selection */
 
   /* Phase 9: the clip page — visual-property controls bound to the
@@ -1331,9 +1331,14 @@ populate_inspector (OeMainWindow *self)
       return;
     }
 
-  gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "empty");
+  /* Nothing selected: the mixer page is the resting inspector when the
+   * project has audio tracks (rows kept current by the refresh paths).
+   * A later selection swaps the clip or media page back in. */
+  if (self->mixer_row_count > 0)
+    gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "mixer");
+  else
+    gtk_stack_set_visible_child_name (GTK_STACK (self->inspector_stack), "empty");
 }
-
 static void
 on_bin_selection_changed (OeMediaBin *bin G_GNUC_UNUSED, gpointer user_data)
 {
