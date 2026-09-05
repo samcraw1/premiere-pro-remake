@@ -24,18 +24,45 @@ The document root has exactly one member. Its value is the project:
       { "ref": 2, "path": "/media/theme.png" }
     ],
     "tracks": [
-      {
-        "kind": "video",
-        "clips": [
-          {
-            "media-ref": 1,
-            "position-us": 2002000,
-            "source-in-us": 0,
-            "source-out-us": 5000000
+      { "kind": "video", "clips": [
+        {
+          "media-ref": 1,
+          "position-us": 0,
+          "source-in-us": 0,
+          "source-out-us": 5000000,
+          "visual": {
+            "pos-x": 24,
+            "pos-y": 0,
+            "scale-permille": 1250,
+            "rotation-cdeg": 0,
+            "opacity": 255,
+            "crop-l": 0,
+            "crop-t": 0,
+            "crop-r": 0,
+            "crop-b": 0,
+            "fade-in-us": 120000,
+            "fade-out-us": 0
+          },
+          "keyframes": {
+            "opacity": [
+              { "time-us": 0, "value": 128 }
+            ]
+          },
+          "audio": {
+            "gain": 896,
+            "pan": 384
           }
-        ]
-      },
-      { "kind": "audio", "clips": [] }
+        }
+      ],
+        "transitions": [] },
+      { "kind": "audio", "clips": [],
+        "transitions": [],
+        "audio": {
+          "volume": 1536,
+          "pan": 640,
+          "mute": 0,
+          "solo": 1
+        } }
     ]
   }
 }
@@ -118,6 +145,37 @@ Wrong JSON types are `TYPE`, out-of-domain values or times are
 `UNKNOWN_MEMBER`. No version bump: a reader that predates these
 members never sees them, and a current reader normalizes absence to
 "none" before the model is built. Save-load-save is byte-identical
+because the writer's emission is canonical.
+
+Each clip carries an `audio` member and each audio track an `audio`
+member (Phase 10 Wave A), following the same recipe: every writer
+emits the clip member on every clip and the track member on every
+AUDIO track, and a reader backfills the identity when a member is
+absent — a Phase 9 file loads unchanged. Video tracks never carry
+audio state (the writer emits no member for them), so a video track
+with an `audio` member is an error.
+
+| `audio` member (clip) | Meaning | Identity |
+|---|---|---|
+| `gain` | fixed-point gain on the 1024 scale (1024 = unity, 2048 = +6 dB, 0 = silence), range 0–2048 | 1024 |
+| `pan` | fixed-point position on the 1024 scale (512 = center, 0 = hard left, 1024 = hard right), range 0–1024 | 512 |
+
+| `audio` member (audio track) | Meaning | Identity |
+|---|---|---|
+| `volume` | fixed-point track volume on the 1024 scale, range 0–2048 | 1024 |
+| `pan` | fixed-point track pan on the 1024 scale, range 0–1024 | 512 |
+| `mute` | 0 or 1; a muted track contributes silence | 0 |
+| `solo` | 0 or 1; any soloed track silences every non-soloed track | 0 |
+
+The member is a closed object with integer tokens only. Wrong JSON
+types are `TYPE` (including float tokens where integers are
+required), out-of-range values are `VALUE`, and unknown or missing
+members inside `audio` are `UNKNOWN_MEMBER` / `MISSING`. The gain and
+pan pair composes with the track volume and pan pair multiplicatively
+in the mixdown; the values themselves are plain fixed-point integers,
+never floats or decibels. No version bump: a reader that predates
+`audio` never sees it, and a current reader normalizes absence to the
+identity before the model is built. Save-load-save is byte-identical
 because the writer's emission is canonical.
 
 ## Strictness: no silent partial loads
