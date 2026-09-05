@@ -124,6 +124,64 @@ append_clip_visual (GString *out, const OeClipVisual *v)
   g_string_append (out, "\n          }");
 }
 
+/* The clip-level keyframes member (Phase 9 Wave B): written always —
+ * an empty object when the store is absent — so a current writer's
+ * output is stable and save-load-save is byte-identical. Absent on
+ * read backfills NONE (an absent member means no keyframes). The
+ * store's (property, time) sort order makes the output deterministic;
+ * integer tokens only. */
+static void
+append_clip_keyframes (GString *out, const OeClipVisual *v)
+{
+  g_string_append (out, ",\n          \"keyframes\": {");
+
+  if (v->keyframes == NULL || v->keyframes->len == 0)
+    {
+      g_string_append (out, "}");
+      return;
+    }
+
+  g_string_append (out, "\n");
+
+  const GArray *store = v->keyframes;
+  gboolean first_property = TRUE;
+  guint run_start = 0;
+
+  while (run_start < store->len)
+    {
+      const OeKeyframe *first = &g_array_index (store, OeKeyframe, run_start);
+      guint run_end = run_start + 1;
+
+      while (run_end < store->len
+             && g_array_index (store, OeKeyframe, run_end).property == first->property)
+        run_end++;
+
+      if (!first_property)
+        g_string_append (out, ",\n");
+      first_property = FALSE;
+
+      g_string_append_printf (out, "            \"%s\": [",
+                              oe_keyframe_property_get_name (first->property));
+
+      for (guint k = run_start; k < run_end; k++)
+        {
+          const OeKeyframe *key = &g_array_index (store, OeKeyframe, k);
+
+          g_string_append (out, k > run_start ? ",\n" : "\n");
+          g_string_append (out, "              { \"time-us\": ");
+          append_int (out, key->time_us);
+          g_string_append (out, ", \"value\": ");
+          append_int (out, key->value);
+          g_string_append (out, " }");
+        }
+
+      g_string_append (out, run_end > run_start ? "\n            ]" : "]");
+      run_start = run_end;
+    }
+
+  g_string_append (out, "\n          }");
+}
+
 static gchar *
 serialize_project (OeProject *project)
 {
@@ -197,11 +255,42 @@ serialize_project (OeProject *project)
           g_string_append (out, ",\n          \"source-out-us\": ");
           append_int (out, clip->source_out_us);
           append_clip_visual (out, &clip->visual);
+          append_clip_keyframes (out, &clip->visual);
           g_string_append (out, "\n        }");
         }
       if (track->clips->len > 0)
         g_string_append (out, "\n      ");
-      g_string_append (out, "] }");
+      g_string_append (out, "]");
+
+      /* Track-level transitions (Phase 9 Wave B): written always, an
+       * empty array when none; the sequence-level list is filtered to
+       * this track. */
+      g_string_append (out, ",\n        \"transitions\": [");
+
+      guint track_transition_count = 0;
+
+      for (guint tr = 0; tr < seq.transitions->len; tr++)
+        {
+          const OeTransition *transition = g_ptr_array_index (seq.transitions, tr);
+
+          if (transition->track_index != t)
+            continue;
+
+          g_string_append (out, track_transition_count > 0 ? ",\n" : "\n");
+          g_string_append (out, "          { \"at-us\": ");
+          append_int (out, transition->at_us);
+          g_string_append (out, ", \"duration-us\": ");
+          append_int (out, transition->duration_us);
+          g_string_append_printf (out, ", \"kind\": \"%s\" }",
+                                  oe_transition_kind_get_name (transition->kind));
+          track_transition_count++;
+        }
+
+      if (track_transition_count > 0)
+        g_string_append (out, "\n        ");
+      g_string_append (out, "]");
+
+      g_string_append (out, " }");
     }
   if (seq.tracks->len > 0)
     g_string_append (out, "\n    ");
@@ -337,7 +426,8 @@ typedef struct
 typedef struct
 {
   OeTrackKind kind;
-  GPtrArray *clips; /* ClipEntry* */
+  GPtrArray *clips;    /* ClipEntry* */
+  GArray *transitions; /* OeTransition values, file order */
 } TrackEntry;
 
 static ClipEntry *
@@ -357,13 +447,25 @@ clip_entry_new (gint64 position_us, gint64 source_in_us, gint64 source_out_us, g
   return clip;
 }
 
+/* Clip entries own memory now: the parsed visual may carry a
+ * keyframe store. */
+static void
+clip_entry_free (gpointer data)
+{
+  ClipEntry *clip = data;
+
+  oe_clip_visual_clear (&clip->visual);
+  g_free (clip);
+}
+
 static TrackEntry *
 track_entry_new (OeTrackKind kind)
 {
   TrackEntry *track = g_new0 (TrackEntry, 1);
 
   track->kind = kind;
-  track->clips = g_ptr_array_new_with_free_func (g_free);
+  track->clips = g_ptr_array_new_with_free_func (clip_entry_free);
+  track->transitions = g_array_new (FALSE, FALSE, sizeof (OeTransition));
   return track;
 }
 
@@ -373,6 +475,7 @@ track_entry_free (gpointer data)
   TrackEntry *track = data;
 
   g_clear_pointer (&track->clips, g_ptr_array_unref);
+  g_clear_pointer (&track->transitions, g_array_unref);
   g_free (track);
 }
 
@@ -655,12 +758,127 @@ parse_clip_visual (JsonNode *node, const gchar *where, OeClipVisual *visual, GEr
   return TRUE;
 }
 
+/* The optional clip "keyframes" member (Phase 9 Wave B). Absent
+ * means none — their absence means none (the width/height backfill
+ * recipe at clip level). Present means strict: an object whose closed
+ * member set is the keyframeable property names; each value is an
+ * array of {"time-us", "value"} objects — integer tokens only, times
+ * non-negative, values inside the property's domain. Duplicate
+ * (property, time) entries collapse through the sorted insert and the
+ * store stays sorted on construction, so a hand-written unsorted or
+ * duplicated array loads to exactly the bytes the writer emits. */
+static gboolean
+parse_clip_keyframes (JsonNode *node, const gchar *where, OeClipVisual *visual, GError **error)
+{
+  static const gchar *const members[]
+      = { "opacity", "pos-x", "pos-y", "scale-permille", "rotation-cdeg" };
+  static const gchar *const entry_members[] = { "time-us", "value" };
+
+  if (!JSON_NODE_HOLDS_OBJECT (node))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                   "%s.keyframes: must be an object", where);
+      return FALSE;
+    }
+
+  JsonObject *obj = json_node_get_object (node);
+  gchar *kf_where = g_strdup_printf ("%s.keyframes", where);
+  GArray *store = g_array_new (FALSE, FALSE, sizeof (OeKeyframe));
+
+  if (!check_members (obj, members, G_N_ELEMENTS (members), kf_where, error))
+    goto fail;
+
+  for (guint p = 0; p < G_N_ELEMENTS (members); p++)
+    {
+      JsonNode *prop_node = json_object_get_member (obj, members[p]);
+
+      if (prop_node == NULL)
+        continue;
+
+      if (!JSON_NODE_HOLDS_ARRAY (prop_node))
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                       "%s: %s must be an array", kf_where, members[p]);
+          goto fail;
+        }
+
+      OeKeyframeProperty property;
+
+      g_assert (oe_keyframe_property_parse (members[p], &property));
+
+      JsonArray *entries = json_node_get_array (prop_node);
+
+      for (guint e = 0; e < json_array_get_length (entries); e++)
+        {
+          gchar *entry_where = g_strdup_printf ("%s: %s[%u]", kf_where, members[p], e);
+          JsonNode *entry_node = json_array_get_element (entries, e);
+          JsonObject *entry = NULL;
+          JsonNode *time_node = NULL;
+          JsonNode *value_node = NULL;
+          gint64 time_us = 0;
+          gint64 value = 0;
+
+          if (!JSON_NODE_HOLDS_OBJECT (entry_node))
+            {
+              g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                           "%s: must be an object", entry_where);
+              goto entry_fail;
+            }
+
+          entry = json_node_get_object (entry_node);
+
+          if (!check_members (entry, entry_members, G_N_ELEMENTS (entry_members), entry_where,
+                              error)
+              || !require_node (entry, "time-us", JSON_NODE_VALUE, entry_where, &time_node, error)
+              || !require_node (entry, "value", JSON_NODE_VALUE, entry_where, &value_node, error)
+              || !node_get_int (time_node, entry_where, "time-us", &time_us, error)
+              || !node_get_int (value_node, entry_where, "value", &value, error))
+            goto entry_fail;
+
+          if (time_us < 0 || value < G_MININT32 || value > G_MAXINT32
+              || !oe_keyframe_value_in_domain (property, (gint32) value))
+            {
+              g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                           "%s: time-us %lld / value %lld is out of domain for %s", entry_where,
+                           (long long) time_us, (long long) value, members[p]);
+              goto entry_fail;
+            }
+
+          {
+            OeKeyframe key = { property, time_us, (gint32) value };
+
+            oe_keyframes_insert (store, key);
+          }
+
+          g_free (entry_where);
+          continue;
+
+        entry_fail:
+          g_free (entry_where);
+          goto fail;
+        }
+    }
+
+  if (store->len > 0)
+    visual->keyframes = store;
+  else
+    g_array_unref (store);
+
+  g_free (kf_where);
+  return TRUE;
+
+fail:
+  g_array_unref (store);
+  g_free (kf_where);
+  return FALSE;
+}
+
 static gboolean
 parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEntry **out,
             GError **error)
 {
   static const gchar *const members[]
-      = { "media-ref", "position-us", "source-in-us", "source-out-us", "visual" };
+      = { "media-ref", "position-us", "source-in-us", "source-out-us", "visual", "keyframes" };
 
   JsonNode *media_ref_node = NULL;
   JsonNode *position_node = NULL;
@@ -756,7 +974,104 @@ parse_clip (JsonObject *obj, const gchar *where, const GPtrArray *media, ClipEnt
   if (visual_node != NULL && !parse_clip_visual (visual_node, where, &visual, error))
     return FALSE;
 
+  JsonNode *keyframes_node = json_object_get_member (obj, "keyframes");
+
+  if (keyframes_node != NULL && !parse_clip_keyframes (keyframes_node, where, &visual, error))
+    return FALSE;
+
   *out = clip_entry_new (position_us, source_in_us, source_out_us, (guint) media_ref, &visual);
+  return TRUE;
+}
+
+/* The optional track "transitions" member (Phase 9 Wave B). Absent
+ * means none. Present means strict: an array of {"at-us",
+ * "duration-us", "kind"} objects — integer tokens only, positive
+ * times, a closed kind-name set. Boundary placement and coverage are
+ * validated when the load applies each entry through the validated
+ * mutator, exactly like a UI edit. */
+static gboolean
+parse_track_transitions (JsonNode *node, const gchar *where, GArray *transitions, GError **error)
+{
+  static const gchar *const members[] = { "at-us", "duration-us", "kind" };
+
+  if (!JSON_NODE_HOLDS_ARRAY (node))
+    {
+      g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                   "%s.transitions: must be an array", where);
+      return FALSE;
+    }
+
+  JsonArray *array = json_node_get_array (node);
+
+  for (guint i = 0; i < json_array_get_length (array); i++)
+    {
+      gchar *t_where = g_strdup_printf ("%s.transitions[%u]", where, i);
+      JsonNode *t_node = json_array_get_element (array, i);
+      JsonObject *t_obj = NULL;
+      JsonNode *at_node = NULL;
+      JsonNode *dur_node = NULL;
+      JsonNode *kind_node = NULL;
+      gint64 at_us = 0;
+      gint64 duration_us = 0;
+      const gchar *kind = NULL;
+      gboolean ok = FALSE;
+
+      if (!JSON_NODE_HOLDS_OBJECT (t_node))
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_TYPE,
+                       "%s: must be an object", t_where);
+          goto t_out;
+        }
+
+      t_obj = json_node_get_object (t_node);
+
+      if (!check_members (t_obj, members, G_N_ELEMENTS (members), t_where, error)
+          || !require_node (t_obj, "at-us", JSON_NODE_VALUE, t_where, &at_node, error)
+          || !require_node (t_obj, "duration-us", JSON_NODE_VALUE, t_where, &dur_node, error)
+          || !require_node (t_obj, "kind", JSON_NODE_VALUE, t_where, &kind_node, error)
+          || !node_get_int (at_node, t_where, "at-us", &at_us, error)
+          || !node_get_int (dur_node, t_where, "duration-us", &duration_us, error)
+          || !node_get_string (kind_node, t_where, "kind", &kind, error))
+        goto t_out;
+
+      if (at_us <= 0 || duration_us <= 0)
+        {
+          g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                       "%s: at-us %lld / duration-us %lld must both be positive", t_where,
+                       (long long) at_us, (long long) duration_us);
+          goto t_out;
+        }
+
+      {
+        const gchar *names[] = {
+          oe_transition_kind_get_name (OE_TRANSITION_CROSS_DISSOLVE),
+          oe_transition_kind_get_name (OE_TRANSITION_DIP_TO_BLACK),
+        };
+        OeTransition stored = { 0, at_us, duration_us, OE_TRANSITION_CROSS_DISSOLVE };
+
+        if (g_strcmp0 (kind, names[0]) == 0)
+          stored.kind = OE_TRANSITION_CROSS_DISSOLVE;
+        else if (g_strcmp0 (kind, names[1]) == 0)
+          stored.kind = OE_TRANSITION_DIP_TO_BLACK;
+        else
+          {
+            g_set_error (error, OE_PROJECT_FORMAT_ERROR, OE_PROJECT_FORMAT_ERROR_VALUE,
+                         "%s: unknown kind \"%s\"", t_where, kind);
+            goto t_out;
+          }
+
+        g_array_append_val (transitions, stored);
+      }
+
+      ok = TRUE;
+
+    t_out:
+      g_free (t_where);
+
+      if (!ok)
+        return FALSE;
+    }
+
   return TRUE;
 }
 
@@ -785,7 +1100,7 @@ parse_tracks (JsonNode *node, const GPtrArray *media, GPtrArray *tracks_out, GEr
 
       track = json_node_get_object (track_node);
 
-      static const gchar *const members[] = { "kind", "clips" };
+      static const gchar *const members[] = { "kind", "clips", "transitions" };
 
       if (!check_members (track, members, G_N_ELEMENTS (members), where, error))
         goto track_out;
@@ -837,6 +1152,12 @@ parse_tracks (JsonNode *node, const GPtrArray *media, GPtrArray *tracks_out, GEr
           g_ptr_array_add (track_entry->clips, clip);
           g_free (clip_where);
         }
+
+      JsonNode *transitions_node = json_object_get_member (track, "transitions");
+
+      if (transitions_node != NULL
+          && !parse_track_transitions (transitions_node, where, track_entry->transitions, error))
+        goto track_out;
 
       g_ptr_array_add (tracks_out, track_entry);
       track_entry = NULL;
@@ -1144,6 +1465,26 @@ oe_project_format_load (const gchar *path, GError **error)
                   g_clear_object (&project);
                   goto out;
                 }
+            }
+        }
+
+      /* Transitions bind to their owning track and apply through the
+       * validated mutator: a file naming an empty boundary or an
+       * uncovered window fails the load with the same typed error a
+       * UI edit would produce, and stored durations re-clamp to the
+       * same coverage the writer saw. */
+      for (guint i = 0; i < track->transitions->len; i++)
+        {
+          OeTransition stored = g_array_index (track->transitions, OeTransition, i);
+          GError *trans_error = NULL;
+
+          stored.track_index = track_index;
+
+          if (!oe_project_add_transition (project, &stored, &trans_error))
+            {
+              g_propagate_error (error, trans_error);
+              g_clear_object (&project);
+              goto out;
             }
         }
     }

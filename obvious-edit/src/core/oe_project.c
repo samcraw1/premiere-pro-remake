@@ -542,18 +542,7 @@ oe_project_get_sequence (OeProject *self, OeSequence *out)
   OeSequence copy;
 
   oe_sequence_init (&copy);
-  copy.frame_rate = self->sequence.frame_rate;
-  copy.width = self->sequence.width;
-  copy.height = self->sequence.height;
-
-  for (guint i = 0; i < self->sequence.tracks->len; i++)
-    {
-      OeTrack *track = g_new0 (OeTrack, 1);
-
-      oe_track_copy (track, g_ptr_array_index (self->sequence.tracks, i));
-      g_ptr_array_add (copy.tracks, track);
-    }
-
+  oe_sequence_copy (&copy, &self->sequence);
   *out = copy;
 }
 
