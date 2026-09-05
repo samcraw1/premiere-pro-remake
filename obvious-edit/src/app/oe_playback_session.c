@@ -113,9 +113,12 @@ struct _OePlaybackSession
 
   OeAudioStream *stream;
   OeAudioDeviceInfo stream_info;
-  gint64 audio_base_position_us; /* sequence position when the queue was flushed */
-  gint64 audio_pushed_frames;    /* frames accepted since the flush */
-  gboolean audio_outstanding;    /* a mix window is being assembled */
+  gint64 audio_base_position_us;  /* sequence position when the queue was flushed */
+  gint64 audio_pushed_frames;     /* frames accepted since the flush */
+  gint64 audio_pushed_through_us; /* sequence time of the end of pushed coverage —
+                                     pushes begin LOOKAHEAD ahead of the playhead,
+                                     so this is NOT base + frames */
+  gboolean audio_outstanding;     /* a mix window is being assembled */
   MixWindow mix;
   gchar *audio_failed_path; /* media that failed this generation */
 
@@ -345,6 +348,11 @@ mix_window_push (OePlaybackSession *self, gsize to_frames)
 
   self->audio_pushed_frames += (gint64) pushed;
 
+  if (pushed > 0)
+    self->audio_pushed_through_us
+        = self->mix.seq_start_us
+          + (gint64) (from + pushed) * G_GINT64_CONSTANT (1000000) / self->stream_info.sample_rate;
+
   if (pushed == 0)
     return;
 
@@ -409,8 +417,8 @@ mix_window_advance (OePlaybackSession *self)
               path, (long long) slot->src_from_us, (long long) slot->src_to_us,
               self->audio_generation, index + 1, self->mix.n_slots);
       oe_media_playback_worker_request (self->worker, path, slot->src_from_us, slot->src_to_us,
-                                        self->stream_info.sample_rate,
-                                        self->stream_info.channels, self->audio_generation);
+                                        self->stream_info.sample_rate, self->stream_info.channels,
+                                        self->audio_generation);
       g_free (path);
       return; /* request in flight; its exhaustion advances the window */
     }
@@ -544,11 +552,7 @@ feed_audio (OePlaybackSession *self, gint64 position_us)
   if (self->stream_info.sample_rate <= 0)
     return;
 
-  const gint64 pushed_through
-      = self->audio_base_position_us
-        + self->audio_pushed_frames * G_GINT64_CONSTANT (1000000) / self->stream_info.sample_rate;
-
-  if (pushed_through >= position_us + AUDIO_LOOKAHEAD_US)
+  if (self->audio_pushed_through_us >= position_us + AUDIO_LOOKAHEAD_US)
     return;
 
   if (self->stream_info.is_dummy
@@ -606,8 +610,7 @@ on_worker_audio (OePlaybackAudioChunk *chunk, const GError *error, guint generat
    * defines), then write into the shared mix buffer. */
   const MixSlot *slot = &self->mix.slots[self->mix.current_slot];
   const int channels = MAX (self->stream_info.channels, 1);
-  const gint64 seq_start
-      = slot->clip_position_us + (chunk->source_us - slot->clip_source_in_us);
+  const gint64 seq_start = slot->clip_position_us + (chunk->source_us - slot->clip_source_in_us);
   gint64 offset = 0;
 
   if (chunk->sample_rate > 0)
@@ -650,9 +653,9 @@ on_worker_audio (OePlaybackAudioChunk *chunk, const GError *error, guint generat
 
       if (faded)
         {
-          const gint64 t_us = seq_start
-                              + (gint64) (drop + i) * G_GINT64_CONSTANT (1000000)
-                                    / (gint64) chunk->sample_rate;
+          const gint64 t_us
+              = seq_start
+                + (gint64) (drop + i) * G_GINT64_CONSTANT (1000000) / (gint64) chunk->sample_rate;
 
           g = (gfloat) oe_fade_gain (t_us, slot->clip_position_us, slot->clip_end_seq_us,
                                      slot->fade_in_us, slot->fade_out_us)
@@ -710,6 +713,7 @@ restart_streaming (OePlaybackSession *self, gint64 position_us)
 
   self->audio_base_position_us = position_us;
   self->audio_pushed_frames = 0;
+  self->audio_pushed_through_us = position_us; /* nothing queued yet */
   self->anchor_position_us = position_us;
   self->anchor_time_us = session_now (self);
 

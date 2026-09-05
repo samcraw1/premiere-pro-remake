@@ -184,7 +184,7 @@ typedef struct
   OeMediaPlaybackWorker *worker;
   OePlaybackAudioChunk *chunk; /* NULL for signals */
   GError *error;               /* set only when chunk == NULL and failed */
-  guint generation; /* the owning request's token; chunks echo their own */
+  guint generation;            /* the owning request's token; chunks echo their own */
 } Delivery;
 
 struct _OeMediaPlaybackWorker
@@ -340,6 +340,7 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
 
   float *buf = g_malloc (chunk_bytes);
   gsize buf_frames = 0;
+  gint64 buf_start_us = 0; /* source time of buf[0]; stamped on every empty append */
   gboolean hit_end = FALSE;
 
   AVPacket *pkt = av_packet_alloc ();
@@ -436,12 +437,19 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
             }
 
           /* Append to the chunk buffer, delivering full chunks as they
-           * fill. Chunk source time advances at the output rate. */
+           * fill. Chunk source time advances at the output rate. The
+           * buffer's anchor is stamped when the buffer is EMPTY: a full
+           * buffer's first frame belongs to the sample appended there,
+           * which may be a residual from an earlier decoder frame. */
           gint64 written = 0;
           while (written < keep && !superseded (worker))
             {
               gsize room = CHUNK_FRAMES - buf_frames;
               gsize take = (gsize) MIN ((gint64) room, keep - written);
+
+              if (buf_frames == 0)
+                buf_start_us = frame_src_us
+                               + (skip + (gint64) written) * G_GINT64_CONSTANT (1000000) / out_rate;
 
               memcpy (buf + buf_frames * (gsize) out_channels,
                       temp + (size_t) (skip + written) * (gsize) out_channels,
@@ -452,9 +460,7 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
               if (buf_frames == CHUNK_FRAMES)
                 {
                   OePlaybackAudioChunk *chunk = g_new0 (OePlaybackAudioChunk, 1);
-                  chunk->source_us = frame_src_us
-                                     + (skip + (gint64) (written - (gint64) take))
-                                           * G_GINT64_CONSTANT (1000000) / out_rate;
+                  chunk->source_us = buf_start_us;
                   chunk->sample_rate = req->sample_rate;
                   chunk->channels = out_channels;
                   chunk->n_frames = buf_frames;
@@ -464,6 +470,7 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
 
                   buf = g_malloc (chunk_bytes);
                   buf_frames = 0;
+                  buf_start_us += (gint64) CHUNK_FRAMES * G_GINT64_CONSTANT (1000000) / out_rate;
                 }
             }
 
@@ -481,6 +488,8 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
       if (buf_frames > 0)
         {
           OePlaybackAudioChunk *chunk = g_new0 (OePlaybackAudioChunk, 1);
+          chunk->source_us = buf_start_us; /* was unset: trailed as 0 and got
+                                             dropped or miswritten downstream */
           chunk->sample_rate = req->sample_rate;
           chunk->channels = out_channels;
           chunk->n_frames = buf_frames;

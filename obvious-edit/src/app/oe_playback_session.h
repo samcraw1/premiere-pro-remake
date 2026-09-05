@@ -265,9 +265,9 @@ typedef void (*OePlaybackMeterFunc) (OePlaybackSession *session, const gfloat *p
  * queue — the preview side of the parity contract. Installing it is
  * pure observation: audio queues regardless.
  */
-typedef void (*OePlaybackMixFunc) (OePlaybackSession *session, gint64 seq_start_us,
-                                   gsize n_frames, int channels, int sample_rate,
-                                   const gfloat *interleaved, gpointer user_data);
+typedef void (*OePlaybackMixFunc) (OePlaybackSession *session, gint64 seq_start_us, gsize n_frames,
+                                   int channels, int sample_rate, const gfloat *interleaved,
+                                   gpointer user_data);
 
 /**
  * oe_playback_session_set_meter_func:
@@ -298,6 +298,9 @@ void oe_playback_session_set_meter_func (OePlaybackSession *session, OePlaybackM
  * queue — the preview side of the parity contract. Installing it is
  * pure observation: audio queues regardless.
  */
+void oe_playback_session_set_mix_func (OePlaybackSession *session, OePlaybackMixFunc func,
+                                       gpointer user_data);
+
 /**
  * oe_playback_session_get_sequence_end:
  *
