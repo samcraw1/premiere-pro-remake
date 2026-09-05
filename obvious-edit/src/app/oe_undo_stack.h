@@ -104,8 +104,14 @@ typedef enum
  *     recorded as ONE composite record (one user action = one undo
  *     step). Undo restores the suffix (descending index order) and
  *     re-inserts the primary; redo removes the primary and re-shifts
- *     (ascending index order). The sub-step orderings keep every
- *     intermediate state inside the model's typed validation.
+ *     (ascending index order). Transitions on the affected track whose
+ *     boundary moved with the ripple are re-anchored through the
+ *     validated transition mutator as one more replay sub-step (Phase
+ *     9 Wave B); boundaries the ripple destroyed are skipped at record
+ *     time — the transition then degrades to a straight cut at
+ *     composite time, so the history stays exact. The sub-step
+ *     orderings keep every intermediate state inside the model's
+ *     typed validation.
  * @OE_UNDO_OP_VISUAL: a clip's picture geometry/opacity changed
  *     (Phase 9 Wave A); undo restores the pre-stroke #OeClipVisual,
  *     redo re-applies the post-stroke one. One inspector stroke = one
@@ -137,6 +143,20 @@ typedef struct
 } OeRippleShift;
 
 /**
+ * OeTransitionReanchor: one transition's pre/post boundary inside a
+ * composite #OE_UNDO_OP_RIPPLE_DELETE record (Phase 9 Wave B). The
+ * boundary re-anchors by the ripple's shift delta through the
+ * validated mutator; the transition index is stable because no
+ * transition add/remove participates in a ripple.
+ */
+typedef struct
+{
+  guint index;
+  gint64 pre_at_us;
+  gint64 post_at_us;
+} OeTransitionReanchor;
+
+/**
  * OeUndoRecord: one immutable command object, owned by the stack.
  * @label: status-bar text ("Move clip 2 on track 0"); owned by the
  *     record, borrowed by readers.
@@ -161,6 +181,12 @@ typedef struct
    * other kind. An empty array is a degenerate ripple (no downstream
    * clips) — undo/redo reduce to the plain delete/insert pair. */
   GArray *ripple_shifts;
+
+  /* RIPPLE_DELETE only: owned array of OeTransitionReanchor, one
+   * entry per transition re-anchored by the shift delta; NULL for
+   * every other kind. Boundaries the ripple destroyed are absent —
+   * those transitions degrade to straight cuts instead. */
+  GArray *transition_reanchors;
 } OeUndoRecord;
 
 /**

@@ -49,6 +49,7 @@ record_free (gpointer data)
 
   g_free (rec->label);
   g_clear_pointer (&rec->ripple_shifts, g_array_unref);
+  g_clear_pointer (&rec->transition_reanchors, g_array_unref);
   /* Visuals own keyframe stores since Wave B: both captured visuals
    * release theirs exactly once. */
   g_clear_pointer (&rec->clip.visual.keyframes, g_array_unref);
@@ -271,6 +272,7 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
 {
   OeClip removed = { 0 };
   GArray *shifts = NULL;
+  GArray *reanchors = NULL;
 
   /* Capture the pre-state before the first mutation: the primary copy
    * and, for every downstream clip, its record-time identity. */
@@ -290,6 +292,7 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
       clip_capture (&removed);
 
       shifts = g_array_new (FALSE, FALSE, sizeof (OeRippleShift));
+      reanchors = g_array_new (FALSE, FALSE, sizeof (OeTransitionReanchor));
     }
 
   /* Sub-step 1: the primary removal (renumbers downstream indices by
@@ -297,6 +300,7 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
   if (!oe_project_remove_clip (project, track_index, clip_index, error))
     {
       g_clear_pointer (&shifts, g_array_unref);
+      g_clear_pointer (&reanchors, g_array_unref);
       if (stack != NULL)
         oe_clip_visual_clear (&removed.visual);
       return FALSE;
@@ -345,6 +349,47 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
           g_array_append_vals (shifts, &entry, 1);
         }
 
+      /* Sub-step 3: re-anchor the track's transitions whose boundary
+       * moved with the ripple, through the validated mutator. A
+       * boundary the ripple destroyed (no adjacent pair at the new
+       * time) is skipped: the transition degrades to a straight cut
+       * at composite time instead of being fixed up here. */
+      const guint transition_count = oe_project_get_transition_count (project);
+
+      for (guint t = 0; t < transition_count; t++)
+        {
+          OeTransition transition;
+
+          if (!oe_project_get_transition (project, t, &transition))
+            continue;
+          if (transition.track_index != track_index)
+            continue;
+          if (transition.at_us <= removed.position_us)
+            continue; /* boundary ahead of the removed clip's start persists in place */
+
+          const gint64 pre_at_us = transition.at_us;
+          const gint64 post_at_us = transition.at_us - shift_us;
+          GError *reanchor_error = NULL;
+
+          if (!oe_project_move_transition (project, t, post_at_us, &reanchor_error))
+            {
+              oe_log (OE_LOG_LEVEL_WARNING,
+                      "ripple delete: transition %u boundary %lld not re-anchorable to %lld (%s); "
+                      "degrades to a cut",
+                      t, (long long) pre_at_us, (long long) post_at_us, reanchor_error->message);
+              g_error_free (reanchor_error);
+              continue;
+            }
+
+          const OeTransitionReanchor entry = {
+            .index = t,
+            .pre_at_us = pre_at_us,
+            .post_at_us = post_at_us,
+          };
+
+          g_array_append_vals (reanchors, &entry, 1);
+        }
+
       OeUndoRecord *rec = record_new (
           OE_UNDO_OP_RIPPLE_DELETE,
           g_strdup_printf ("Ripple delete clip %u on track %u", clip_index, track_index),
@@ -352,6 +397,7 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
 
       rec->clip = removed; /* captured visual moves with the record */
       rec->ripple_shifts = shifts;
+      rec->transition_reanchors = reanchors;
       stack_push (stack, rec);
     }
 
@@ -579,9 +625,29 @@ apply_ripple_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
         return FALSE;
     }
 
-  return oe_project_insert_clip (project, rec->track_index, rec->clip.media_ref,
-                                 rec->clip.position_us, rec->clip.source_in_us,
-                                 rec->clip.source_out_us, error);
+  /* The primary goes back BEFORE the transition re-anchors: a
+   * boundary at the removed clip's trailing edge only exists once the
+   * clip itself is re-inserted. After suffix + insert the sequence is
+   * exactly the pre-ripple state, so every recorded pre_at boundary is
+   * valid (strict: a failure here is a real replay bug). */
+  if (!oe_project_insert_clip (project, rec->track_index, rec->clip.media_ref,
+                               rec->clip.position_us, rec->clip.source_in_us,
+                               rec->clip.source_out_us, error))
+    return FALSE;
+
+  if (rec->transition_reanchors != NULL)
+    {
+      for (gsize k = 0; k < rec->transition_reanchors->len; k++)
+        {
+          const OeTransitionReanchor *entry
+              = &g_array_index (rec->transition_reanchors, OeTransitionReanchor, k);
+
+          if (!oe_project_move_transition (project, entry->index, entry->pre_at_us, error))
+            return FALSE;
+        }
+    }
+
+  return TRUE;
 }
 
 /* Replay a composite RIPPLE_DELETE forward: remove the primary, then
@@ -604,6 +670,20 @@ apply_ripple_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
       if (!oe_project_move_clip (project, rec->track_index, entry->post_index,
                                  entry->post_position_us, error))
         return FALSE;
+    }
+
+  /* Re-anchor the recorded transitions forward, mirroring the record
+   * path's sub-step 3. */
+  if (rec->transition_reanchors != NULL)
+    {
+      for (gsize k = 0; k < rec->transition_reanchors->len; k++)
+        {
+          const OeTransitionReanchor *entry
+              = &g_array_index (rec->transition_reanchors, OeTransitionReanchor, k);
+
+          if (!oe_project_move_transition (project, entry->index, entry->post_at_us, error))
+            return FALSE;
+        }
     }
 
   return TRUE;

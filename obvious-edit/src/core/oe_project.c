@@ -202,6 +202,12 @@ oe_track_copy (OeTrack *dst, const OeTrack *src)
     }
 }
 
+static void
+transition_free (gpointer data)
+{
+  g_free (data);
+}
+
 void
 oe_sequence_init (OeSequence *sequence)
 {
@@ -212,6 +218,7 @@ oe_sequence_init (OeSequence *sequence)
   sequence->width = OE_SEQUENCE_DEFAULT_WIDTH;
   sequence->height = OE_SEQUENCE_DEFAULT_HEIGHT;
   sequence->tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) track_free);
+  sequence->transitions = g_ptr_array_new_with_free_func ((GDestroyNotify) transition_free);
 }
 
 void
@@ -220,6 +227,7 @@ oe_sequence_clear (OeSequence *sequence)
   g_return_if_fail (sequence != NULL);
 
   g_clear_pointer (&sequence->tracks, g_ptr_array_unref);
+  g_clear_pointer (&sequence->transitions, g_ptr_array_unref);
   memset (sequence, 0, sizeof (*sequence));
 }
 
@@ -242,6 +250,89 @@ oe_sequence_copy (OeSequence *dst, const OeSequence *src)
       oe_track_copy (track, g_ptr_array_index (src->tracks, i));
       g_ptr_array_add (dst->tracks, track);
     }
+
+  dst->transitions = g_ptr_array_new_full (src->transitions->len, (GDestroyNotify) transition_free);
+
+  for (guint i = 0; i < src->transitions->len; i++)
+    {
+      OeTransition *copy = g_new0 (OeTransition, 1);
+
+      *copy = *(OeTransition *) g_ptr_array_index (src->transitions, i);
+      g_ptr_array_add (dst->transitions, copy);
+    }
+}
+
+const gchar *
+oe_transition_kind_get_name (OeTransitionKind kind)
+{
+  switch (kind)
+    {
+    case OE_TRANSITION_CROSS_DISSOLVE:
+      return "cross-dissolve";
+    case OE_TRANSITION_DIP_TO_BLACK:
+      return "dip-to-black";
+    default:
+      return "unknown";
+    }
+}
+
+static gint64
+clip_length (const OeClip *clip)
+{
+  return clip->source_out_us - clip->source_in_us;
+}
+
+OeTransitionWindow
+oe_transition_window (const OeSequence *sequence, const OeTransition *t)
+{
+  OeTransitionWindow w = { 0 };
+
+  g_return_val_if_fail (sequence != NULL, w);
+  g_return_val_if_fail (t != NULL, w);
+
+  if (t->track_index >= sequence->tracks->len || t->duration_us <= 0 || t->at_us <= 0)
+    return w;
+
+  const OeTrack *track = g_ptr_array_index (sequence->tracks, t->track_index);
+
+  if (track->kind != OE_TRACK_VIDEO)
+    return w;
+
+  /* The boundary contract: one clip ends exactly at @at_us, the next
+   * starts exactly there. Linear scan is fine — track clip counts are
+   * small and the compositor calls this per rendered frame only while
+   * a window is plausibly active. */
+  const OeClip *out = NULL;
+  const OeClip *in = NULL;
+
+  for (guint i = 0; i < track->clips->len; i++)
+    {
+      const OeClip *clip = g_ptr_array_index (track->clips, i);
+
+      if (clip->position_us + clip_length (clip) == t->at_us)
+        out = clip;
+      if (clip->position_us == t->at_us)
+        in = clip;
+    }
+
+  if (out == NULL || in == NULL)
+    return w;
+
+  const gint64 start = t->at_us - t->duration_us / 2;
+  const gint64 end = start + t->duration_us;
+
+  /* Both neighbors must still cover the stored window; a moved or
+   * trimmed clip degrades the transition to the straight cut (the
+   * caller renders no blend, no fixup anywhere). */
+  if (start < out->position_us || end - t->at_us > clip_length (in))
+    return w;
+
+  w.active = TRUE;
+  w.start_us = start;
+  w.end_us = end;
+  w.out_clip = out;
+  w.in_clip = in;
+  return w;
 }
 
 /* Heap track used both inside the live sequence and inside deep
@@ -334,6 +425,7 @@ oe_project_init (OeProject *self)
   self->sequence.width = OE_SEQUENCE_DEFAULT_WIDTH;
   self->sequence.height = OE_SEQUENCE_DEFAULT_HEIGHT;
   self->sequence.tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) track_free);
+  self->sequence.transitions = g_ptr_array_new_with_free_func ((GDestroyNotify) transition_free);
   self->media = g_ptr_array_new_with_free_func (media_ref_free);
   self->next_media_ref = 1;
 }
@@ -348,6 +440,7 @@ oe_project_dispose (GObject *object)
    * pointer pair — dispose never invokes it, so an owner cannot
    * observe its own project's teardown. */
   g_clear_pointer (&self->sequence.tracks, g_ptr_array_unref);
+  g_clear_pointer (&self->sequence.transitions, g_ptr_array_unref);
   g_clear_pointer (&self->media, g_ptr_array_unref);
   g_clear_pointer (&self->name, g_free);
 
@@ -642,6 +735,171 @@ oe_project_remove_clip_keyframe (OeProject *self, guint track_index, guint clip_
   if (clip->visual.keyframes->len == 0)
     g_clear_pointer (&clip->visual.keyframes, g_array_unref);
 
+  notify (self);
+  return TRUE;
+}
+
+/* The boundary contract shared by add and move (D5): the outgoing clip
+ * ends exactly at @at_us, the incoming clip starts exactly there, and
+ * the stored duration is clamped to what both neighbors can cover —
+ * the centered window must fit inside the outgoing clip's span and the
+ * incoming clip's source range. Returns TRUE with @duration_us
+ * clamped; FALSE with @error set when no window fits at all. */
+static gboolean
+transition_boundary_validate (const OeSequence *sequence, guint track_index, gint64 at_us,
+                              gint64 *duration_us, GError **error)
+{
+  if (track_index >= sequence->tracks->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "transition track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  const OeTrack *track = g_ptr_array_index (sequence->tracks, track_index);
+
+  if (track->kind != OE_TRACK_VIDEO)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION,
+                   "transitions are video-track boundaries (v1); track %u is %s", track_index,
+                   oe_track_kind_get_name (track->kind));
+      return FALSE;
+    }
+
+  if (at_us <= 0)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE,
+                   "transition boundary %lld must be interior (sequence time > 0)",
+                   (long long) at_us);
+      return FALSE;
+    }
+
+  const OeClip *out = NULL;
+  const OeClip *in = NULL;
+
+  for (guint i = 0; i < track->clips->len; i++)
+    {
+      const OeClip *clip = g_ptr_array_index (track->clips, i);
+
+      if (clip->position_us + clip_length (clip) == at_us)
+        out = clip;
+      if (clip->position_us == at_us)
+        in = clip;
+    }
+
+  if (out == NULL || in == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION,
+                   "no adjacent clips meet at boundary %lld on track %u", (long long) at_us,
+                   track_index);
+      return FALSE;
+    }
+
+  /* Window [at - dur/2, at + dur - dur/2) fits: start >= out->position
+   * caps dur at 2*(at - out->position); the incoming clip's source must
+   * reach (end - at) = dur - dur/2, capping dur at 2*in_len. */
+  const gint64 max_dur
+      = MIN (2 * (at_us - out->position_us), 2 * (in->source_out_us - in->source_in_us));
+
+  if (max_dur <= 0)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION,
+                   "boundary %lld supports no transition window", (long long) at_us);
+      return FALSE;
+    }
+
+  if (*duration_us <= 0)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE,
+                   "transition duration %lld must be positive", (long long) *duration_us);
+      return FALSE;
+    }
+
+  /* Clamped to both clips: the stored value is what the timeline can
+   * actually cover, never a pending failure. */
+  *duration_us = MIN (*duration_us, max_dur);
+  return TRUE;
+}
+
+guint
+oe_project_get_transition_count (OeProject *self)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), 0);
+  g_return_val_if_fail (self->sequence.transitions != NULL, 0);
+
+  return self->sequence.transitions->len;
+}
+
+gboolean
+oe_project_get_transition (OeProject *self, guint index, OeTransition *out)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (out != NULL, FALSE);
+
+  if (index >= self->sequence.transitions->len)
+    return FALSE;
+
+  *out = *(OeTransition *) g_ptr_array_index (self->sequence.transitions, index);
+  return TRUE;
+}
+
+gboolean
+oe_project_add_transition (OeProject *self, const OeTransition *t, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (t != NULL, FALSE);
+
+  OeTransition stored = *t;
+
+  if (!transition_boundary_validate (&self->sequence, stored.track_index, stored.at_us,
+                                     &stored.duration_us, error))
+    return FALSE;
+
+  OeTransition *copy = g_new0 (OeTransition, 1);
+
+  *copy = stored;
+  g_ptr_array_add (self->sequence.transitions, copy);
+  notify (self);
+  return TRUE;
+}
+
+gboolean
+oe_project_move_transition (OeProject *self, guint index, gint64 at_us, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  if (index >= self->sequence.transitions->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION,
+                   "transition index %u out of range", index);
+      return FALSE;
+    }
+
+  OeTransition *t = g_ptr_array_index (self->sequence.transitions, index);
+  gint64 duration = t->duration_us;
+
+  if (!transition_boundary_validate (&self->sequence, t->track_index, at_us, &duration, error))
+    return FALSE;
+
+  t->at_us = at_us;
+  t->duration_us = duration;
+  notify (self);
+  return TRUE;
+}
+
+gboolean
+oe_project_remove_transition (OeProject *self, guint index, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  if (index >= self->sequence.transitions->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION,
+                   "transition index %u out of range", index);
+      return FALSE;
+    }
+
+  g_ptr_array_remove_index (self->sequence.transitions, index);
   notify (self);
   return TRUE;
 }

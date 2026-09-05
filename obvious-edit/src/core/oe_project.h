@@ -176,8 +176,11 @@ typedef struct
 } OeTrack;
 
 /**
- * OeSequence: the whole timeline: one frame rate, an output size, and
- * ordered tracks. @tracks is a GPtrArray of owned #OeTrack pointers.
+ * OeSequence: the whole timeline: one frame rate, an output size,
+ * ordered tracks, and the boundary transitions between clips
+ * (project-level list; each entry names its video track).
+ * @tracks is a GPtrArray of owned #OeTrack pointers; @transitions is
+ * a GPtrArray of owned #OeTransition pointers.
  */
 typedef struct
 {
@@ -185,6 +188,7 @@ typedef struct
   gint width;
   gint height;
   GPtrArray *tracks;
+  GPtrArray *transitions;
 } OeSequence;
 
 /* Value-type trio for the model structs, mirroring OeAssetInfo: init
@@ -196,6 +200,58 @@ void oe_track_copy (OeTrack *dst, const OeTrack *src);
 void oe_sequence_init (OeSequence *sequence);
 void oe_sequence_clear (OeSequence *sequence);
 void oe_sequence_copy (OeSequence *dst, const OeSequence *src);
+
+/**
+ * OeTransitionKind: the two boundary blends of Wave B (locked decision
+ * D5). Both use the same integer ramp; dip-to-black pins the
+ * intermediate frame to black.
+ */
+typedef enum
+{
+  OE_TRANSITION_CROSS_DISSOLVE,
+  OE_TRANSITION_DIP_TO_BLACK,
+} OeTransitionKind;
+
+const gchar *oe_transition_kind_get_name (OeTransitionKind kind);
+
+/**
+ * OeTransition: one boundary object between two adjacent clips
+ * (locked decision D5). @track_index names a VIDEO track (v1);
+ * @at_us is the shared boundary where the outgoing clip's end equals
+ * the incoming clip's start; @duration_us is centered on @at_us
+ * (window [at - dur/2, at + dur - dur/2)) and is clamped at mutation
+ * time to what both neighbors can cover. The object never fixes the
+ * timeline up: if a later move/trim breaks the boundary or the
+ * coverage, the effective window degrades to a straight cut at
+ * composite time (graceful, never fatal).
+ */
+typedef struct
+{
+  guint track_index;
+  gint64 at_us;
+  gint64 duration_us;
+  OeTransitionKind kind;
+} OeTransition;
+
+/**
+ * OeTransitionWindow: the composite-time verdict for a transition
+ * (GTK-free; shared by the compositor, the timeline bands, and the
+ * snap-target extension). @active is FALSE — and every other field
+ * meaningless — when the boundary no longer exists or either neighbor
+ * stopped covering the stored window: the transition degrades to the
+ * straight cut. @out_clip/@in_clip borrow from the sequence (never
+ * free them); they are the clips ending at / starting at @at_us.
+ */
+typedef struct
+{
+  gboolean active;
+  gint64 start_us;
+  gint64 end_us;
+  const OeClip *out_clip;
+  const OeClip *in_clip;
+} OeTransitionWindow;
+
+OeTransitionWindow oe_transition_window (const OeSequence *sequence, const OeTransition *t);
 
 /**
  * OE_PROJECT_ERROR: error domain for model mutation failures.
@@ -236,6 +292,7 @@ typedef enum
   OE_PROJECT_ERROR_BAD_SIZE,
   OE_PROJECT_ERROR_BAD_VISUAL,
   OE_PROJECT_ERROR_BAD_KEYFRAME,
+  OE_PROJECT_ERROR_BAD_TRANSITION,
 } OeProjectError;
 
 /**
@@ -370,6 +427,54 @@ gboolean oe_project_set_clip_keyframe (OeProject *project, guint track_index, gu
 gboolean oe_project_remove_clip_keyframe (OeProject *project, guint track_index, guint clip_index,
                                           OeKeyframeProperty property, gint64 time_us,
                                           GError **error);
+
+/**
+ * oe_project_add_transition:
+ *
+ * Appends a boundary transition (D5) after validation and notifies the
+ * observer. @t->track_index must name a video track; @t->at_us must be
+ * an interior boundary where one clip ends exactly as the next starts;
+ * @t->duration_us must be positive. The stored duration is CLAMPED to
+ * what both neighbors can cover (window fits inside the outgoing
+ * clip's span and the incoming clip's source range); a boundary that
+ * supports no window at all is rejected with
+ * #OE_PROJECT_ERROR_BAD_TRANSITION. Range/track violations come back
+ * as #OE_PROJECT_ERROR_BAD_RANGE / #OE_PROJECT_ERROR_BAD_TRACK.
+ *
+ * Returns: TRUE on success, FALSE with @error set on rejection.
+ */
+gboolean oe_project_add_transition (OeProject *project, const OeTransition *t, GError **error);
+
+/**
+ * oe_project_get_transition_count / oe_project_get_transition:
+ *
+ * Value accessors over the sequence's transition list. The getter
+ * deep-copies into @out (transitions own no memory, so the copy is a
+ * plain struct assignment).
+ */
+guint oe_project_get_transition_count (OeProject *project);
+gboolean oe_project_get_transition (OeProject *project, guint index, OeTransition *out);
+
+/**
+ * oe_project_move_transition:
+ *
+ * Re-anchors the transition at @index to @at_us (the ripple-delete
+ * replay sub-step uses this through the validated mutator path). The
+ * new boundary must exist exactly like in oe_project_add_transition;
+ * the stored duration is re-clamped to the new neighbors.
+ *
+ * Returns: TRUE on success, FALSE with @error set on rejection.
+ */
+gboolean oe_project_move_transition (OeProject *project, guint index, gint64 at_us, GError **error);
+
+/**
+ * oe_project_remove_transition:
+ *
+ * Drops the transition at @index and notifies the observer.
+ *
+ * Returns: TRUE on success, FALSE with @error set (bad index).
+ */
+gboolean oe_project_remove_transition (OeProject *project, guint index, GError **error);
 
 /**
  * oe_project_add_track:

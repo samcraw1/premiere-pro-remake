@@ -367,3 +367,38 @@ oe_timeline_trim_bounds (const OeClip *clip, gint64 max_source_us, gint64 *min_i
   if (max_out != NULL)
     *max_out = ceiling;
 }
+
+OeTransitionBandRect
+oe_timeline_transition_band (const OeTimelineGeometry *geometry, const OeTransitionWindow *window,
+                             guint track_index)
+{
+  OeTransitionBandRect rect = { 0 };
+
+  g_return_val_if_fail (geometry != NULL, rect);
+  g_return_val_if_fail (window != NULL, rect);
+
+  if (!window->active)
+    return rect;
+
+  rect.active = TRUE;
+  rect.x_start = oe_timeline_x_for_us (geometry, window->start_us);
+  rect.x_end = oe_timeline_x_for_us (geometry, window->end_us);
+  rect.y = oe_timeline_y_for_track (geometry, track_index);
+  rect.height = OE_TIMELINE_TRACK_HEIGHT;
+  return rect;
+}
+
+gboolean
+oe_timeline_transition_edges (const OeTransitionWindow *window, gint64 *start_us, gint64 *end_us)
+{
+  g_return_val_if_fail (window != NULL, FALSE);
+
+  if (!window->active)
+    return FALSE;
+
+  if (start_us != NULL)
+    *start_us = window->start_us;
+  if (end_us != NULL)
+    *end_us = window->end_us;
+  return TRUE;
+}
