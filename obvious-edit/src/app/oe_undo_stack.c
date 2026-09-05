@@ -49,7 +49,40 @@ record_free (gpointer data)
 
   g_free (rec->label);
   g_clear_pointer (&rec->ripple_shifts, g_array_unref);
+  /* Visuals own keyframe stores since Wave B: both captured visuals
+   * release theirs exactly once. */
+  g_clear_pointer (&rec->clip.visual.keyframes, g_array_unref);
+  g_clear_pointer (&rec->new_visual.keyframes, g_array_unref);
   g_free (rec);
+}
+
+/* Value capture for OeClip/OeClipVisual into record storage: struct
+ * copies share the source's keyframe pointer, so the store is replaced
+ * with a private deep copy (the pointer overwrite drops the alias
+ * without unref-ing the owner's array). */
+static void
+clip_value_store (OeClip *dst, const OeClip *src)
+{
+  *dst = *src;
+  dst->visual.keyframes = oe_keyframes_copy_array (src->visual.keyframes);
+}
+
+static void
+visual_value_store (OeClipVisual *dst, const OeClipVisual *src)
+{
+  *dst = *src;
+  dst->keyframes = oe_keyframes_copy_array (src->keyframes);
+}
+
+/* Self-capture for a value copied out of the live model: the struct
+ * copy aliases the clip's keyframe store, which a following mutator
+ * may free — replace the alias with a private deep copy. After this
+ * call @clip owns its store; assigning it to a record moves that
+ * ownership (the copy-out local is never cleared). */
+static void
+clip_capture (OeClip *clip)
+{
+  clip->visual.keyframes = oe_keyframes_copy_array (clip->visual.keyframes);
 }
 
 OeUndoStack *
@@ -156,7 +189,7 @@ record_insert (OeUndoStack *stack, OeProject *project, guint track_index, const 
               OE_UNDO_OP_INSERT, g_strdup_printf ("Insert clip %u on track %u", i, track_index),
               track_index, i);
 
-          rec->clip = *inserted;
+          clip_value_store (&rec->clip, inserted); /* private keyframe store */
           stack_push (stack, rec);
           return;
         }
@@ -197,8 +230,17 @@ oe_edit_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index, 
   const gboolean have_clip
       = stack != NULL && oe_project_get_clip (project, track_index, clip_index, &removed);
 
+  /* The capture aliases the live store; a private copy must exist
+   * before the mutator frees the original clip. */
+  if (have_clip)
+    clip_capture (&removed);
+
   if (!oe_project_remove_clip (project, track_index, clip_index, error))
-    return FALSE;
+    {
+      if (have_clip)
+        oe_clip_visual_clear (&removed.visual);
+      return FALSE;
+    }
 
   if (stack != NULL)
     {
@@ -216,7 +258,7 @@ oe_edit_remove_clip (OeProject *project, OeUndoStack *stack, guint track_index, 
                         g_strdup_printf ("Delete clip %u on track %u", clip_index, track_index),
                         track_index, clip_index);
 
-      rec->clip = removed;
+      rec->clip = removed; /* captured visual moves with the record */
       stack_push (stack, rec);
     }
 
@@ -243,6 +285,10 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
           return FALSE;
         }
 
+      /* The capture aliases the live store; a private copy must exist
+       * before the mutator frees the original clip. */
+      clip_capture (&removed);
+
       shifts = g_array_new (FALSE, FALSE, sizeof (OeRippleShift));
     }
 
@@ -251,6 +297,8 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
   if (!oe_project_remove_clip (project, track_index, clip_index, error))
     {
       g_clear_pointer (&shifts, g_array_unref);
+      if (stack != NULL)
+        oe_clip_visual_clear (&removed.visual);
       return FALSE;
     }
 
@@ -302,7 +350,7 @@ oe_edit_ripple_remove_clip (OeProject *project, OeUndoStack *stack, guint track_
           g_strdup_printf ("Ripple delete clip %u on track %u", clip_index, track_index),
           track_index, clip_index);
 
-      rec->clip = removed;
+      rec->clip = removed; /* captured visual moves with the record */
       rec->ripple_shifts = shifts;
       stack_push (stack, rec);
     }
@@ -319,8 +367,17 @@ oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
   const gboolean have_clip
       = stack != NULL && oe_project_get_clip (project, track_index, clip_index, &before);
 
+  /* The capture aliases the live store; a private copy must exist
+   * before the mutator runs. */
+  if (have_clip)
+    clip_capture (&before);
+
   if (!oe_project_move_clip (project, track_index, clip_index, position_us, error))
-    return FALSE;
+    {
+      if (have_clip)
+        oe_clip_visual_clear (&before.visual);
+      return FALSE;
+    }
 
   if (stack != NULL)
     {
@@ -337,7 +394,7 @@ oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
           OE_UNDO_OP_MOVE, g_strdup_printf ("Move clip %u on track %u", clip_index, track_index),
           track_index, clip_index);
 
-      rec->clip = before;
+      rec->clip = before; /* captured visual moves with the record */
       rec->old_a_us = before.position_us;
       rec->new_a_us = position_us;
       stack_push (stack, rec);
@@ -355,8 +412,17 @@ oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
   const gboolean have_clip
       = stack != NULL && oe_project_get_clip (project, track_index, clip_index, &before);
 
+  /* The capture aliases the live store; a private copy must exist
+   * before the mutator runs. */
+  if (have_clip)
+    clip_capture (&before);
+
   if (!oe_project_trim_clip (project, track_index, clip_index, source_in_us, source_out_us, error))
-    return FALSE;
+    {
+      if (have_clip)
+        oe_clip_visual_clear (&before.visual);
+      return FALSE;
+    }
 
   if (stack != NULL)
     {
@@ -373,7 +439,7 @@ oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
           OE_UNDO_OP_TRIM, g_strdup_printf ("Trim clip %u on track %u", clip_index, track_index),
           track_index, clip_index);
 
-      rec->clip = before;
+      rec->clip = before; /* captured visual moves with the record */
       rec->old_a_us = before.source_in_us;
       rec->old_b_us = before.source_out_us;
       rec->new_a_us = source_in_us;
@@ -393,7 +459,7 @@ record_visual_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
                       const OeClipVisual *old_visual, const OeClipVisual *new_visual,
                       GError **error)
 {
-  OeClip before;
+  OeClip before = { 0 };
 
   if (stack == NULL)
     return oe_project_set_clip_visual (project, track_index, clip_index, new_visual, error);
@@ -401,11 +467,21 @@ record_visual_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
   if (!oe_project_get_clip (project, track_index, clip_index, &before))
     return FALSE;
 
+  /* The capture aliases the live store; a private copy must exist
+   * before the mutator can release the original. */
+  clip_capture (&before);
+
   if (!oe_project_set_clip_visual (project, track_index, clip_index, new_visual, error))
-    return FALSE;
+    {
+      oe_clip_visual_clear (&before.visual);
+      return FALSE;
+    }
 
   if (oe_clip_visual_equal (old_visual, new_visual))
-    return TRUE; /* zero-delta stroke: the model already holds the state */
+    {
+      oe_clip_visual_clear (&before.visual);
+      return TRUE; /* zero-delta stroke: the model already holds the state */
+    }
 
   OeUndoRecord *rec = record_new (
       OE_UNDO_OP_VISUAL, g_strdup_printf ("Visual clip %u on track %u", clip_index, track_index),
@@ -414,9 +490,12 @@ record_visual_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
   rec->clip = before;
   /* The undo payload is the STROKE baseline, not the project state at
    * record time — a previewed stroke leaves the model at its last
-   * preview, and undo must restore where the stroke began. */
-  rec->clip.visual = *old_visual;
-  rec->new_visual = *new_visual; /* Wave A: no owned memory, value copy is deep */
+   * preview, and undo must restore where the stroke began. The
+   * captured store from @before is released and replaced by the
+   * baseline's own deep copy. */
+  oe_clip_visual_clear (&rec->clip.visual);
+  visual_value_store (&rec->clip.visual, old_visual);
+  visual_value_store (&rec->new_visual, new_visual);
   stack_push (stack, rec);
   return TRUE;
 }
@@ -427,13 +506,22 @@ oe_edit_set_clip_visual (OeProject *project, OeUndoStack *stack, guint track_ind
 {
   g_return_val_if_fail (visual != NULL, FALSE);
 
-  OeClip before;
+  OeClip before = { 0 };
 
   if (stack != NULL && !oe_project_get_clip (project, track_index, clip_index, &before))
     return FALSE;
 
+  /* The capture aliases the live store; a private copy must exist
+   * before the mutator can release the original. */
+  if (stack != NULL)
+    clip_capture (&before);
+
   if (!oe_project_set_clip_visual (project, track_index, clip_index, visual, error))
-    return FALSE;
+    {
+      if (stack != NULL)
+        oe_clip_visual_clear (&before.visual);
+      return FALSE;
+    }
 
   if (stack != NULL && !oe_clip_visual_equal (&before.visual, visual))
     {
@@ -442,9 +530,13 @@ oe_edit_set_clip_visual (OeProject *project, OeUndoStack *stack, guint track_ind
                         g_strdup_printf ("Visual clip %u on track %u", clip_index, track_index),
                         track_index, clip_index);
 
-      rec->clip = before;
-      rec->new_visual = *visual;
+      rec->clip = before; /* baseline visual moves with the record */
+      visual_value_store (&rec->new_visual, visual);
       stack_push (stack, rec);
+    }
+  else if (stack != NULL)
+    {
+      oe_clip_visual_clear (&before.visual);
     }
 
   return TRUE;

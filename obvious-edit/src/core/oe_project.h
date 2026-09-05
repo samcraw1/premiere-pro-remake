@@ -37,6 +37,7 @@
 #include <glib-object.h>
 #include <glib.h>
 
+#include "oe_keyframes.h"
 #include "oe_time.h"
 
 G_BEGIN_DECLS
@@ -64,9 +65,10 @@ G_DECLARE_FINAL_TYPE (OeProject, oe_project, OE, PROJECT, GObject)
  * in 1/100 degree (clockwise), @opacity is 0-255 straight alpha,
  * @crop_l/@crop_t/@crop_r/@crop_b are source-pixel crop edges trimmed
  * before scaling, and @fade_in_us/@fade_out_us are audio fade lengths
- * (dormant: consumed by Wave B envelopes, never by Wave A rendering).
- * @keyframes is the Wave B per-property keyframe store — NULL in Wave
- * A, an invariant every copy path enforces.
+ * (dormant in Wave A: consumed by Wave B envelopes, never by Wave A
+ * rendering). @keyframes is the owned per-property keyframe store
+ * (Wave B): a GArray of OeKeyframe values — NULL or empty means the
+ * clip is static; every copy path deep-copies it, never aliases it.
  *
  * The identity state (oe_clip_visual_identity) reproduces the
  * pre-Phase-9 render exactly.
@@ -84,7 +86,7 @@ typedef struct
   guint crop_b;
   guint64 fade_in_us;
   guint64 fade_out_us;
-  GArray *keyframes; /* NULL in Wave A: the store arrives in Wave B */
+  GArray *keyframes; /* owned GArray of OeKeyframe; NULL/empty = static */
 } OeClipVisual;
 
 /**
@@ -97,9 +99,8 @@ typedef struct
  *     included (a still's source range encodes screen duration).
  * @media_ref: file-stable media reference owned by the project — never
  *     a session asset id (those are transient and never serialize).
- * @visual: owned picture geometry/opacity; deep-copied with the clip,
- *     never aliased (Wave B keyframes included via the NULL-store
- *     invariant enforced in Wave A).
+ * @visual: owned picture geometry/opacity, keyframe store included;
+ *     deep-copied with the clip, never aliased.
  */
 typedef struct
 {
@@ -118,21 +119,22 @@ typedef struct
 OeClipVisual oe_clip_visual_identity (void);
 
 /**
- * oe_clip_visual_clear: frees owned members and zeroes @visual (safe
- * on a zeroed struct, like the model's other clear helpers).
+ * oe_clip_visual_clear: frees owned members (the keyframe store) and
+ * zeroes @visual (safe on a zeroed struct, like the model's other
+ * clear helpers).
  */
 void oe_clip_visual_clear (OeClipVisual *visual);
 
 /**
  * oe_clip_visual_copy: deep-copies @src into @dst, clearing @dst's
- * owned members first. Wave A enforces the NULL keyframe-store
- * invariant on both sides.
+ * owned members first. The keyframe store is deep-copied, never
+ * shared.
  */
 void oe_clip_visual_copy (OeClipVisual *dst, const OeClipVisual *src);
 
 /**
- * oe_clip_visual_equal: field equality; owned stores compared by the
- * Wave A invariant (both NULL).
+ * oe_clip_visual_equal: field equality, keyframe stores compared by
+ * content (NULL and empty are equivalent — both mean static).
  */
 gboolean oe_clip_visual_equal (const OeClipVisual *a, const OeClipVisual *b);
 
@@ -219,6 +221,9 @@ GQuark oe_project_error_quark (void);
  * @OE_PROJECT_ERROR_BAD_VISUAL: a clip visual is out of domain —
  *     scale, rotation, opacity, crop, or fade beyond the documented
  *     ranges (see oe_clip_visual_is_valid).
+ * @OE_PROJECT_ERROR_BAD_KEYFRAME: a keyframe mutation is out of
+ *     domain — time outside the clip, value outside the property's
+ *     range, or a remove of a key that does not exist.
  */
 typedef enum
 {
@@ -230,6 +235,7 @@ typedef enum
   OE_PROJECT_ERROR_DUPLICATE_REF,
   OE_PROJECT_ERROR_BAD_SIZE,
   OE_PROJECT_ERROR_BAD_VISUAL,
+  OE_PROJECT_ERROR_BAD_KEYFRAME,
 } OeProjectError;
 
 /**
@@ -312,8 +318,9 @@ guint oe_project_get_clip_count (OeProject *project, guint track_index);
 
 /**
  * oe_project_get_clip:
- * @out: receives a value copy of the clip (OeClip owns no memory, so
- *     the struct copy IS the deep copy)
+ * @out: receives a deep value copy of the clip — @out->visual owns a
+ *     private keyframe store the caller releases with
+ *     oe_clip_visual_clear() when done
  *
  * Single-clip deep-copy getter: reads one clip's exact fields without
  * copying the whole sequence — the undo recorder captures pre-edit
@@ -334,6 +341,35 @@ gboolean oe_project_get_clip (OeProject *project, guint track_index, guint clip_
  */
 gboolean oe_project_set_clip_visual (OeProject *project, guint track_index, guint clip_index,
                                      const OeClipVisual *visual, GError **error);
+
+/**
+ * oe_project_set_clip_keyframe: the validated mutator for one keyed
+ * sample — inserts (or replaces) the key for (@property, @time_us) on
+ * the clip's visual, keeping the store sorted by (property, time).
+ * @time_us is clip-relative (0 = the clip's first frame) and must lie
+ * within [0, clip length]; @value must be in the property's domain.
+ * One observer notification per successful call; a keyframe edit is
+ * a visual-property edit, so the undo recorder wraps it in the same
+ * OE_UNDO_OP_VISUAL record as any other visual stroke.
+ *
+ * Returns FALSE (with #OE_PROJECT_ERROR_BAD_KEYFRAME or the usual
+ * typed index errors) when the mutation was rejected.
+ */
+gboolean oe_project_set_clip_keyframe (OeProject *project, guint track_index, guint clip_index,
+                                       OeKeyframeProperty property, gint64 time_us, gint32 value,
+                                       GError **error);
+
+/**
+ * oe_project_remove_clip_keyframe: the validated mutator that drops
+ * the key at exactly (@property, @time_us). Absent keys are rejected
+ * with #OE_PROJECT_ERROR_BAD_KEYFRAME — callers that want "remove if
+ * present" semantics check first.
+ *
+ * Returns FALSE (with @error set) when the mutation was rejected.
+ */
+gboolean oe_project_remove_clip_keyframe (OeProject *project, guint track_index, guint clip_index,
+                                          OeKeyframeProperty property, gint64 time_us,
+                                          GError **error);
 
 /**
  * oe_project_add_track:

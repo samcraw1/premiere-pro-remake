@@ -67,10 +67,7 @@ oe_clip_visual_clear (OeClipVisual *visual)
 {
   g_return_if_fail (visual != NULL);
 
-  /* Wave A invariant: the keyframe store is always NULL — enforced in
-   * every construction, copy, and undo-record path so Wave B can add
-   * real ownership without auditing a second aliasing story. */
-  g_assert_null (visual->keyframes);
+  g_clear_pointer (&visual->keyframes, g_array_unref);
   memset (visual, 0, sizeof (*visual));
 }
 
@@ -80,9 +77,11 @@ oe_clip_visual_copy (OeClipVisual *dst, const OeClipVisual *src)
   g_return_if_fail (dst != NULL);
   g_return_if_fail (src != NULL);
 
-  g_assert_null (dst->keyframes);
-  g_assert_null (src->keyframes);
+  /* Release the destination's owned store first, then copy fields and
+   * clone the source's store — the two visuals never share memory. */
+  g_clear_pointer (&dst->keyframes, g_array_unref);
   *dst = *src;
+  dst->keyframes = oe_keyframes_copy_array (src->keyframes);
 }
 
 gboolean
@@ -90,9 +89,15 @@ oe_clip_visual_equal (const OeClipVisual *a, const OeClipVisual *b)
 {
   g_return_val_if_fail (a != NULL, FALSE);
   g_return_val_if_fail (b != NULL, FALSE);
-  g_return_val_if_fail (a->keyframes == NULL && b->keyframes == NULL, FALSE);
 
-  return memcmp (a, b, sizeof (*a)) == 0;
+  if (!oe_keyframes_equal (a->keyframes, b->keyframes))
+    return FALSE;
+
+  return a->pos_x == b->pos_x && a->pos_y == b->pos_y && a->scale_permille == b->scale_permille
+         && a->rotation_cdeg == b->rotation_cdeg && a->opacity == b->opacity
+         && a->crop_l == b->crop_l && a->crop_t == b->crop_t && a->crop_r == b->crop_r
+         && a->crop_b == b->crop_b && a->fade_in_us == b->fade_in_us
+         && a->fade_out_us == b->fade_out_us;
 }
 
 gboolean
@@ -111,7 +116,7 @@ oe_clip_visual_is_valid (const OeClipVisual *visual)
 {
   g_return_val_if_fail (visual != NULL, FALSE);
 
-  if (visual->keyframes != NULL)
+  if (!oe_keyframes_valid (visual->keyframes))
     return FALSE;
   if (visual->scale_permille < 1 || visual->scale_permille > 32000)
     return FALSE;
@@ -527,15 +532,115 @@ oe_project_set_clip_visual (OeProject *self, guint track_index, guint clip_index
     }
 
   /* Validate first, deep-copy second, swap last: a rejected call never
-   * mutates the model. The staging visual is identity-initialized —
-   * oe_clip_visual_copy asserts a zeroed destination, so raw-stack
-   * storage would trip the Wave A keyframe-NULL invariant. */
+   * mutates the model. The staged visual owns its own keyframe store,
+   * so the swapped-out one is released exactly once. */
   OeClip *clip = g_ptr_array_index (track->clips, clip_index);
   OeClipVisual copy = oe_clip_visual_identity ();
 
   oe_clip_visual_copy (&copy, visual);
   oe_clip_visual_clear (&clip->visual);
   clip->visual = copy;
+
+  notify (self);
+  return TRUE;
+}
+
+gboolean
+oe_project_set_clip_keyframe (OeProject *self, guint track_index, guint clip_index,
+                              OeKeyframeProperty property, gint64 time_us, gint32 value,
+                              GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip index %u out of range on track %u", clip_index, track_index);
+      return FALSE;
+    }
+
+  if (!oe_keyframe_value_in_domain (property, value))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_KEYFRAME,
+                   "keyframe value %d out of domain for property %s", value,
+                   oe_keyframe_property_get_name (property));
+      return FALSE;
+    }
+
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+  const gint64 length_us = clip->source_out_us - clip->source_in_us;
+
+  if (time_us < 0 || time_us > length_us)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_KEYFRAME,
+                   "keyframe time %" G_GINT64_FORMAT " out of the clip's [0, %" G_GINT64_FORMAT
+                   "] range",
+                   time_us, length_us);
+      return FALSE;
+    }
+
+  /* Stage the new store fully before touching the model: a fresh array
+   * (the clip may not have one yet) receives the sorted insertion, and
+   * the staged store swaps in only after every check passed. */
+  GArray *staged = oe_keyframes_copy_array (clip->visual.keyframes);
+
+  if (staged == NULL)
+    staged = g_array_new (FALSE, FALSE, sizeof (OeKeyframe));
+
+  oe_keyframes_insert (staged, (OeKeyframe) { property, time_us, value });
+  g_clear_pointer (&clip->visual.keyframes, g_array_unref);
+  clip->visual.keyframes = staged;
+
+  notify (self);
+  return TRUE;
+}
+
+gboolean
+oe_project_remove_clip_keyframe (OeProject *self, guint track_index, guint clip_index,
+                                 OeKeyframeProperty property, gint64 time_us, GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track index %u out of range", track_index);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip index %u out of range on track %u", clip_index, track_index);
+      return FALSE;
+    }
+
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+
+  if (clip->visual.keyframes == NULL
+      || !oe_keyframes_remove (clip->visual.keyframes, property, time_us))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_KEYFRAME,
+                   "no keyframe for property %s at time %" G_GINT64_FORMAT,
+                   oe_keyframe_property_get_name (property), time_us);
+      return FALSE;
+    }
+
+  /* An emptied store is equivalent to no store — release it so the
+   * clip settles back to the plain static representation. */
+  if (clip->visual.keyframes->len == 0)
+    g_clear_pointer (&clip->visual.keyframes, g_array_unref);
 
   notify (self);
   return TRUE;
