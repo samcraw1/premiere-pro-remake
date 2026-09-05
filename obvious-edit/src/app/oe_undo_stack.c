@@ -412,6 +412,10 @@ record_visual_stroke (OeProject *project, OeUndoStack *stack, guint track_index,
       track_index, clip_index);
 
   rec->clip = before;
+  /* The undo payload is the STROKE baseline, not the project state at
+   * record time — a previewed stroke leaves the model at its last
+   * preview, and undo must restore where the stroke began. */
+  rec->clip.visual = *old_visual;
   rec->new_visual = *new_visual; /* Wave A: no owned memory, value copy is deep */
   stack_push (stack, rec);
   return TRUE;

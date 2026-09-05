@@ -656,6 +656,167 @@ test_sequence_size_rejections (void)
   g_free (observer);
 }
 
+/* --- clip visual properties (Phase 9 Wave A) ---------------------------------- */
+
+static void
+test_visual_identity_defaults (void)
+{
+  OeProject *project = oe_project_new_default ();
+  guint track = oe_project_add_track (project, OE_TRACK_VIDEO);
+  guint ref = oe_project_add_media (project, "/media/a.mp4");
+
+  g_assert_true (oe_project_insert_clip (project, track, ref, 0, 0, 1000000, NULL));
+
+  OeClip clip;
+
+  g_assert_true (oe_project_get_clip (project, track, 0, &clip));
+
+  /* Zero-value equals today's behavior: identity picture geometry, no
+   * dormant state (fades at zero, keyframe store absent). */
+  g_assert_true (oe_clip_visual_is_default (&clip.visual));
+  g_assert_cmpint (clip.visual.pos_x, ==, 0);
+  g_assert_cmpint (clip.visual.pos_y, ==, 0);
+  g_assert_cmpuint (clip.visual.scale_permille, ==, 1000);
+  g_assert_cmpint (clip.visual.rotation_cdeg, ==, 0);
+  g_assert_cmpuint (clip.visual.opacity, ==, 255);
+  g_assert_cmpuint (clip.visual.crop_l, ==, 0);
+  g_assert_cmpuint (clip.visual.crop_t, ==, 0);
+  g_assert_cmpuint (clip.visual.crop_r, ==, 0);
+  g_assert_cmpuint (clip.visual.crop_b, ==, 0);
+  g_assert_cmpint (clip.visual.fade_in_us, ==, 0);
+  g_assert_cmpint (clip.visual.fade_out_us, ==, 0);
+  g_assert_null (clip.visual.keyframes);
+
+  g_clear_object (&project);
+}
+
+static void
+test_visual_mutator (void)
+{
+  OeProject *project = oe_project_new_default ();
+  guint track = oe_project_add_track (project, OE_TRACK_VIDEO);
+  guint ref = oe_project_add_media (project, "/media/a.mp4");
+
+  g_assert_true (oe_project_insert_clip (project, track, ref, 0, 0, 1000000, NULL));
+
+  Observer *observer = observer_new ();
+
+  oe_project_set_observer (project, observer_count, observer);
+
+  OeClipVisual visual = oe_clip_visual_identity ();
+
+  visual.pos_x = 40;
+  visual.pos_y = -12;
+  visual.scale_permille = 1250;
+  visual.rotation_cdeg = -1500;
+  visual.opacity = 128;
+  visual.crop_r = 10;
+  visual.crop_b = 20;
+
+  GError *error = NULL;
+
+  g_assert_true (oe_project_set_clip_visual (project, track, 0, &visual, &error));
+  g_assert_cmpuint (observer->count, ==, 1); /* exactly one notification */
+
+  OeClip clip;
+
+  g_assert_true (oe_project_get_clip (project, track, 0, &clip));
+  g_assert_true (oe_clip_visual_equal (&clip.visual, &visual));
+
+  /* Out-of-domain values fail with the typed error, never notify,
+   * and leave the stored visual untouched. */
+  static const struct
+  {
+    const gchar *what;
+    int scale_permille;
+    int rotation_cdeg;
+    guint8 opacity;
+    int pos_y;
+  } bad[] = {
+    { "zero scale", 0, 0, 255, 0 },
+    { "scale above 32x", 32001, 0, 255, 0 },
+    { "rotation below -360", 0, -36001, 255, 0 },
+    { "rotation above 360", 0, 36001, 255, 0 },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (bad); i++)
+    {
+      OeClipVisual probe = visual;
+
+      probe.scale_permille = (guint) bad[i].scale_permille;
+      probe.rotation_cdeg = bad[i].rotation_cdeg;
+      probe.opacity = bad[i].opacity;
+      probe.pos_y = bad[i].pos_y;
+
+      g_assert_false (oe_project_set_clip_visual (project, track, 0, &probe, &error));
+      g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_VISUAL);
+      g_clear_error (&error);
+    }
+
+  g_assert_cmpuint (observer->count, ==, 1);
+
+  g_assert_true (oe_project_get_clip (project, track, 0, &clip));
+  g_assert_true (oe_clip_visual_equal (&clip.visual, &visual));
+
+  /* Bad indices report the clip error without touching the observer. */
+  g_assert_false (oe_project_set_clip_visual (project, track, 3, &visual, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP);
+  g_clear_error (&error);
+  g_assert_cmpuint (observer->count, ==, 1);
+
+  g_clear_object (&project);
+  g_free (observer);
+}
+
+static void
+test_visual_deep_copy (void)
+{
+  OeProject *project = oe_project_new_default ();
+  guint track = oe_project_add_track (project, OE_TRACK_VIDEO);
+  guint ref = oe_project_add_media (project, "/media/a.mp4");
+
+  g_assert_true (oe_project_insert_clip (project, track, ref, 0, 0, 1000000, NULL));
+
+  OeClipVisual visual = oe_clip_visual_identity ();
+
+  visual.scale_permille = 2000;
+  visual.opacity = 100;
+
+  g_assert_true (oe_project_set_clip_visual (project, track, 0, &visual, NULL));
+
+  /* The getter's copy is independent: further model mutations leave
+   * it exactly as read. */
+  OeClip held;
+
+  g_assert_true (oe_project_get_clip (project, track, 0, &held));
+
+  OeClipVisual changed = visual;
+
+  changed.scale_permille = 3000;
+  g_assert_true (oe_project_set_clip_visual (project, track, 0, &changed, NULL));
+  g_assert_true (oe_clip_visual_equal (&held.visual, &visual));
+
+  /* The sequence snapshot deep-copies the visual too, and mutating
+   * the snapshot cannot leak back into the model. */
+  OeSequence sequence;
+
+  oe_project_get_sequence (project, &sequence);
+
+  OeTrack *snapshot = g_ptr_array_index (sequence.tracks, 0);
+  OeClip *snapshot_clip = g_ptr_array_index (snapshot->clips, 0);
+
+  g_assert_true (oe_clip_visual_equal (&snapshot_clip->visual, &changed));
+  g_assert_null (snapshot_clip->visual.keyframes);
+
+  snapshot_clip->visual.scale_permille = 4000;
+
+  g_assert_true (oe_project_get_clip (project, track, 0, &held));
+  g_assert_true (oe_clip_visual_equal (&held.visual, &changed));
+
+  oe_sequence_clear (&sequence);
+  g_clear_object (&project);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -677,6 +838,9 @@ main (int argc, char *argv[])
   g_test_add_func ("/project/trim-rejections", test_trim_rejections);
   g_test_add_func ("/project/trim-still-extension", test_trim_still_extension);
   g_test_add_func ("/project/trim-observer", test_trim_observer);
+  g_test_add_func ("/project/visual-identity-defaults", test_visual_identity_defaults);
+  g_test_add_func ("/project/visual-mutator", test_visual_mutator);
+  g_test_add_func ("/project/visual-deep-copy", test_visual_deep_copy);
   g_test_add_func ("/project/destruction-order", test_destruction_order);
 
   return g_test_run ();
