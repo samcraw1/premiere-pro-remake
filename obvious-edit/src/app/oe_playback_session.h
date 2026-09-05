@@ -31,7 +31,6 @@
  */
 
 #pragma once
-
 #include <glib.h>
 
 #include "../core/oe_project.h"
@@ -231,6 +230,76 @@ gint64 oe_playback_session_tick (OePlaybackSession *session);
 
 gint64 oe_playback_session_get_position (const OePlaybackSession *session);
 OePlaybackState oe_playback_session_get_state (const OePlaybackSession *session);
+
+/**
+ * OePlaybackMeterFunc:
+ * @peaks: one peak per channel, 0..1 (float absolute max of the mixed
+ *     span), ordered like the stream's interleaved channels
+ * @n_channels: channel count of the open stream
+ * @user_data: data passed to oe_playback_session_set_meter_func()
+ *
+ * Phase 10 Wave B metering tap (D6): invoked on the main context for
+ * every span of mixed audio the session pushes to the device — no locks,
+ * no worker thread access, GTK-free. Peaks stop arriving when playback
+ * pauses, so a meter display decays toward silence on its own (the
+ * widget's decay law). GTK-free like the session: a display wires this
+ * to a repaint, a test wires it to a capture.
+ */
+typedef void (*OePlaybackMeterFunc) (OePlaybackSession *session, const gfloat *peaks,
+                                     int n_channels, gpointer user_data);
+
+/**
+ * OePlaybackMixFunc:
+ * @seq_start_us: sequence time of the first frame in @interleaved
+ * @n_frames: sample frames in the mixed span
+ * @channels: interleaved channel count
+ * @sample_rate: sample rate of the mixed span
+ * @interleaved: the post-clamp mixed span (session-owned, valid only
+ *     during the callback)
+ * @user_data: data passed to oe_playback_session_set_mix_func()
+ *
+ * Phase 10 Wave B deterministic-delivery seam: invoked on the main
+ * context for every contiguous span of FINAL mixed audio (all
+ * contributing tracks summed, clamped, ready for the device queue).
+ * GTK-free; a test uses this to capture exactly what playback would
+ * queue — the preview side of the parity contract. Installing it is
+ * pure observation: audio queues regardless.
+ */
+typedef void (*OePlaybackMixFunc) (OePlaybackSession *session, gint64 seq_start_us, gsize n_frames,
+                                   int channels, int sample_rate, const gfloat *interleaved,
+                                   gpointer user_data);
+
+/**
+ * oe_playback_session_set_meter_func:
+ * @session: a playback session
+ * @func: (nullable): observer for per-span mixed peaks, or NULL to clear
+ * @user_data: data passed to @func
+ *
+ * Phase 10 Wave B metering tap (D6): invoked on the main context for
+ * every span of mixed audio the session pushes to the device — no locks,
+ * no worker thread access, GTK-free. Peaks stop arriving when playback
+ * pauses, so a meter display decays toward silence on its own (the
+ * widget's decay law). GTK-free like the session: a display wires this
+ * to a repaint, a test wires it to a capture.
+ */
+void oe_playback_session_set_meter_func (OePlaybackSession *session, OePlaybackMeterFunc func,
+                                         gpointer user_data);
+
+/**
+ * oe_playback_session_set_mix_func:
+ * @session: a playback session
+ * @func: (nullable): observer for final mixed spans, or NULL to clear
+ * @user_data: data passed to @func
+ *
+ * Phase 10 Wave B deterministic-delivery seam: invoked on the main
+ * context for every contiguous span of FINAL mixed audio (all
+ * contributing tracks summed, clamped, ready for the device queue).
+ * GTK-free; a test uses this to capture exactly what playback would
+ * queue — the preview side of the parity contract. Installing it is
+ * pure observation: audio queues regardless.
+ */
+void oe_playback_session_set_mix_func (OePlaybackSession *session, OePlaybackMixFunc func,
+                                       gpointer user_data);
 
 /**
  * oe_playback_session_get_sequence_end:

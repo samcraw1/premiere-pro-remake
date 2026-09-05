@@ -184,6 +184,7 @@ typedef struct
   OeMediaPlaybackWorker *worker;
   OePlaybackAudioChunk *chunk; /* NULL for signals */
   GError *error;               /* set only when chunk == NULL and failed */
+  guint generation;            /* the owning request's token; chunks echo their own */
 } Delivery;
 
 struct _OeMediaPlaybackWorker
@@ -215,7 +216,7 @@ deliver_on_main (gpointer data)
 {
   Delivery *d = data;
 
-  d->worker->on_audio (d->chunk, d->error, d->worker->user_data);
+  d->worker->on_audio (d->chunk, d->error, d->generation, d->worker->user_data);
 
   if (d->chunk != NULL)
     oe_playback_audio_chunk_free (d->chunk);
@@ -225,15 +226,22 @@ deliver_on_main (gpointer data)
 }
 
 /* Hand @chunk (or a NULL-chunk signal) to the main context. Ownership of
- * chunk and error transfers to the delivery. */
+ * chunk and error transfers to the delivery. @generation stamps the
+ * delivery with the owning request's token so the receiver can drop a
+ * stale END-OF-RANGE or failure signal exactly like a stale chunk —
+ * Phase 10 Wave B: the mixer chains decode requests per window, so a
+ * late signal from a superseded decode must never advance the new
+ * chain. A chunk's own generation wins; a signal carries @generation. */
 static void
-deliver (OeMediaPlaybackWorker *worker, OePlaybackAudioChunk *chunk, GError *error)
+deliver (OeMediaPlaybackWorker *worker, OePlaybackAudioChunk *chunk, GError *error,
+         guint generation)
 {
   Delivery *d = g_new0 (Delivery, 1);
 
   d->worker = worker;
   d->chunk = chunk;
   d->error = error;
+  d->generation = chunk != NULL ? chunk->generation : generation;
   g_main_context_invoke (NULL, deliver_on_main, d);
 }
 
@@ -279,7 +287,7 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
 
   if (!ensure_audio_decoder (worker, req->path, &error))
     {
-      deliver (worker, NULL, error);
+      deliver (worker, NULL, error, req->generation);
       return;
     }
 
@@ -303,7 +311,8 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
         swr_free (&swr);
       deliver (worker, NULL,
                g_error_new (OE_MEDIA_PLAYBACK_ERROR, OE_MEDIA_PLAYBACK_ERROR_OPEN_FAILED,
-                            "'%s': resampler setup failed", req->path));
+                            "'%s': resampler setup failed", req->path),
+               req->generation);
       return;
     }
 
@@ -331,6 +340,7 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
 
   float *buf = g_malloc (chunk_bytes);
   gsize buf_frames = 0;
+  gint64 buf_start_us = 0; /* source time of buf[0]; stamped on every empty append */
   gboolean hit_end = FALSE;
 
   AVPacket *pkt = av_packet_alloc ();
@@ -427,12 +437,19 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
             }
 
           /* Append to the chunk buffer, delivering full chunks as they
-           * fill. Chunk source time advances at the output rate. */
+           * fill. Chunk source time advances at the output rate. The
+           * buffer's anchor is stamped when the buffer is EMPTY: a full
+           * buffer's first frame belongs to the sample appended there,
+           * which may be a residual from an earlier decoder frame. */
           gint64 written = 0;
           while (written < keep && !superseded (worker))
             {
               gsize room = CHUNK_FRAMES - buf_frames;
               gsize take = (gsize) MIN ((gint64) room, keep - written);
+
+              if (buf_frames == 0)
+                buf_start_us = frame_src_us
+                               + (skip + (gint64) written) * G_GINT64_CONSTANT (1000000) / out_rate;
 
               memcpy (buf + buf_frames * (gsize) out_channels,
                       temp + (size_t) (skip + written) * (gsize) out_channels,
@@ -443,18 +460,17 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
               if (buf_frames == CHUNK_FRAMES)
                 {
                   OePlaybackAudioChunk *chunk = g_new0 (OePlaybackAudioChunk, 1);
-                  chunk->source_us = frame_src_us
-                                     + (skip + (gint64) (written - (gint64) take))
-                                           * G_GINT64_CONSTANT (1000000) / out_rate;
+                  chunk->source_us = buf_start_us;
                   chunk->sample_rate = req->sample_rate;
                   chunk->channels = out_channels;
                   chunk->n_frames = buf_frames;
                   chunk->generation = req->generation;
                   chunk->interleaved = buf;
-                  deliver (worker, chunk, NULL);
+                  deliver (worker, chunk, NULL, req->generation);
 
                   buf = g_malloc (chunk_bytes);
                   buf_frames = 0;
+                  buf_start_us += (gint64) CHUNK_FRAMES * G_GINT64_CONSTANT (1000000) / out_rate;
                 }
             }
 
@@ -472,15 +488,17 @@ decode_audio_range (OeMediaPlaybackWorker *worker, Request *req)
       if (buf_frames > 0)
         {
           OePlaybackAudioChunk *chunk = g_new0 (OePlaybackAudioChunk, 1);
+          chunk->source_us = buf_start_us; /* was unset: trailed as 0 and got
+                                             dropped or miswritten downstream */
           chunk->sample_rate = req->sample_rate;
           chunk->channels = out_channels;
           chunk->n_frames = buf_frames;
           chunk->generation = req->generation;
           chunk->interleaved = buf;
-          deliver (worker, chunk, NULL);
+          deliver (worker, chunk, NULL, req->generation);
           buf = NULL;
         }
-      deliver (worker, NULL, NULL);
+      deliver (worker, NULL, NULL, req->generation);
     }
 
   g_free (buf);

@@ -74,9 +74,15 @@ void oe_playback_video_frame_free (OePlaybackVideoFrame *frame);
  * @chunk == NULL && @error != NULL: the range failed to decode (missing
  *     media, unsupported stream); @error is owned by the delivery and
  *     valid only during the callback.
+ * @generation: the request token every delivery echoes — chunks carry it
+ *     in #OePlaybackAudioChunk, and the NULL-chunk signals carry the
+ *     owning request's token so a caller can drop stale END-OF-RANGE and
+ *     failure signals exactly like stale chunks (Phase 10 Wave B: the
+ *     multi-track mixer chains requests, so a late signal from a
+ *     superseded decode must never advance the new chain).
  */
 typedef void (*OePlaybackAudioFunc) (OePlaybackAudioChunk *chunk, const GError *error,
-                                     gpointer user_data);
+                                     guint generation, gpointer user_data);
 
 typedef struct _OeMediaPlaybackWorker OeMediaPlaybackWorker;
 

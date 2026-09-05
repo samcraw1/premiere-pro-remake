@@ -44,11 +44,13 @@
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 
+#include "../src/app/oe_playback_session.h"
 #include "../src/core/oe_project.h"
 #include "../src/core/oe_time.h"
 #include "../src/media/oe_export.h"
 #include "../src/media/oe_probe.h"
 #include "../src/media/oe_render.h"
+#include "../src/playback/oe_audio_output.h"
 #include "fixture_media.h"
 
 /* Test sequence geometry (even, ≤ 320x240, fast under sanitizers). */
@@ -2017,10 +2019,347 @@ test_parity_transition_fade (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUS
   g_free (wav);
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 10 Wave B: multi-track preview/export audio parity (D1).       */
+/* ------------------------------------------------------------------ */
+
+/* Mid-frequency sine fixture: AAC's DC filter would bend an absolute
+ * level comparison made against a constant-amplitude WAV, but a 440 Hz
+ * tone survives the encode essentially intact, so the preview mix and
+ * the exported mixdown can be compared level-for-level in matched
+ * time windows. */
+static void
+write_sine_wav (const OeFixtures *fx, const gchar *name, gint16 amp, double freq, gint64 useconds)
+{
+  const gint64 frames = useconds * 22050 / 1000000;
+  const guint32 data_bytes = (guint32) (frames * 2);
+  const guint32 riff_size = 36 + data_bytes;
+  const guint32 rate = 22050;
+  const guint32 fmt_size = 16;
+  const guint16 audio_format = 1, channels = 1, bits = 16, block_align = 2;
+  const guint32 byte_rate = rate * 2;
+  gchar *path = g_build_filename (fx->dir, name, NULL);
+  FILE *f = fopen (path, "wb");
+
+  g_assert_nonnull (f);
+
+  fwrite ("RIFF", 1, 4, f);
+  fwrite (&riff_size, 4, 1, f);
+  fwrite ("WAVE", 1, 4, f);
+  fwrite ("fmt ", 1, 4, f);
+  fwrite (&fmt_size, 4, 1, f);
+  fwrite (&audio_format, 2, 1, f);
+  fwrite (&channels, 2, 1, f);
+  fwrite (&rate, 4, 1, f);
+  fwrite (&byte_rate, 4, 1, f);
+  fwrite (&block_align, 2, 1, f);
+  fwrite (&bits, 2, 1, f);
+  fwrite ("data", 1, 4, f);
+  fwrite (&data_bytes, 4, 1, f);
+
+  for (gint64 i = 0; i < frames; i++)
+    {
+      const double t = (double) i / 22050.0;
+      const gint16 s = (gint16) (amp * sin (2.0 * G_PI * freq * t));
+
+      fwrite (&s, 2, 1, f);
+    }
+
+  fclose (f);
+  g_free (path);
+}
+
+/* Mean absolute amplitude of ONE channel over [start_us, end_us).
+ * The parity proof compares per-channel LEVELS between two renderings
+ * of the same mix, so the absolute value keeps the sine's magnitude
+ * instead of a signed sum cancelling to zero over full periods. */
+static gdouble
+channel_mean_abs (const FloatAudio *a, gint64 start_us, gint64 end_us, int channel)
+{
+  gint64 s = start_us * 48 / 1000;
+  gint64 e = end_us * 48 / 1000;
+
+  g_assert_cmpint ((int) s, <, (int) a->frames);
+
+  e = MIN (e, a->frames);
+
+  gdouble acc = 0;
+  gint64 count = 0;
+
+  for (gint64 i = s; i < e; i++)
+    {
+      acc += fabs (a->data[i * 2 + channel]);
+      count++;
+    }
+
+  return acc / (gdouble) MAX (count, 1);
+}
+
+/* Accumulates the session's mixed spans for off-line comparison — the
+ * preview side of the parity contract. The mix observer reports the
+ * span's own format, so matched windows convert with the capture's
+ * rate rather than assuming the device format. */
+typedef struct
+{
+  gfloat *data;  /* interleaved, capture's format                  */
+  gint64 frames; /* frames accumulated                             */
+  int channels;
+  int rate;
+  gint64 start_us; /* sequence time of data[0]                      */
+} MixCapture;
+
+static void
+collect_mix (OePlaybackSession *session G_GNUC_UNUSED, gint64 seq_start_us, gsize n_frames,
+             int channels, int sample_rate, const gfloat *interleaved, gpointer user_data)
+{
+  MixCapture *cap = user_data;
+
+  if (cap->frames == 0)
+    {
+      cap->channels = channels;
+      cap->rate = sample_rate;
+      cap->start_us = seq_start_us;
+    }
+  else
+    {
+      /* The mixed spans must be contiguous — a gap would mean the
+       * mixer dropped part of the sequence. */
+      const gint64 expected
+          = cap->start_us + cap->frames * G_GINT64_CONSTANT (1000000) / MAX (cap->rate, 1);
+
+      g_assert_cmpint ((int) llabs (seq_start_us - expected), <=, 1000);
+      g_assert_cmpint (channels, ==, cap->channels);
+      g_assert_cmpint (sample_rate, ==, cap->rate);
+    }
+
+  const gsize samples = n_frames * (gsize) channels;
+
+  cap->data = g_realloc_n (cap->data, (gsize) (cap->frames + (gint64) n_frames) * (gsize) channels,
+                           sizeof (gfloat));
+  memcpy (cap->data + (gsize) cap->frames * (gsize) channels, interleaved,
+          samples * sizeof (gfloat));
+  cap->frames += (gint64) n_frames;
+}
+
+static void
+mix_capture_clear (MixCapture *cap)
+{
+  g_clear_pointer (&cap->data, g_free);
+  cap->frames = 0;
+  cap->channels = 0;
+  cap->rate = 0;
+  cap->start_us = 0;
+}
+
+/* Mean absolute amplitude of one capture channel over [start_us,
+ * end_us) in sequence time. */
+static gdouble
+capture_mean_abs (const MixCapture *cap, gint64 start_us, gint64 end_us, int channel)
+{
+  gint64 s = (start_us - cap->start_us) * cap->rate / G_GINT64_CONSTANT (1000000);
+  gint64 e = (end_us - cap->start_us) * cap->rate / G_GINT64_CONSTANT (1000000);
+
+  g_assert_true (s >= 0);
+  g_assert_cmpint ((int) s, <, (int) cap->frames);
+
+  e = MIN (e, cap->frames);
+
+  gdouble acc = 0;
+  gint64 count = 0;
+
+  for (gint64 i = s; i < e; i++)
+    {
+      acc += fabs (cap->data[i * cap->channels + channel]);
+      count++;
+    }
+
+  return acc / (gdouble) MAX (count, 1);
+}
+
+/* /export/parity-audio-mix-two-tracks: the D1 acceptance proof. A
+ * two-audio-track project — both tracks carrying the same sine clip
+ * with distinct clip/track gain and pan states — is played through
+ * the REAL session mixer (virtual clock, deterministic deliveries,
+ * mix-observer capture) and exported through the mixdown; per-channel
+ * windowed mean levels must agree within 0.02 (the audio analogue of
+ * the ≤ 8 per-block video idiom: 8/255 ≈ 0.031, tightened for the
+ * sine's higher dynamic range). The mixer sums every audio track per
+ * chunk period in track-array order; a single-lane playback (the
+ * pre-Wave-B topmost-track-wins mapping) captures only track B, so
+ * every channel level lands far outside the tolerance — this test
+ * fails by construction until D1 lands. */
+static gboolean audio_ready = FALSE;
+
+/* Virtual clock for the parity transport: every tick advances the
+ * clock by hand, so no timing depends on wall time — only the
+ * worker's decode speed does. */
+typedef struct
+{
+  gint64 now_us;
+} ParityClock;
+
+static gint64
+parity_fake_time (gpointer data)
+{
+  return ((ParityClock *) data)->now_us;
+}
+
+static void
+test_parity_audio_mix_two_tracks (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  g_assert_true (audio_ready); /* SDL audio adapter initialized in main */
+
+  gchar *red, *blue;
+  OeProject *project = build_two_cut_video (fx, &red, &blue);
+
+  write_sine_wav (fx, "tone.wav", 8192, 440.0, 700000);
+  gchar *wav = g_build_filename (fx->dir, "tone.wav", NULL);
+  const guint track_a = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint track_b = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint ref = add_media (project, wav);
+
+  g_assert_cmpuint (track_a, !=, track_b);
+
+  /* Both tracks carry the same clip spanning [0, 0.6 s). */
+  insert_clip (project, track_a, ref, 0, 600000);
+  insert_clip (project, track_b, ref, 0, 600000);
+
+  /* Distinct levels and pans on both chain stages (buffer-constant
+   * factors, D1). Per-channel sums relative to the source sample s:
+   *   track A: clip center ×1, volume 2048 → L = R = 2.0 × s
+   *   track B: clip gain 512 pan 768 (L 0.5, R 1.5 pairs), volume 512
+   *            pan 384 (L 1.25, R 0.75 pairs)
+   *            → L = 0.15625 × s, R = 0.28125 × s
+   *   mixdown: L = 3.15625 × s, R = 1.28125 × s (peak 0.79 / 0.32 —
+   *            comfortably inside the clamp). */
+  OeClipAudio clip_a = { .gain = 1024, .pan = 256 };
+
+  g_assert_true (oe_project_set_clip_audio (project, track_a, 0, &clip_a, NULL));
+
+  OeClipAudio clip_b = { .gain = 512, .pan = 768 };
+
+  g_assert_true (oe_project_set_clip_audio (project, track_b, 0, &clip_b, NULL));
+
+  OeTrackAudio ta = { .volume = 2048, .pan = 512, .mute = 0, .solo = 0 };
+  OeTrackAudio tb = { .volume = 512, .pan = 384, .mute = 0, .solo = 0 };
+
+  g_assert_true (oe_project_set_track_audio (project, track_a, &ta, NULL));
+  g_assert_true (oe_project_set_track_audio (project, track_b, &tb, NULL));
+
+  /* ---- Preview side: play the sequence through the real mixer. ---- */
+
+  OePlaybackSession *session = oe_playback_session_new ((const OeProject *) project);
+
+  ParityClock clock = { G_GINT64_CONSTANT (1000000) };
+
+  oe_playback_session_set_time_source (session, parity_fake_time, &clock);
+
+  MixCapture cap = { 0 };
+
+  oe_playback_session_set_mix_func (session, collect_mix, &cap);
+
+  GError *error = NULL;
+
+  g_assert_true (oe_playback_session_play (session, &error));
+  g_assert_no_error (error);
+
+  /* Drive the transport across the sequence; pump the main context so
+   * the worker's decoded deliveries (g_main_context_invoke) reach the
+   * mixer. The session feeds position + 250 ms lookahead, so the first
+   * mixed window starts near 250 ms and the capture runs to the clip
+   * end at 600 ms. Bounded loop + progress guard: a stalled capture
+   * fails with the window actually captured. */
+  const gint64 target_us = 550000;
+  gint64 last_frames = 0;
+  int stall = 0;
+
+  for (int i = 0; i < 20000; i++)
+    {
+      const gint64 have_us = cap.frames * G_GINT64_CONSTANT (1000000) / MAX (cap.rate, 1);
+
+      if (have_us >= target_us || oe_playback_session_get_state (session) != OE_PLAYBACK_PLAYING)
+        break;
+
+      clock.now_us += 40000;
+      oe_playback_session_tick (session);
+
+      while (g_main_context_iteration (NULL, FALSE))
+        ;
+
+      g_usleep (2000); /* the worker decodes off-thread; yield to it */
+
+      if (cap.frames == last_frames)
+        stall++;
+      else
+        stall = 0;
+      last_frames = cap.frames;
+
+      g_assert_cmpint (stall, <, 3000); /* ~6 s of no progress: broken */
+    }
+
+  const gint64 captured_us = cap.frames * G_GINT64_CONSTANT (1000000) / MAX (cap.rate, 1);
+
+  g_assert_cmpint ((int) captured_us, >=, 250000);
+
+  oe_playback_session_stop (session);
+  g_clear_pointer (&session, oe_playback_session_free); /* drains the worker */
+
+  /* ---- Export side: the mixdown of the same project. ---- */
+
+  gchar *dest = g_build_filename (fx->dir, "out.mp4", NULL);
+
+  g_assert_true (
+      run_export (project, dest, OE_EXPORT_QUALITY_MEDIUM, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+
+  FloatAudio mix;
+
+  decode_audio_float (dest, &mix);
+
+  /* ---- Per-channel parity over the steady mid window. ---- */
+  for (int c = 0; c < 2; c++)
+    {
+      const gdouble preview = capture_mean_abs (&cap, 300000, 500000, c);
+      const gdouble exported = channel_mean_abs (&mix, 300000, 500000, c);
+
+      g_assert_cmpfloat (preview, >, 0.02); /* real signal on this channel */
+      g_assert_cmpfloat (fabs (preview - exported), <=, 0.02);
+    }
+
+  /* The distinct pans must be visible on BOTH sides (sanity on the
+   * fixture itself: left-leaning A + right-leaning B pair stages). */
+  g_assert_cmpfloat (capture_mean_abs (&cap, 300000, 500000, 0), >,
+                     1.5 * capture_mean_abs (&cap, 300000, 500000, 1));
+  g_assert_cmpfloat (channel_mean_abs (&mix, 300000, 500000, 0), >,
+                     1.5 * channel_mean_abs (&mix, 300000, 500000, 1));
+
+  mix_capture_clear (&cap);
+  float_audio_clear (&mix);
+  g_free (dest);
+  g_object_unref (project);
+  g_free (red);
+  g_free (blue);
+  g_free (wav);
+}
+
 int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+
+  /* /export/parity-audio-mix-two-tracks plays through the real
+   * session, which opens an SDL stream at play(): init the audio
+   * adapter for the whole run (dummy driver via the test
+   * environment). Failure only disables the parity test. */
+  GError *audio_error = NULL;
+
+  audio_ready = oe_audio_output_init (&audio_error);
+
+  if (!audio_ready)
+    {
+      g_printerr ("audio init failed: %s\n", audio_error->message);
+      g_error_free (audio_error);
+    }
 
 #define OE_ADD(path, fn)                                                                           \
   g_test_add ((path), OeFixtures, NULL, fixture_set_up, (fn), fixture_tear_down)
@@ -2036,6 +2375,7 @@ main (int argc, char *argv[])
   OE_ADD ("/export/mixdown-mute-solo-matrix", test_mixdown_mute_solo_matrix);
   OE_ADD ("/export/mixdown-fade-ratio", test_mixdown_fade_ratio);
   OE_ADD ("/export/parity-transition-fade", test_parity_transition_fade);
+  OE_ADD ("/export/parity-audio-mix-two-tracks", test_parity_audio_mix_two_tracks);
   OE_ADD ("/export/container-truth", test_container_truth);
   OE_ADD ("/export/content-round-trip", test_content_round_trip);
   OE_ADD ("/export/mixdown-sums", test_mixdown_sums);
@@ -2045,5 +2385,10 @@ main (int argc, char *argv[])
 
 #undef OE_ADD
 
-  return g_test_run ();
+  const int result = g_test_run ();
+
+  if (audio_ready)
+    oe_audio_output_shutdown ();
+
+  return result;
 }

@@ -12,10 +12,18 @@
  * Threading: every entry point runs on the main thread. The media
  * worker's chunk deliveries are invoked onto the main context, so no
  * lock is taken anywhere in this file.
+ *
+ * Audio mixing (Phase 10 Wave B): the session is a multi-track mixer —
+ * each mix window sums EVERY audible audio track's decoded contribution
+ * through the shared factor chain into one interleaved buffer and queues
+ * the final regions; a metering tap observes per-span peaks on the way
+ * through. GTK never appears here.
  */
 
 #include "oe_playback_session.h"
 
+#include "../core/oe_audio_buffer.h"
+#include "../core/oe_audio_factor.h"
 #include "../core/oe_fades.h"
 
 #include "../core/oe_time.h"
@@ -34,6 +42,41 @@
  * position; snap when the gap exceeds a frame (device drop or stall). */
 #define DRIFT_SLEW_US 1000
 #define DRIFT_SNAP_US G_GINT64_CONSTANT (40000)
+
+/* One contributing (clip, track) pair of the active mix window,
+ * captured at window-open time so deliveries never re-read the model. */
+typedef struct
+{
+  guint media_ref;         /* resolved to a path at request time */
+  gint64 clip_position_us; /* clip placement in sequence time */
+  gint64 clip_source_in_us;
+  gint64 clip_end_seq_us; /* sequence time where the clip ends */
+  guint64 fade_in_us;     /* the clip's shared envelope (Wave B) */
+  guint64 fade_out_us;
+  gint64 src_from_us; /* the decoded source range */
+  gint64 src_to_us;
+  gint32 factor[2]; /* buffer-constant chain factors (D1/D5) */
+} MixSlot;
+
+/* The active mix window (D1): the span [seq_start_us, seq_start_us +
+ * window_frames) is filled by decoding each contributing audio track's
+ * range SEQUENTIALLY (the worker owns one request at a time) and
+ * summing into one interleaved buffer in track-array order (higher
+ * track indexes mix above, per the documented layering order). The
+ * buffer is session-owned; the final contributor's writes complete
+ * regions that are pushed progressively to the device queue. */
+typedef struct
+{
+  gboolean active;     /* a window is being assembled */
+  gint64 seq_start_us; /* sequence time of the window's first frame */
+  gsize window_frames; /* window length in frames at the device rate */
+  gfloat *mix;         /* window_frames * channels, session-owned */
+  gsize pushed_to;     /* frames already queued (final region) */
+  MixSlot *slots;      /* contributing tracks in track-array order */
+  gsize n_slots;
+  gsize next_slot;    /* next slot to submit */
+  gsize current_slot; /* slot whose request is in flight */
+} MixWindow;
 
 struct _OePlaybackSession
 {
@@ -72,13 +115,19 @@ struct _OePlaybackSession
   OeAudioDeviceInfo stream_info;
   gint64 audio_base_position_us;  /* sequence position when the queue was flushed */
   gint64 audio_pushed_frames;     /* frames accepted since the flush */
-  gboolean audio_outstanding;     /* a decode request is in flight */
-  gint64 audio_clip_position_us;  /* owning clip placement (sequence time) */
-  gint64 audio_clip_source_in_us; /* owning clip source origin */
-  gint64 audio_clip_end_seq_us;   /* sequence time where the clip ends */
-  guint64 audio_clip_fade_in_us;  /* owning clip envelope (Wave B) */
-  guint64 audio_clip_fade_out_us;
+  gint64 audio_pushed_through_us; /* sequence time of the end of pushed coverage —
+                                     pushes begin LOOKAHEAD ahead of the playhead,
+                                     so this is NOT base + frames */
+  gboolean audio_outstanding;     /* a mix window is being assembled */
+  MixWindow mix;
   gchar *audio_failed_path; /* media that failed this generation */
+
+  /* Main-context observers, GTK-free: per-push peak levels (D6) and the
+   * deterministic mixed-audio seam tests capture through. */
+  OePlaybackMeterFunc meter_func;
+  gpointer meter_data;
+  OePlaybackMixFunc mix_func;
+  gpointer mix_data;
 
   OeRenderSource render_source;    /* sequence snapshot + resolver */
   OeRenderSession *render_session; /* shared seam decoder cache, lazy */
@@ -259,61 +308,236 @@ refresh_sequence (OePlaybackSession *self)
 }
 
 /* ------------------------------------------------------------------ */
-/* Audio: stream lifecycle, feeding, delivery                          */
+/* Audio: multi-track mix window, stream lifecycle, delivery           */
 /* ------------------------------------------------------------------ */
 
+static void
+mix_window_reset (OePlaybackSession *self)
+{
+  self->mix.active = FALSE;
+  g_clear_pointer (&self->mix.mix, g_free);
+  g_clear_pointer (&self->mix.slots, g_free);
+  self->mix.n_slots = 0;
+  self->mix.next_slot = 0;
+  self->mix.current_slot = 0;
+  self->mix.window_frames = 0;
+  self->mix.pushed_to = 0;
+}
+
+/* Queue the window's final region [pushed_to, to_frames): every
+ * contributing track has written everything it has, so the region is
+ * final mixed audio. Applies the shared hard clamp — the same
+ * "clamp once, at the last word" rule the export mixdown uses, with the
+ * device queue as the playback side's last word — and fires the
+ * metering and deterministic-delivery observers per pushed span. */
+static void
+mix_window_push (OePlaybackSession *self, gsize to_frames)
+{
+  if (self->stream == NULL || to_frames <= self->mix.pushed_to)
+    return;
+
+  const gsize from = self->mix.pushed_to;
+  const gsize count = to_frames - from;
+  const int channels = MAX (self->stream_info.channels, 1);
+  gfloat *span = self->mix.mix + from * (gsize) channels;
+
+  for (gsize i = 0; i < count * (gsize) channels; i++)
+    span[i] = CLAMP (span[i], -1.0f, 1.0f);
+
+  const gsize pushed = oe_audio_output_queue (self->stream, span, count);
+
+  self->audio_pushed_frames += (gint64) pushed;
+
+  if (pushed > 0)
+    self->audio_pushed_through_us
+        = self->mix.seq_start_us
+          + (gint64) (from + pushed) * G_GINT64_CONSTANT (1000000) / self->stream_info.sample_rate;
+
+  if (pushed == 0)
+    return;
+
+  if (self->meter_func != NULL)
+    {
+      /* Per-channel peak of the pushed span (D6): the span IS the
+       * per-chunk mix unit, delivered on the main context — no locks,
+       * no worker access. Peaks stop arriving when chunks stop; the
+       * display decays toward silence on its own. */
+      gfloat *peaks = g_newa (gfloat, (gsize) channels);
+
+      for (int ch = 0; ch < channels; ch++)
+        peaks[ch] = oe_audio_buffer_peak (span, pushed, channels, ch);
+
+      self->meter_func (self, peaks, channels, self->meter_data);
+    }
+
+  if (self->mix_func != NULL)
+    self->mix_func (self,
+                    self->mix.seq_start_us
+                        + (gint64) from * G_GINT64_CONSTANT (1000000)
+                              / self->stream_info.sample_rate,
+                    pushed, channels, self->stream_info.sample_rate, span, self->mix_data);
+
+  self->mix.pushed_to = from + pushed;
+}
+
+/* Submit the next contributing track's decode, or close the window when
+ * the last one is done. A track whose media failed this generation
+ * contributes silence — skipped here exactly like the export mixdown
+ * skips a failing file. */
+static void
+mix_window_advance (OePlaybackSession *self)
+{
+  while (self->mix.active)
+    {
+      if (self->mix.next_slot >= self->mix.n_slots)
+        {
+          /* Every contributing track decoded: the tail beyond the last
+           * progressive push is final — queue it, close the window. */
+          mix_window_push (self, self->mix.window_frames);
+          mix_window_reset (self);
+          self->audio_outstanding = FALSE;
+          return;
+        }
+
+      const gsize index = self->mix.next_slot;
+      const MixSlot *slot = &self->mix.slots[index];
+      gchar *path = oe_project_dup_media_path ((OeProject *) self->project, slot->media_ref);
+
+      if (path == NULL || g_strcmp0 (path, self->audio_failed_path) == 0)
+        {
+          g_free (path);
+          self->mix.next_slot++;
+          continue;
+        }
+
+      self->mix.current_slot = index;
+      self->mix.next_slot++;
+
+      oe_log (OE_LOG_LEVEL_DEBUG, "audio request: '%s' [%lld, %lld) gen %u (mix slot %zu/%zu)",
+              path, (long long) slot->src_from_us, (long long) slot->src_to_us,
+              self->audio_generation, index + 1, self->mix.n_slots);
+      oe_media_playback_worker_request (self->worker, path, slot->src_from_us, slot->src_to_us,
+                                        self->stream_info.sample_rate, self->stream_info.channels,
+                                        self->audio_generation);
+      g_free (path);
+      return; /* request in flight; its exhaustion advances the window */
+    }
+}
+
+/* Open a mix window covering [position + lookahead, …): collect every
+ * audible audio track's clip at the window start, in track-array order,
+ * sized by each slot's decoded span. Gaps and inaudible tracks
+ * contribute silence (no slot, zero in the shared buffer); with NO
+ * contributing track the window stays closed and the feed retries on a
+ * later tick. */
 static void
 submit_audio_request (OePlaybackSession *self, gint64 position_us)
 {
   if (self->stream == NULL || self->worker == NULL)
     return;
 
-  /* Map position + lookahead into the audio lane; gaps stay silent. */
-  OePlaybackMapping map;
   const gint64 seq_from = position_us + AUDIO_LOOKAHEAD_US;
+  const OeSequence *seq = &self->sequence;
 
-  if (!oe_playback_session_map (&self->sequence, OE_TRACK_AUDIO, seq_from, &map))
+  if (seq->tracks == NULL)
     return;
 
-  const OeTrack *track = g_ptr_array_index (self->sequence.tracks, map.track_index);
-  const OeClip *clip = g_ptr_array_index (track->clips, map.clip_index);
-  gchar *path = oe_project_dup_media_path ((OeProject *) self->project, clip->media_ref);
+  /* D5 audibility: one any-solo scan over the audio tracks, then the
+   * per-track mute/solo decision — the same rule the export mixdown
+   * applies. A silenced track is skipped before its media is even
+   * opened. */
+  gboolean any_solo = FALSE;
 
-  if (path == NULL)
-    return;
-
-  /* One failing file per generation: skip it, keep the transport going. */
-  if (g_strcmp0 (path, self->audio_failed_path) == 0)
+  for (guint t = 0; t < seq->tracks->len && !any_solo; t++)
     {
-      g_free (path);
-      return;
+      const OeTrack *track = g_ptr_array_index (seq->tracks, t);
+
+      if (track->kind == OE_TRACK_AUDIO && track->clips != NULL && track->audio.solo != 0)
+        any_solo = TRUE;
     }
 
-  const gint64 clip_length = clip->source_out_us - clip->source_in_us;
-  const gint64 src_from = CLAMP (clip->source_in_us + (seq_from - clip->position_us),
-                                 clip->source_in_us, clip->source_out_us);
-  const gint64 src_to = MIN (clip->source_out_us, src_from + AUDIO_REQUEST_SPAN_US);
+  const int channels = MAX (self->stream_info.channels, 1);
+  MixSlot *slots = g_new0 (MixSlot, seq->tracks->len);
+  gsize n_slots = 0;
+  gsize window_frames = 0;
 
-  if (src_to <= src_from)
+  for (guint t = 0; t < seq->tracks->len; t++)
     {
-      g_free (path);
-      return;
+      const OeTrack *track = g_ptr_array_index (seq->tracks, t);
+
+      if (track->kind != OE_TRACK_AUDIO || track->clips == NULL)
+        continue;
+
+      /* Per-track clip covering the window start — clips are
+       * position-ordered, so the first cover wins. */
+      const OeClip *clip = NULL;
+
+      for (guint c = 0; c < track->clips->len; c++)
+        {
+          const OeClip *cand = g_ptr_array_index (track->clips, c);
+          const gint64 length = cand->source_out_us - cand->source_in_us;
+
+          if (seq_from >= cand->position_us && seq_from < cand->position_us + length)
+            {
+              clip = cand;
+              break;
+            }
+        }
+
+      if (clip == NULL)
+        continue;
+
+      if (!oe_audio_audible (track->audio.mute, track->audio.solo, any_solo))
+        continue;
+
+      const gint64 src_from = CLAMP (clip->source_in_us + (seq_from - clip->position_us),
+                                     clip->source_in_us, clip->source_out_us);
+      const gint64 src_to = MIN (clip->source_out_us, src_from + AUDIO_REQUEST_SPAN_US);
+
+      if (src_to <= src_from)
+        continue;
+
+      MixSlot *slot = &slots[n_slots];
+
+      slot->media_ref = clip->media_ref;
+      slot->clip_position_us = clip->position_us;
+      slot->clip_source_in_us = clip->source_in_us;
+      slot->clip_end_seq_us = clip->position_us + (clip->source_out_us - clip->source_in_us);
+      slot->fade_in_us = clip->visual.fade_in_us;
+      slot->fade_out_us = clip->visual.fade_out_us;
+      slot->src_from_us = src_from;
+      slot->src_to_us = src_to;
+
+      /* Buffer-constant chain factors (D1): the non-fade stages of the
+       * shared chain resolve ONCE per (clip, track, channel) per window;
+       * the fade envelope keeps its per-sample cadence at delivery. */
+      oe_audio_factor (OE_AUDIO_UNITY, clip->audio.gain, clip->audio.pan, track->audio.volume,
+                       track->audio.pan, 1, slot->factor);
+
+      window_frames = MAX (window_frames,
+                           (gsize) ((src_to - src_from) * (gint64) self->stream_info.sample_rate
+                                    / G_GINT64_CONSTANT (1000000)));
+      n_slots++;
     }
 
-  /* Record the owning clip so chunk deliveries can map source → sequence. */
-  self->audio_clip_position_us = clip->position_us;
-  self->audio_clip_source_in_us = clip->source_in_us;
-  self->audio_clip_end_seq_us = clip->position_us + clip_length;
-  self->audio_clip_fade_in_us = clip->visual.fade_in_us;
-  self->audio_clip_fade_out_us = clip->visual.fade_out_us;
+  if (n_slots == 0 || window_frames == 0)
+    {
+      g_free (slots);
+      return; /* all silence for this span: feed retries on a later tick */
+    }
+
+  self->mix.active = TRUE;
+  self->mix.seq_start_us = seq_from;
+  self->mix.window_frames = window_frames;
+  self->mix.pushed_to = 0;
+  self->mix.next_slot = 0;
+  self->mix.current_slot = 0;
+  self->mix.n_slots = n_slots;
+  self->mix.slots = slots;
+  self->mix.mix = g_malloc0 (window_frames * (gsize) channels * sizeof (gfloat));
   self->audio_outstanding = TRUE;
 
-  oe_log (OE_LOG_LEVEL_DEBUG, "audio request: '%s' [%lld, %lld) gen %u", path, (long long) src_from,
-          (long long) src_to, self->audio_generation);
-  oe_media_playback_worker_request (self->worker, path, src_from, src_to,
-                                    self->stream_info.sample_rate, self->stream_info.channels,
-                                    self->audio_generation);
-  g_free (path);
+  mix_window_advance (self);
 }
 
 /* Keep the queue filled through position + lookahead. Works unchanged on
@@ -328,11 +552,7 @@ feed_audio (OePlaybackSession *self, gint64 position_us)
   if (self->stream_info.sample_rate <= 0)
     return;
 
-  const gint64 pushed_through
-      = self->audio_base_position_us
-        + self->audio_pushed_frames * G_GINT64_CONSTANT (1000000) / self->stream_info.sample_rate;
-
-  if (pushed_through >= position_us + AUDIO_LOOKAHEAD_US)
+  if (self->audio_pushed_through_us >= position_us + AUDIO_LOOKAHEAD_US)
     return;
 
   if (self->stream_info.is_dummy
@@ -343,78 +563,119 @@ feed_audio (OePlaybackSession *self, gint64 position_us)
 }
 
 static void
-on_worker_audio (OePlaybackAudioChunk *chunk, const GError *error, gpointer user_data)
+on_worker_audio (OePlaybackAudioChunk *chunk, const GError *error, guint generation,
+                 gpointer user_data)
 {
   OePlaybackSession *self = user_data;
 
+  if (generation != self->audio_generation)
+    return; /* stale delivery — the worker's trampoline owns it. NULL-chunk
+               signals carry the owning request's generation too, so the
+               multi-source window never advances on a stale end-of-range
+               from a superseded decode. */
+
   if (chunk == NULL && error == NULL)
     {
-      /* Range exhausted: the feed loop may request more. */
-      self->audio_outstanding = FALSE;
+      /* Range exhausted: submit the next contributing track's decode, or
+       * close the window when the last one is done. */
+      if (self->mix.active)
+        mix_window_advance (self);
+      else
+        self->audio_outstanding = FALSE;
       return;
     }
 
   if (chunk == NULL)
     {
-      /* Decode failed: report once per generation, continue without. */
-      self->audio_outstanding = FALSE;
+      /* Decode failed: report once per generation, continue without —
+       * the failed slot contributes silence, the rest of the window
+       * still assembles. */
       if (self->audio_failed_path == NULL && error->message != NULL)
         {
           self->audio_failed_path = g_strdup (error->message);
           fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED, error->message);
         }
+      if (self->mix.active)
+        mix_window_advance (self);
+      else
+        self->audio_outstanding = FALSE;
       return;
     }
 
-  if (chunk->generation != self->audio_generation)
-    return; /* stale delivery — the worker's trampoline owns the chunk */
+  if (!self->mix.active || self->mix.current_slot >= self->mix.n_slots)
+    return; /* late chunk with no window — the trampoline owns the chunk */
 
-  /* Map the chunk's source time through the owning clip recorded at
-   * request time, truncate at the clip's sequence end (source in/out is
-   * the only mapping the model defines), and queue it. */
-  const gint64 seq_start
-      = self->audio_clip_position_us + (chunk->source_us - self->audio_clip_source_in_us);
-  gint64 keep_frames = 0;
+  /* Map the chunk's source time through the owning slot captured at
+   * window-open time (source in/out is the only mapping the model
+   * defines), then write into the shared mix buffer. */
+  const MixSlot *slot = &self->mix.slots[self->mix.current_slot];
+  const int channels = MAX (self->stream_info.channels, 1);
+  const gint64 seq_start = slot->clip_position_us + (chunk->source_us - slot->clip_source_in_us);
+  gint64 offset = 0;
 
-  if (seq_start < self->audio_clip_end_seq_us && chunk->sample_rate > 0)
-    keep_frames = (self->audio_clip_end_seq_us - seq_start) * (gint64) chunk->sample_rate
-                  / G_GINT64_CONSTANT (1000000);
+  if (chunk->sample_rate > 0)
+    offset = (seq_start - self->mix.seq_start_us) * (gint64) chunk->sample_rate
+             / G_GINT64_CONSTANT (1000000);
 
-  if (keep_frames > 0 && (gsize) keep_frames > chunk->n_frames)
-    keep_frames = (gint64) chunk->n_frames;
+  gsize drop = 0;
 
-  if (keep_frames > 0 && self->stream != NULL)
+  if (offset < 0)
     {
-      /* Shared gain envelope (Wave B): the same core helper the export
-       * mixdown uses, applied in place before the queue so preview and
-       * export cannot drift. Skipped entirely for unfaded clips. */
-      if (self->audio_clip_fade_in_us > 0 || self->audio_clip_fade_out_us > 0)
+      drop = (gsize) (-offset); /* sub-frame floor: whole frames, skipped */
+      offset = 0;
+    }
+
+  if (drop >= chunk->n_frames)
+    return;
+
+  gsize n = chunk->n_frames - drop;
+
+  if (offset + n > self->mix.window_frames)
+    n = self->mix.window_frames - offset; /* clip end / window bound */
+
+  if (n == 0)
+    return;
+
+  /* Shared factor chain (D1) applied buffer-constant per channel; the
+   * fade envelope keeps its per-sample cadence and is skipped entirely
+   * for unfaded clips. Channels beyond stereo downmix to the pan pair's
+   * mean, which preserves the equal-sum law (unity at center pan). */
+  const gfloat f_left = (gfloat) slot->factor[0] / (gfloat) OE_AUDIO_UNITY;
+  const gfloat f_right = (gfloat) slot->factor[1] / (gfloat) OE_AUDIO_UNITY;
+  const gfloat f_rest = (f_left + f_right) / 2.0f;
+  const gboolean faded = slot->fade_in_us > 0 || slot->fade_out_us > 0;
+  gfloat *dst = self->mix.mix + (gsize) offset * (gsize) channels;
+  const gfloat *src = chunk->interleaved + drop * (gsize) channels;
+
+  for (gsize i = 0; i < n; i++)
+    {
+      gfloat g = 1.0f;
+
+      if (faded)
         {
-          const int channels = MAX (self->stream_info.channels, 1);
-          gfloat *frames = chunk->interleaved;
+          const gint64 t_us
+              = seq_start
+                + (gint64) (drop + i) * G_GINT64_CONSTANT (1000000) / (gint64) chunk->sample_rate;
 
-          for (gint64 i = 0; i < keep_frames; i++)
-            {
-              const gint64 t_us
-                  = seq_start + i * G_GINT64_CONSTANT (1000000) / (gint64) chunk->sample_rate;
-              const gfloat g = (gfloat) oe_fade_gain (
-                                   t_us, self->audio_clip_position_us, self->audio_clip_end_seq_us,
-                                   self->audio_clip_fade_in_us, self->audio_clip_fade_out_us)
-                               / (gfloat) OE_FADE_SCALE;
-
-              for (int ch = 0; ch < channels; ch++)
-                frames[(size_t) i * channels + ch] *= g;
-            }
+          g = (gfloat) oe_fade_gain (t_us, slot->clip_position_us, slot->clip_end_seq_us,
+                                     slot->fade_in_us, slot->fade_out_us)
+              / (gfloat) OE_FADE_SCALE;
         }
 
-      const gsize pushed
-          = oe_audio_output_queue (self->stream, chunk->interleaved, (gsize) keep_frames);
-      self->audio_pushed_frames += (gint64) pushed;
+      for (int ch = 0; ch < channels; ch++)
+        {
+          const gfloat f = ch == 0 ? f_left : (ch == 1 ? f_right : f_rest);
 
-      if (pushed > 0)
-        oe_log (OE_LOG_LEVEL_DEBUG, "audio queued: %zu frames, depth %zu", pushed,
-                oe_audio_output_queued_frames (self->stream));
+          dst[i * (gsize) channels + ch] += src[i * (gsize) channels + ch] * g * f;
+        }
     }
+
+  /* The final contributor's writes complete regions: push them
+   * progressively (single-track playback pushes per chunk, exactly the
+   * pre-Wave-B cadence). */
+  if (self->mix.current_slot == self->mix.n_slots - 1)
+    mix_window_push (self, (gsize) offset + n);
+
   /* No free here: ownership stays with the worker's main-context
    * delivery, which frees the chunk after this callback returns. */
 }
@@ -427,6 +688,10 @@ halt_streaming (OePlaybackSession *self)
 
   if (self->worker != NULL)
     oe_media_playback_worker_cancel (self->worker);
+
+  /* The in-flight window's memory dies with the generation: stale
+   * deliveries are dropped by the generation guard before any write. */
+  mix_window_reset (self);
 
   if (self->stream != NULL)
     {
@@ -448,6 +713,7 @@ restart_streaming (OePlaybackSession *self, gint64 position_us)
 
   self->audio_base_position_us = position_us;
   self->audio_pushed_frames = 0;
+  self->audio_pushed_through_us = position_us; /* nothing queued yet */
   self->anchor_position_us = position_us;
   self->anchor_time_us = session_now (self);
 
@@ -698,6 +964,26 @@ oe_playback_session_set_time_source (OePlaybackSession *session, OePlaybackTimeS
 
   session->time_func = time_func;
   session->time_data = user_data;
+}
+
+void
+oe_playback_session_set_meter_func (OePlaybackSession *session, OePlaybackMeterFunc func,
+                                    gpointer user_data)
+{
+  g_return_if_fail (session != NULL);
+
+  session->meter_func = func;
+  session->meter_data = user_data;
+}
+
+void
+oe_playback_session_set_mix_func (OePlaybackSession *session, OePlaybackMixFunc func,
+                                  gpointer user_data)
+{
+  g_return_if_fail (session != NULL);
+
+  session->mix_func = func;
+  session->mix_data = user_data;
 }
 
 gboolean

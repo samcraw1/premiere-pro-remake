@@ -59,10 +59,38 @@ ASan/UBSan and Valgrind (existing suppression file, no new
 suppressions), tree-wide clang-format, `scripts/run-headless.sh`
 exit 0, and the parity harness untouched and green.
 
-## 4. What Wave B inherits
+## 4. Wave B — multi-track playback, metering, mixer
 
-The same chain API serves the playback mixer: `oe_audio_factor` is
-GTK-free and FFmpeg-free, factors are buffer-constant, and the
-matrix helper is reusable. The inspector UI for gain/pan and the
-track headers' mute/solo/voice meters land there, on top of
-persisted state that already round-trips byte-identically.
+Wave B turns playback into the mixer Wave A's chain deserved.
+The lesson that transfers from Wave A: **one seam, two consumers**
+becomes **one seam, three** — the mix window that feeds SDL also
+feeds the meter and, through the `set_mix_func` observer, the parity
+test. Nothing re-implements summation.
+
+- **One mix buffer, one owner.** The session owns an interleaved
+  f32 buffer spanning one decode-ahead window of sequence time;
+  each contributing track's chunks are decoded sequentially (the
+  worker carries one request) and accumulated in track-array order
+  before any push. Deterministic order, gaps silent, clamps last.
+- **Chunk labels must be buffer-anchored.** The worker's chunk
+  buffer survives decoder frames; labeling each delivery from the
+  current frame's arithmetic mislabels residuals late and trails the
+  final partial chunk at source zero. Wave A's single-lane session
+  never noticed because it consumed chunks in delivery order; the
+  first consumer that maps chunks by time exposed it. Map by the
+  buffer's anchor, not the frame.
+- **Feeding is coverage, not frame counts.** The first window
+  begins LOOKAHEAD ahead of the playhead, so `base + frames/rate`
+  under-reports queued coverage and re-submits overlapping windows.
+  Track pushed coverage in sequence time; keep the restart-anchored
+  base for real-device drift correction.
+- **Meters are observers, not threads.** Peaks extract per chunk on
+  the main context into GTK-free math (`oe_audio_buffer`,
+  `oe_meter_math`); the widget holds a peak with a short decay and
+  releases to silence on pause, stop, and scrub. No paused tap, no
+  timers while paused — the absence of chunks IS the signal.
+- **Parity is the acceptance.** A two-track project with distinct
+  levels and pans plays through the virtual clock while the mix
+  observer captures the real windows; the export mixdown decodes
+  back and both sides must agree per channel. The test fails by
+  construction on single-lane playback — its pass is the proof.
