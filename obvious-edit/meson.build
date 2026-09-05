@@ -487,3 +487,39 @@ test_export = executable('test_export',
 test('export', test_export,
   timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
   env: ['SDL_AUDIODRIVER=dummy'])
+
+# Titles & chroma key (Phase 11 Wave A): the 19th suite — generated-clip
+# model/undo/persistence, the Cairo rasterizer, the key rule, fast-path
+# preservation, and export parity. cairo rides test_deps (the render
+# seam); json-glib is an explicit dependency like the format suite.
+test_titles_key = executable('test_titles_key',
+  [
+    'tests/test_titles_key.c',
+    'tests/fixture_media.c',
+    oe_render_sources,
+    'src/media/oe_export.c',
+    'src/media/oe_probe.c',
+    'src/media/oe_media_playback.c',
+    'src/app/oe_undo_stack.c',
+    'src/app/oe_playback_session.c',
+    'src/core/oe_audio_factor.c',
+    'src/core/oe_audio_buffer.c',
+    'src/playback/oe_audio_output.c',
+    'src/core/oe_project_format.c',
+    'src/core/oe_fades.c',
+    'src/core/oe_keyframes.c',
+    'src/core/oe_project.c',
+    'src/core/oe_time.c',
+    'src/app/oe_log.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: [test_deps, json_glib_dep],
+)
+
+test('titles-key', test_titles_key,
+  timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
+  env: ['SDL_AUDIODRIVER=dummy',
+        # the only Cairo-linked suite: LSan sees fontconfig's one-time
+        # init caches as leaks (see tests/lsan.supp)
+        'LSAN_OPTIONS=suppressions=' + join_paths (meson.current_source_dir (),
+                                                   'tests', 'lsan.supp')])

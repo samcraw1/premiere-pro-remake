@@ -1,0 +1,13 @@
+# LeakSanitizer suppressions for Obvious Edit — library one-time
+# initialization ONLY (companion to tests/valgrind.supp; see its scope
+# policy). The ASan/UBSan battery runs the same suites as the Valgrind
+# gate, so the same upstream-owned caches need the same scoped relief
+# here: LSan's reachability analysis cannot see fontconfig's
+# process-global config pointers and reports its one-time
+# FcInitLoadConfigAndFonts() caches (config XML, font index, the
+# resolved pattern cairo_toy_font_face_create keeps alive) as leaks.
+# No project-code allocation may ever be listed here.
+#
+# Observed on libfontconfig 2.15.0 / libcairo 1.18.4 (Debian 13):
+# 512 bytes definite + 172 bytes indirect, zero project-code frames.
+leak:libfontconfig.so
