@@ -348,16 +348,20 @@ what samples the exported file, frame by frame, so a straight cut that
 looks right on screen cannot silently render differently in the MP4.
 
 The seam lives in `src/media/oe_render.[ch]`. A render source is a
-pair of GTK-free callbacks (a media-ref → owned-path resolver plus a
-`OeMediaCache *`) bound to a sequence; the render session caches one
-sequential decoder per source path (locked decision D2), so the export
-loop never seeks backwards per frame — the cost that makes a naive
-per-frame seam unusable. `oe_render_frame_at`
-maps a position to the topmost covering video clip (highest-index
-track wins, `source_in + (position − clip_start)`, half-open clamped
-to `[0, duration)`) and composites it into a freshly owned, opaque
-BGRA canvas, aspect-preserving box-fit with even-dimension
-letterboxing when the clip is smaller than the sequence.
+borrowed deep-copied sequence snapshot plus one GTK-free callback — a
+media-ref → owned-path resolver with its `gpointer` user-data
+(`OeRenderSource`); the render session caches one sequential decoder
+per source path (locked decision D2), so the export loop never seeks
+backwards per frame — the cost that makes a naive per-frame seam
+unusable. `oe_render_frame_at`
+collects every covering video clip (a clip covers `t_us` when
+`t_us ∈ [position, position + source_out − source_in)`, source time
+`source_in + (t_us − clip_position)`, half-open clamped to
+`[0, duration)`) and composites them into a freshly owned, opaque
+BGRA canvas — one clip through the byte-identical fast path described
+below, several through the layered compositor of the next section,
+with aspect-preserving box-fit and even-dimension letterboxing per
+layer.
 
 The export job lives in `src/media/oe_export.[ch]` — synchronous,
 GTK-free, the same calling convention as the media jobs (a
@@ -387,9 +391,46 @@ A session-epoch tag discards stale completions after a project
 switch; the atomic cancel flag is consulted between frames, so a
 cancel press ends the job within one frame of encode.
 
+## Compositing (Phase 9 Wave A)
+
+Every clip owns an `OeClipVisual`, and identity is the zero value
+except scale: `pos_x`/`pos_y` are frame-pixel offsets from the
+centered anchor, `scale_permille` is uniform scale (1000 = 1.0×),
+`rotation_cdeg` is rotation in hundredths of a degree, `opacity` runs
+0–255, and `crop_l/t/r/b` are source-pixel insets. A freshly inserted
+clip's visual is the identity, so a zero-value clip renders exactly
+as every pre-Phase-9 clip did — there is no dormant state to forget.
+`fade_in_us`/`fade_out_us` and the keyframe store exist in the struct
+but are consumed in Wave B.
+
+Layering is track order, full stop: the compositor blends covering
+clips ascending — bottom track first — each one decoded, cropped
+(source pixels, before scaling), scaled (nearest-neighbor), rotated
+(integer bilinear resample with 8-bit weights, deterministic),
+translated to its centered anchor plus the position offset, and
+blended with straight non-premultiplied integer src-over
+(`oe_render_blend_channel`, within ±1 of the alpha formula). An
+opacity-0 layer skips out of the blend entirely. When exactly one
+clip covers the position and its visual is the identity, the
+untouched single-layer pipeline renders the frame byte-identically
+to Phase 8 — the fast path the straight-cut parity test pins.
+
+The monitor and export share this one seam. The playback session
+owns a render session over its deep-copied sequence snapshot and
+caches decoders exactly like the exporter, so preview and export
+cannot disagree about what a timeline looks like. Visual edits go
+through the validated mutator `oe_project_set_clip_visual` (typed
+`OE_PROJECT_ERROR_BAD_VISUAL` rejections, one observer notification)
+and commit as exactly ONE `OE_UNDO_OP_VISUAL` record per stroke via
+`oe_edit_set_clip_visual` — undo restores the visual captured at the
+stroke's first change, not the last preview state. A paused monitor
+repaints the edited frame when the project notification fires. Wave
+B adds keyframes, transitions, and fade envelopes; the model fields
+and the seam are already in place for them.
+
 ## What comes later
 
 `src/core/` is the foundation later phases build on, and the
 adapter seams in `src/media/` and `src/playback/` are where media
 and audio plug in. See `docs/learning/phase-0.md` through
-`phase-8.md` for guided walkthroughs of each phase.
+`phase-9.md` for guided walkthroughs of each phase.

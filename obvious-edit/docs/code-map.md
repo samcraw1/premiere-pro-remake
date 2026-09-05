@@ -78,7 +78,9 @@ premiere-pro-remake/
             ├── phase-4.md         # guided Phase 4 walkthrough
             ├── phase-5.md         # guided Phase 5 walkthrough
             ├── phase-6.md         # guided Phase 6 walkthrough
-            └── phase-7.md         # guided Phase 7 walkthrough
+            ├── phase-7.md         # guided Phase 7 walkthrough
+            ├── phase-8.md         # guided Phase 8 walkthrough
+            └── phase-9.md         # guided Phase 9 walkthrough
 ```
 
 ## File-by-file responsibilities
@@ -92,20 +94,20 @@ premiere-pro-remake/
 | `src/media/oe_ffmpeg.c` | avformat network init/teardown (thread-safe via g_once) | `oe_ffmpeg_init`, `oe_ffmpeg_shutdown` |
 | `src/media/oe_probe.c` | File classification + metadata extraction | `oe_probe_file`, `oe_probe_info_clear/copy` |
 | `src/media/oe_media_jobs.c` | Thumbnail + waveform decode jobs | `oe_media_job_thumbnail`, `oe_media_job_waveform` |
-| `src/media/oe_render.c` | GTK-free frame-at-time render seam: topmost-covering-clip mapping, per-source sequential decoder cache, centered even box-fit BGRA compositing | `oe_render_source_new`, `oe_render_session_new`, `oe_render_session_frame_at`, `oe_render_frame_at` |
+| `src/media/oe_render.c` | GTK-free frame-at-time render seam: covering-clip collection, per-source sequential decoder cache, layered compositor (ascending track order: crop → scale → rotate → translate → straight integer src-over), single-default-transform fast path, centered even box-fit | `oe_render_blend_channel`, `oe_render_session_new`, `oe_render_session_frame_at`, `oe_render_frame_at` |
 | `src/media/oe_export.c` | Synchronous GTK-free MP4 export: integer frame grid over the render seam, x264/AAC encode, additive 48 kHz stereo mixdown, custom-AVIO temp + fsync + rename atomicity, per-frame cancellation | `oe_export_frame_count`, `oe_export_frame_to_us`, `oe_export_run` |
 | `src/app/oe_media_cache.c` | Derived-media cache: keys, lookup, atomic store | `oe_media_cache_lookup`, `oe_media_cache_store` |
 | `src/app/oe_media_library.c` | Session asset records, statuses, monitors | `oe_media_library_add`, `oe_media_library_relink`, `…_set_observer` |
 | `src/core/oe_time.c` | Reduced rationals, frame↔µs conversions (nearest, halves away) | `oe_time_rate`, `oe_time_rate_reduce`, `oe_time_frame_to_us`, `oe_time_us_to_frame` |
-| `src/core/oe_project.c` | The document model: sequence/tracks/clips, media refs, observer | `oe_project_insert_clip`, `oe_project_move_clip`, `oe_project_get_sequence` |
-| `src/core/oe_project_format.c` | Strict JSON v1 load + atomic save | `oe_project_format_load`, `oe_project_format_save` |
+| `src/core/oe_project.c` | The document model: sequence/tracks/clips with owned `OeClipVisual` (identity defaults, deep copies), media refs, observer, validated visual mutator | `oe_project_insert_clip`, `oe_project_move_clip`, `oe_project_set_clip_visual`, `oe_project_get_sequence` |
+| `src/core/oe_project_format.c` | Strict JSON v1 load + atomic save; clip `visual` member (always written, identity backfill on read, closed member list) | `oe_project_format_load`, `oe_project_format_save` |
 | `src/app/oe_import_worker.c` | The decode thread: queue, cancel, dispatch | `oe_import_worker_new`, `oe_import_worker_submit`, `oe_import_worker_free` |
 | `src/playback/oe_audio_output.c` | SDL audio subsystem init/quit + the push-model device stream (queue, depth, flush, pause/resume) | `oe_audio_output_init`, `oe_audio_output_open_stream`, `oe_audio_output_queue`, `oe_audio_output_shutdown` |
 | `src/media/oe_media_playback.c` | Playback decode: audio decode-ahead worker (owned f32 chunks, main-context delivery) + frame-at-time BGRA video | `oe_media_playback_request_audio`, `oe_media_playback_video_open`, `oe_media_playback_video_get_frame` |
-| `src/app/oe_playback_session.c` | The GTK-free playback clock: stopped/paused/playing, wall-anchor, drift accounting, clip→source mapping, injectable time source (tests install a virtual clock), events | `oe_playback_session_play`, `oe_playback_session_tick`, `oe_playback_session_seek`, `oe_playback_session_set_time_source`, `oe_playback_session_map` |
-| `src/app/oe_undo_stack.c` | GTK-free command-object history: strict-LIFO records (depth 100, redo branch cleared on new edits), recorder helpers that mutate-then-record, composite ripple-delete records (primary copy + suffix pre/post positions and indices), undo/redo applied only through typed model mutators, changed-state seam, auto-pause entry point | `oe_undo_stack_undo`, `oe_undo_stack_redo`, `oe_edit_insert_clip`, `oe_edit_ripple_remove_clip`, `oe_undo_stack_set_changed_func` |
+| `src/app/oe_playback_session.c` | The GTK-free playback clock: stopped/paused/playing, wall-anchor, drift accounting, clip→source mapping, shared-seam monitor rendering through an owned render session (same decoder cache as export, same-frame dedup, paused repaint on project notifications), injectable time source (tests install a virtual clock), events | `oe_playback_session_play`, `oe_playback_session_tick`, `oe_playback_session_seek`, `oe_playback_session_set_time_source`, `oe_playback_session_map` |
+| `src/app/oe_undo_stack.c` | GTK-free command-object history: strict-LIFO records (depth 100, redo branch cleared on new edits), recorder helpers that mutate-then-record, one-record-per-stroke visual records (`OE_UNDO_OP_VISUAL` with stroke baseline + final visual), composite ripple-delete records (primary copy + suffix pre/post positions and indices), undo/redo applied only through typed model mutators, changed-state seam, auto-pause entry point | `oe_undo_stack_undo`, `oe_undo_stack_redo`, `oe_edit_insert_clip`, `oe_edit_set_clip_visual`, `oe_edit_ripple_remove_clip`, `oe_undo_stack_set_changed_func` |
 | `src/ui/oe_program_monitor.c` | The program monitor: owned-frame Cairo blits, empty state, missing-media hatch | `oe_program_monitor_new`, `oe_program_monitor_show_frame`, `oe_program_monitor_set_empty_state` |
-| `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector | `oe_main_window_new` |
+| `src/ui/oe_main_window.c` | The editor shell: panels, menus, toolbar, status bar, import wiring, inspector (third stack page: clip visual properties with preview-then-commit editing) | `oe_main_window_new` |
 | `src/ui/oe_media_bin.c` | The bin panel: row projection, badges, DnD, selection | `oe_media_bin_new`, `oe_media_bin_refresh` |
 | `src/ui/oe_timeline_layout.c` | GTK-free timeline math: zoom round-trips, lane mapping, edge-band hit-test, move/trim clamps, the pure snap decision (`OeSnapContext`: px-scaled threshold, edges/playhead/zero/frame-grid targets, nearest-wins earlier-tie-break) | `oe_timeline_x_for_us`, `oe_timeline_hit_test`, `oe_timeline_clamp_move_position`, `oe_timeline_trim_bounds`, `oe_timeline_snap_time` |
 | `src/ui/oe_timeline.c` | The timeline widget: observer snapshots, Cairo painting, one drag state machine → model mutators, snap-then-clamp drag previews, snapping session flag (`_set/get_snapping`) | `oe_timeline_new`, `oe_timeline_set_project`, `oe_timeline_get_selection`, `oe_timeline_set_snapping`, `oe_timeline_zoom_in/out` |
@@ -119,14 +121,14 @@ premiere-pro-remake/
 | `tests/test_media_library.c` | Records, observers, monitor, relink | `/media-library/*` |
 | `tests/test_import_worker.c` | Worker thread → main-context contract | `/import-worker/*` |
 | `tests/test_time.c` | Rate reduction, typed rejection, rounding, identities | `/time/*` |
-| `tests/test_project.c` | Ordering, overlap, observer, deep copies, media refs, trim validation | `/project/*` |
+| `tests/test_project.c` | Ordering, overlap, observer, deep copies, media refs, trim validation, visual identity defaults, validated visual mutation + typed rejection | `/project/*` |
 | `tests/test_project_format.c` | Strict v1 parse, round trip, atomic failure | `/format/*` |
 | `tests/test_timeline_layout.c` | Pure timeline math: zoom, lanes, hit-test bands, drag clamps | `/timeline-layout/*` |
 | `tests/test_playback_clock.c` | Session clock on a virtual time source: mapping, deadlines, drift, seek, end-of-sequence | `/clock/*` |
-| `tests/test_undo_stack.c` | Per-op inverses, typed rejection at record/apply time, depth eviction, redo clearing, JSON round trips, auto-pause | `/undo/*` |
+| `tests/test_undo_stack.c` | Per-op inverses, visual stroke records (one record per stroke, stroke-baseline restore, zero-delta suppression), typed rejection at record/apply time, depth eviction, redo clearing, JSON round trips, auto-pause | `/undo/*` |
 | `tests/test_snap_ripple.c` | Pure snap decision (targets, band boundaries, tie-break, zoom scaling, disabled pass-through, snap-then-clamp) + composite ripple records (first/middle/last deletes, typed rejection, JSON round trips, depth, redo clearing, auto-pause) | `/snap-ripple/*` |
 | `tests/test_audio_output.c` | Adapter contract on SDL's dummy driver: init, open, queue depth, pause/resume | `/audio-output/*` |
-| `tests/test_export.c` | Frame-grid math, straight-cut render parity vs the preview seam, MP4 container truth via probe, decoded video/audio round trip (color/amplitude classes), additive two-track mixdown, cancellation cleanup, atomic-failure byte identity | `/export/*` |
+| `tests/test_export.c` | Frame-grid math, straight-cut render parity vs the preview seam, compositor equivalence (blend-unit ±1, two-layer seam, two-layer export decode-back parity at |Δ| ≤ 8 block means), MP4 container truth via probe, decoded video/audio round trip (color/amplitude classes), additive two-track mixdown, cancellation cleanup, atomic-failure byte identity | `/export/*` |
 | `tests/fixture_media.c` | Runtime WAV/AVI/PNG/text fixture generator | `oe_fixture_media_create`, `oe_fixture_media_free` |
 
 ## Conventions

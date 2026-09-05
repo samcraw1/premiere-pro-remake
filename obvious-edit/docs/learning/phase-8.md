@@ -225,6 +225,9 @@ play → **export**. What later work inherits from this phase:
   edits to the compositing step inside `oe_render_frame_at` — per-clip
   filters compose before the box-fit; a transition samples two
   positions and blends. No export code should need to change.
+  Phase 9 Wave A delivered exactly that: the layered compositor
+  (ascending track order, per-clip transforms, straight src-over)
+  went in without touching the export job — see `phase-9.md`.
 - **The grid is the timing contract.** Frame-accurate features (audio
   sync patches, subtitle burn-in) anchor to `oe_export_frame_to_us`.
 - **The 16-suite pattern.** Each phase's suite doubles as the next
