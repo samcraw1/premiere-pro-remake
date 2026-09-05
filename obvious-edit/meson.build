@@ -422,6 +422,27 @@ test('wave-b', test_wave_b,
   timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
   env: ['SDL_AUDIODRIVER=dummy'])
 
+# Phase 10 Wave B units: the audio-tools math behind the mixer UI —
+# per-channel peak extraction over the shared interleaved f32 format,
+# the Wave A factor chain applied to a buffer, the meter's per-update
+# decay rule, and the meter's Cairo bar layout. GTK-free and
+# fixture-free by construction: the widget is a shell over these
+# helpers, and the parity proof for the mixer itself lives in the
+# export suite (test_parity_audio_mix).
+test_audio_tools = executable('test_audio_tools',
+  [
+    'tests/test_audio_tools.c',
+    'src/core/oe_audio_factor.c',
+    'src/core/oe_audio_buffer.c',
+    'src/ui/oe_meter_math.c',
+  ],
+  c_args: oe_log_cargs,
+  dependencies: test_deps,
+)
+
+test('audio-tools', test_audio_tools,
+  timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
+  env: ['SDL_AUDIODRIVER=dummy'])
 
 test('snap-ripple', test_snap_ripple,
   timeout: 300, # generous headroom for slowed environments (valgrind, sanitizers)
