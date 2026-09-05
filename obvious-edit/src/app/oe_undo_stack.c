@@ -612,7 +612,8 @@ record_keyframe_stroke (OeProject *project, OeUndoStack *stack, guint track_inde
   if (oe_clip_visual_equal (&before->visual, &after.visual))
     {
       oe_clip_visual_clear (&before->visual);
-      oe_clip_visual_clear (&after.visual);
+      /* `after` aliases the live store (borrowed getter result): never
+       * unref it — the model still owns that array. */
       return TRUE; /* zero-delta stroke leaves no history entry */
     }
 
@@ -622,8 +623,9 @@ record_keyframe_stroke (OeProject *project, OeUndoStack *stack, guint track_inde
       track_index, clip_index);
 
   rec->clip = *before; /* baseline visual moves with the record */
+  /* visual_value_store deep-copies out of the borrowed `after`; the
+   * model keeps its own array, so `after` is never cleared. */
   visual_value_store (&rec->new_visual, &after.visual);
-  oe_clip_visual_clear (&after.visual);
   stack_push (stack, rec);
   return TRUE;
 }

@@ -116,10 +116,18 @@ oe_keyframes_equal (const GArray *a, const GArray *b)
   if (n_a != n_b)
     return FALSE;
 
-  if (n_a == 0)
-    return TRUE; /* NULL and empty both mean "no keyframes" */
+  for (guint i = 0; i < n_a; i++)
+    {
+      /* Field-wise, never memcmp: OeKeyframe carries padding bytes a
+       * compound literal never initializes. */
+      const OeKeyframe *ka = &g_array_index (a, OeKeyframe, i);
+      const OeKeyframe *kb = &g_array_index (b, OeKeyframe, i);
 
-  return memcmp (a->data, b->data, (gsize) n_a * sizeof (OeKeyframe)) == 0;
+      if (ka->property != kb->property || ka->time_us != kb->time_us || ka->value != kb->value)
+        return FALSE;
+    }
+
+  return TRUE; /* NULL and empty both mean "no keyframes" */
 }
 
 gboolean

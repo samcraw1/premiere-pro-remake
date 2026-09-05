@@ -387,11 +387,13 @@ guint oe_project_get_clip_count (OeProject *project, guint track_index);
 
 /**
  * oe_project_get_clip:
- * @out: receives a deep value copy of the clip — @out->visual owns a
- *     private keyframe store the caller releases with
- *     oe_clip_visual_clear() when done
+ * @out: receives a value copy of the clip — the copy ALIASES
+ *     @out->visual.keyframes, which stays owned by the model. Read-only
+ *     through @out; capture a private copy with oe_clip_visual_copy()
+ *     (release with oe_clip_visual_clear()) when the value must outlive
+ *     a following mutator.
  *
- * Single-clip deep-copy getter: reads one clip's exact fields without
+ * Single-clip value getter: reads one clip's exact fields without
  * copying the whole sequence — the undo recorder captures pre-edit
  * state with it (oe_undo_stack.h).
  *
