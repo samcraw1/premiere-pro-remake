@@ -5,19 +5,28 @@
  * always anchor_position + (monotonic_now - anchor_time); play, resume,
  * and seek RE-ANCHOR (fresh pair) rather than accumulating deltas, which
  * is the pause/resume drift accounting. On a real audio device the
- * consumed-audio position corrects the wall clock (slewed, with a snap
- * bound); on the dummy driver or with no device the wall clock alone
- * paces playback.
+ * consumed-audio position corrects the ANCHOR (slewed, with a snap
+ * bound) so the wall clock converges on the device clock instead of
+ * fighting it; on the dummy driver or with no device the wall clock
+ * alone paces playback.
  *
  * Threading: every entry point runs on the main thread. The media
- * worker's chunk deliveries are invoked onto the main context, so no
- * lock is taken anywhere in this file.
+ * worker's chunk deliveries and the render worker's frames are invoked
+ * onto the main context, so no lock is taken anywhere in this file.
  *
  * Audio mixing (Phase 10 Wave B): the session is a multi-track mixer —
  * each mix window sums EVERY audible audio track's decoded contribution
  * through the shared factor chain into one interleaved buffer and queues
  * the final regions; a metering tap observes per-span peaks on the way
- * through. GTK never appears here.
+ * through. The queue is CONTIGUOUS in sequence time: every window starts
+ * exactly where the previous one ended (the first at the playhead), and
+ * spans with no audible clip queue silence, so the frames the device
+ * consumes always map back to a sequence position. GTK never appears
+ * here.
+ *
+ * Video: frames render on the render worker's thread (oe_render_worker)
+ * and arrive on the main context; the tick only asks. A slow decode can
+ * therefore never stall the transport or the audio feed.
  */
 
 #include "oe_playback_session.h"
@@ -27,21 +36,34 @@
 #include "../core/oe_fades.h"
 
 #include "../core/oe_time.h"
-#include "../media/oe_render.h"
+#include "../media/oe_render_worker.h"
 #include "../playback/oe_audio_output.h"
 #include "oe_log.h"
 
 /* Audio feed policy: keep the queue filled through position + lookahead,
- * one bounded request at a time. */
-#define AUDIO_LOOKAHEAD_US G_GINT64_CONSTANT (250000)
+ * one bounded request at a time. Windows start where the previous one
+ * ended, so the lookahead is real buffering — audio the device holds
+ * beyond the playhead — not a content offset. */
+#define AUDIO_LOOKAHEAD_US G_GINT64_CONSTANT (300000)
 #define AUDIO_REQUEST_SPAN_US G_GINT64_CONSTANT (1000000)
 /* The dummy driver never consumes: cap what we push into the void. */
 #define AUDIO_DUMMY_QUEUE_CAP_FRAMES (48000 * 2) /* ~2 s at 48 kHz stereo */
+/* Windows submitted per tick at most: a run of sub-frame slivers at
+ * clip edges must not spin the feed. */
+#define AUDIO_FEED_ROUNDS_PER_TICK 8
 
-/* Drift correction: slew up to 1 ms per tick toward the consumed-audio
- * position; snap when the gap exceeds a frame (device drop or stall). */
+/* Drift correction: slew the anchor up to 1 ms per tick toward the
+ * consumed-audio position; re-anchor outright when the gap exceeds the
+ * snap bound (device drop or stall). The bound is at least one frame
+ * and at least two device periods: the reported queue depth moves in
+ * whole periods, so a smaller bound would snap on every callback. */
 #define DRIFT_SLEW_US 1000
 #define DRIFT_SNAP_US G_GINT64_CONSTANT (40000)
+/* After a (re)start the position holds at the anchor until the device
+ * has consumed its first period, so video waits for audio instead of
+ * racing ahead and snapping back; a device that never starts releases
+ * the hold after this long and the wall clock paces alone. */
+#define AUDIO_START_GRACE_US G_GINT64_CONSTANT (500000)
 
 /* One contributing (clip, track) pair of the active mix window,
  * captured at window-open time so deliveries never re-read the model. */
@@ -129,10 +151,9 @@ struct _OePlaybackSession
   OePlaybackMixFunc mix_func;
   gpointer mix_data;
 
-  OeRenderSource render_source;    /* sequence snapshot + resolver */
-  OeRenderSession *render_session; /* shared seam decoder cache, lazy */
-  gchar *video_failed_path;        /* media that failed to open this run */
-  gint64 video_frame_index;        /* sequence frame index last decoded */
+  OeRenderWorker *render_worker;   /* owns the seam decoder cache off-thread */
+  guint video_generation;          /* bumped on every snapshot refresh */
+  gint64 video_requested_index;    /* sequence frame index last asked for */
   gboolean video_active;           /* a video clip covers the position */
   gboolean video_missing_reported; /* once per play run */
 };
@@ -196,18 +217,18 @@ session_now (const OePlaybackSession *self)
   return g_get_monotonic_time ();
 }
 
+/* The snap bound for this stream: the larger of the fixed floor and
+ * two device periods (the queue-depth step size). */
 static gint64
-apply_drift_correction (gint64 wall_pos, gint64 audio_pos)
+drift_snap_us (const OePlaybackSession *self)
 {
-  const gint64 diff = audio_pos - wall_pos;
+  gint64 period_us = 0;
 
-  if (diff > DRIFT_SNAP_US || diff < -DRIFT_SNAP_US)
-    return audio_pos;
-  if (diff > DRIFT_SLEW_US)
-    return wall_pos + DRIFT_SLEW_US;
-  if (diff < -DRIFT_SLEW_US)
-    return wall_pos - DRIFT_SLEW_US;
-  return audio_pos;
+  if (self->stream_info.sample_rate > 0 && self->stream_info.buffer_frames > 0)
+    period_us = (gint64) self->stream_info.buffer_frames * G_GINT64_CONSTANT (1000000)
+                / self->stream_info.sample_rate;
+
+  return MAX (DRIFT_SNAP_US, 2 * period_us);
 }
 
 static gint64
@@ -266,22 +287,10 @@ fire_event (OePlaybackSession *self, OePlaybackEvent event, const gchar *detail)
     self->event_func (self, event, detail, self->event_data);
 }
 
-/* Render seam: the shared compositor (per-source decoder cache +
- * layered blend) rendered lazily against the deep-copied sequence
- * snapshot. The resolver hands the seam the project's media paths. */
-static gchar *
-resolve_media_path (guint media_ref, gpointer user_data)
-{
-  OePlaybackSession *self = user_data;
-
-  return oe_project_dup_media_path ((OeProject *) self->project, media_ref);
-}
-
-static void
-close_render_session (OePlaybackSession *self)
-{
-  g_clear_pointer (&self->render_session, oe_render_session_free);
-}
+/* Render seam: frames come from the render worker, which owns the
+ * shared compositor (per-source decoder cache + layered blend) on its
+ * own thread against its own copy of the sequence snapshot. */
+static void on_render_frame (OeRenderWorkerFrame *frame, const GError *error, gpointer user_data);
 
 /* ------------------------------------------------------------------ */
 /* Sequence snapshot                                                   */
@@ -299,12 +308,53 @@ refresh_sequence (OePlaybackSession *self)
   self->sequence_valid = TRUE;
   self->sequence_end_us = compute_sequence_end (&self->sequence);
 
-  /* The decoder cache keys to the outgoing snapshot; a stale session
-   * would serve frames from files the new snapshot no longer maps. */
-  self->render_source.sequence = &self->sequence;
-  self->render_source.resolve_path = resolve_media_path;
-  self->render_source.resolve_data = self;
-  close_render_session (self);
+  /* The render worker gets its own deep copy plus every media path the
+   * snapshot can reference, resolved HERE: the project is main-thread
+   * state and the worker must never read it. Frames still in flight
+   * from the outgoing snapshot are dropped by the generation guard. */
+  OeSequence *copy = g_new0 (OeSequence, 1);
+
+  oe_sequence_copy (copy, &self->sequence);
+
+  GHashTable *paths = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, g_free);
+
+  if (self->sequence.tracks != NULL)
+    {
+      for (guint t = 0; t < self->sequence.tracks->len; t++)
+        {
+          const OeTrack *track = g_ptr_array_index (self->sequence.tracks, t);
+
+          if (track->clips == NULL)
+            continue;
+
+          for (guint c = 0; c < track->clips->len; c++)
+            {
+              const OeClip *clip = g_ptr_array_index (track->clips, c);
+
+              if (clip->kind != OE_CLIP_MEDIA
+                  || g_hash_table_contains (paths, GUINT_TO_POINTER (clip->media_ref)))
+                continue;
+
+              gchar *path
+                  = oe_project_dup_media_path ((OeProject *) self->project, clip->media_ref);
+
+              if (path != NULL)
+                g_hash_table_insert (paths, GUINT_TO_POINTER (clip->media_ref), path);
+            }
+        }
+    }
+
+  self->video_generation++;
+  self->video_requested_index = -1;
+
+  if (self->render_worker != NULL)
+    oe_render_worker_set_sequence (self->render_worker, copy, paths);
+  else
+    {
+      oe_sequence_clear (copy);
+      g_free (copy);
+      g_hash_table_unref (paths);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -424,23 +474,73 @@ mix_window_advance (OePlaybackSession *self)
     }
 }
 
-/* Open a mix window covering [position + lookahead, …): collect every
- * audible audio track's clip at the window start, in track-array order,
- * sized by each slot's decoded span. Gaps and inaudible tracks
- * contribute silence (no slot, zero in the shared buffer); with NO
- * contributing track the window stays closed and the feed retries on a
- * later tick. */
+/* The earliest audio clip edge (a start or an end) strictly after
+ * @from_us on ANY audio track, capped at @limit_us. Windows end at the
+ * next edge so the set of covering clips is constant across a window:
+ * a clip that begins mid-span gets its own window instead of losing
+ * its head to the previous one, and a clip that ends mid-span is not
+ * padded with the next one's audio. */
+static gint64
+next_audio_edge (const OeSequence *seq, gint64 from_us, gint64 limit_us)
+{
+  gint64 edge = limit_us;
+
+  for (guint t = 0; t < seq->tracks->len; t++)
+    {
+      const OeTrack *track = g_ptr_array_index (seq->tracks, t);
+
+      if (track->kind != OE_TRACK_AUDIO || track->clips == NULL)
+        continue;
+
+      for (guint c = 0; c < track->clips->len; c++)
+        {
+          const OeClip *clip = g_ptr_array_index (track->clips, c);
+          const gint64 start = clip->position_us;
+          const gint64 stop = start + (clip->source_out_us - clip->source_in_us);
+
+          if (start > from_us && start < edge)
+            edge = start;
+          if (stop > from_us && stop < edge)
+            edge = stop;
+          if (start >= edge)
+            break; /* position-ordered: nothing later can lower the edge */
+        }
+    }
+
+  return edge;
+}
+
+/* Open the next mix window: it starts exactly where pushed coverage
+ * ends (the playhead on a fresh start) and runs to the next clip edge
+ * or the request span, whichever comes first. Every audible audio
+ * track's covering clip contributes a slot, in track-array order; gaps
+ * and inaudible tracks contribute silence (no slot, zero in the shared
+ * buffer). A span with NO contributing track is a zero-slot window:
+ * its silence is queued at once, so the device queue stays contiguous
+ * in sequence time and its consumed depth keeps mapping to a position. */
 static void
-submit_audio_request (OePlaybackSession *self, gint64 position_us)
+submit_audio_request (OePlaybackSession *self)
 {
   if (self->stream == NULL || self->worker == NULL)
     return;
 
-  const gint64 seq_from = position_us + AUDIO_LOOKAHEAD_US;
   const OeSequence *seq = &self->sequence;
 
   if (seq->tracks == NULL)
     return;
+
+  const gint64 seq_from = self->audio_pushed_through_us;
+  const gint64 seq_to = next_audio_edge (seq, seq_from, seq_from + AUDIO_REQUEST_SPAN_US);
+  const gsize window_frames = (gsize) ((seq_to - seq_from) * (gint64) self->stream_info.sample_rate
+                                       / G_GINT64_CONSTANT (1000000));
+
+  if (window_frames == 0)
+    {
+      /* Sub-frame sliver between two edges: nothing to queue, step over
+       * it so the feed makes progress. */
+      self->audio_pushed_through_us = seq_to;
+      return;
+    }
 
   /* D5 audibility: one any-solo scan over the audio tracks, then the
    * per-track mute/solo decision — the same rule the export mixdown
@@ -459,7 +559,6 @@ submit_audio_request (OePlaybackSession *self, gint64 position_us)
   const int channels = MAX (self->stream_info.channels, 1);
   MixSlot *slots = g_new0 (MixSlot, seq->tracks->len);
   gsize n_slots = 0;
-  gsize window_frames = 0;
 
   for (guint t = 0; t < seq->tracks->len; t++)
     {
@@ -492,7 +591,7 @@ submit_audio_request (OePlaybackSession *self, gint64 position_us)
 
       const gint64 src_from = CLAMP (clip->source_in_us + (seq_from - clip->position_us),
                                      clip->source_in_us, clip->source_out_us);
-      const gint64 src_to = MIN (clip->source_out_us, src_from + AUDIO_REQUEST_SPAN_US);
+      const gint64 src_to = MIN (clip->source_out_us, src_from + (seq_to - seq_from));
 
       if (src_to <= src_from)
         continue;
@@ -513,17 +612,7 @@ submit_audio_request (OePlaybackSession *self, gint64 position_us)
        * the fade envelope keeps its per-sample cadence at delivery. */
       oe_audio_factor (OE_AUDIO_UNITY, clip->audio.gain, clip->audio.pan, track->audio.volume,
                        track->audio.pan, 1, slot->factor);
-
-      window_frames = MAX (window_frames,
-                           (gsize) ((src_to - src_from) * (gint64) self->stream_info.sample_rate
-                                    / G_GINT64_CONSTANT (1000000)));
       n_slots++;
-    }
-
-  if (n_slots == 0 || window_frames == 0)
-    {
-      g_free (slots);
-      return; /* all silence for this span: feed retries on a later tick */
     }
 
   self->mix.active = TRUE;
@@ -537,6 +626,8 @@ submit_audio_request (OePlaybackSession *self, gint64 position_us)
   self->mix.mix = g_malloc0 (window_frames * (gsize) channels * sizeof (gfloat));
   self->audio_outstanding = TRUE;
 
+  /* With slots this submits the first decode; with none it queues the
+   * silent window and closes it on the spot. */
   mix_window_advance (self);
 }
 
@@ -546,20 +637,45 @@ submit_audio_request (OePlaybackSession *self, gint64 position_us)
 static void
 feed_audio (OePlaybackSession *self, gint64 position_us)
 {
-  if (self->stream == NULL || self->worker == NULL || self->audio_outstanding)
+  if (self->stream == NULL || self->worker == NULL)
     return;
 
   if (self->stream_info.sample_rate <= 0)
     return;
 
-  if (self->audio_pushed_through_us >= position_us + AUDIO_LOOKAHEAD_US)
-    return;
+  /* Coverage fell behind the playhead: the queue ran dry and the device
+   * played silence past the end of what we pushed (a stalled decode, a
+   * suspended process). Resume contiguous from the playhead — nothing
+   * useful is left to preserve — with the consumed-audio accounting
+   * rebased so the clock still maps frames to positions. */
+  if (!self->stream_info.is_dummy && !self->audio_outstanding
+      && self->audio_pushed_through_us < position_us)
+    {
+      oe_audio_output_flush (self->stream);
+      self->audio_base_position_us = position_us;
+      self->audio_pushed_frames = 0;
+      self->audio_pushed_through_us = position_us;
+    }
 
-  if (self->stream_info.is_dummy
-      && oe_audio_output_queued_frames (self->stream) > AUDIO_DUMMY_QUEUE_CAP_FRAMES)
-    return;
+  for (int round = 0; round < AUDIO_FEED_ROUNDS_PER_TICK; round++)
+    {
+      if (self->audio_outstanding)
+        return;
 
-  submit_audio_request (self, position_us);
+      if (self->audio_pushed_through_us >= position_us + AUDIO_LOOKAHEAD_US)
+        return;
+
+      if (self->stream_info.is_dummy
+          && oe_audio_output_queued_frames (self->stream) > AUDIO_DUMMY_QUEUE_CAP_FRAMES)
+        return;
+
+      const gint64 before = self->audio_pushed_through_us;
+
+      submit_audio_request (self);
+
+      if (!self->audio_outstanding && self->audio_pushed_through_us == before)
+        return; /* no progress (push rejected): retry next tick */
+    }
 }
 
 static void
@@ -717,7 +833,7 @@ restart_streaming (OePlaybackSession *self, gint64 position_us)
   self->anchor_position_us = position_us;
   self->anchor_time_us = session_now (self);
 
-  submit_audio_request (self, position_us);
+  feed_audio (self, position_us);
 }
 
 static void
@@ -742,27 +858,18 @@ ensure_stream (OePlaybackSession *self)
 }
 
 /* ------------------------------------------------------------------ */
-/* Video: shared-seam frame delivery                                   */
+/* Video: shared-seam frames, rendered off-thread                      */
 /* ------------------------------------------------------------------ */
 
 #define VIDEO_DECODE_BOX_W 1280
 #define VIDEO_DECODE_BOX_H 720
 
-static OeRenderSession *
-ensure_render_session (OePlaybackSession *self)
-{
-  if (self->render_session == NULL)
-    self->render_session = oe_render_session_new (&self->render_source);
-
-  return self->render_session;
-}
-
-/* Decode and deliver the frame at @position, or clear the monitor when
- * no video is scheduled. Rendering runs through the shared render seam
- * (decoder cache + layered compositor); missing media reports once per
- * run and the transport continues. With @force the same-frame dedup is
- * bypassed — the paused repaint path needs a fresh render even though
- * the frame index did not move. */
+/* Ask the render worker for the frame at @position, or clear the
+ * monitor when no video is scheduled. The frame arrives later on the
+ * main context (on_render_frame); the tick never waits for it. With
+ * @force the same-frame dedup is bypassed — the paused repaint and the
+ * paused seek need a fresh render even when the frame index did not
+ * move. */
 static void
 update_video_full (OePlaybackSession *self, gint64 position_us, gboolean force)
 {
@@ -775,6 +882,7 @@ update_video_full (OePlaybackSession *self, gint64 position_us, gboolean force)
       if (self->video_active)
         {
           self->video_active = FALSE;
+          self->video_requested_index = -1;
           if (self->frame_func != NULL)
             self->frame_func (self, NULL, self->frame_data);
         }
@@ -783,57 +891,64 @@ update_video_full (OePlaybackSession *self, gint64 position_us, gboolean force)
 
   const gint64 frame_index = oe_time_us_to_frame (position_us, self->sequence.frame_rate);
 
-  if (!force && self->video_active && frame_index == self->video_frame_index)
-    return; /* same frame — stills decode once per source frame */
+  if (!force && self->video_active && frame_index == self->video_requested_index)
+    return; /* same frame — stills render once per source frame */
 
-  OeRenderSession *render = ensure_render_session (self);
-
-  if (render == NULL)
-    {
-      if (!self->video_missing_reported)
-        {
-          self->video_missing_reported = TRUE;
-          fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED,
-                      "cannot open any media for the sequence");
-        }
-      return;
-    }
-
-  GError *error = NULL;
-  guint8 *canvas = oe_render_session_frame_at (render, position_us, VIDEO_DECODE_BOX_W,
-                                               VIDEO_DECODE_BOX_H, &error);
-
-  if (canvas == NULL)
-    {
-      if (!self->video_missing_reported)
-        {
-          self->video_missing_reported = TRUE;
-          fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED, error->message);
-        }
-      g_error_free (error);
-      return;
-    }
-
-  OePlaybackVideoFrame *frame = g_new0 (OePlaybackVideoFrame, 1);
-
-  frame->source_us = map.source_us;
-  frame->width = VIDEO_DECODE_BOX_W;
-  frame->height = VIDEO_DECODE_BOX_H;
-  frame->rgba = canvas;
+  if (self->render_worker == NULL)
+    return;
 
   self->video_active = TRUE;
-  self->video_frame_index = frame_index;
-
-  if (self->frame_func != NULL)
-    self->frame_func (self, frame, self->frame_data); /* ownership transfers */
-  else
-    oe_playback_video_frame_free (frame);
+  self->video_requested_index = frame_index;
+  oe_render_worker_request (self->render_worker, position_us, frame_index, self->video_generation,
+                            force, VIDEO_DECODE_BOX_W, VIDEO_DECODE_BOX_H);
 }
 
 static void
 update_video (OePlaybackSession *self, gint64 position_us)
 {
   update_video_full (self, position_us, FALSE);
+}
+
+/* Render worker → session, on the main context. Frames from a
+ * superseded snapshot or run (generation mismatch) are dropped: a seek
+ * or an edit has moved on and the monitor must not flash a stale
+ * picture. Failures report once per run and the transport continues. */
+static void
+on_render_frame (OeRenderWorkerFrame *frame, const GError *error, gpointer user_data)
+{
+  OePlaybackSession *self = user_data;
+
+  if (frame->generation != self->video_generation)
+    return;
+
+  if (frame->rgba == NULL)
+    {
+      if (!self->video_missing_reported)
+        {
+          self->video_missing_reported = TRUE;
+          fire_event (self, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED,
+                      error != NULL ? error->message : "cannot render the sequence");
+        }
+      return;
+    }
+
+  if (!self->video_active)
+    return; /* the position left every video clip while this rendered */
+
+  OePlaybackVideoFrame *out = g_new0 (OePlaybackVideoFrame, 1);
+  OePlaybackMapping map;
+
+  oe_playback_session_map (&self->sequence, OE_TRACK_VIDEO, frame->t_us, &map);
+  out->source_us = map.source_us;
+  out->width = frame->width;
+  out->height = frame->height;
+  out->rgba = frame->rgba;
+  frame->rgba = NULL; /* ownership moves to the delivered frame */
+
+  if (self->frame_func != NULL)
+    self->frame_func (self, out, self->frame_data); /* ownership transfers */
+  else
+    oe_playback_video_frame_free (out);
 }
 
 void
@@ -848,6 +963,7 @@ oe_playback_session_repaint_paused (OePlaybackSession *session)
    * re-snapshot before rendering, or the repaint serves the frozen
    * pre-edit sequence and the monitor never shows the edit. */
   refresh_sequence (session);
+  session->video_missing_reported = FALSE;
 
   update_video_full (session, session->last_position_us, TRUE);
 }
@@ -856,25 +972,62 @@ oe_playback_session_repaint_paused (OePlaybackSession *session)
 /* Clock                                                               */
 /* ------------------------------------------------------------------ */
 
+/* The anchor-based position: pure, no device access. */
 static gint64
-compute_position (OePlaybackSession *self, gint64 now_us)
+compute_position (const OePlaybackSession *self, gint64 now_us)
 {
-  gint64 raw = self->anchor_position_us + (now_us - self->anchor_time_us);
+  const gint64 raw = self->anchor_position_us + (now_us - self->anchor_time_us);
 
-  if (raw < 0)
-    raw = 0;
+  return MAX (raw, 0);
+}
 
-  /* Real device only: the dummy driver never consumes, so its queue
-   * depth is not a pacing signal. */
-  if (self->stream == NULL || self->stream_info.is_dummy)
-    return raw;
+/* Drift correction against the device (real streams only — the dummy
+ * driver never consumes, so its queue depth is not a pacing signal).
+ * The sequence position of the audio the device has consumed is
+ * base + consumed / rate, exact because the queue is contiguous from
+ * base. The ANCHOR is corrected — slewed by up to DRIFT_SLEW_US per
+ * tick, re-anchored outright past the snap bound — so the correction
+ * converges instead of choosing between two clocks every tick. Half a
+ * device period is added because the reported depth lags true playback
+ * by up to one period (it moves in whole callbacks). Nothing happens
+ * until the device has consumed anything: the clock waits for audio to
+ * start rather than racing ahead of it. */
+static void
+sync_clock_to_audio (OePlaybackSession *self, gint64 now_us)
+{
+  if (self->stream == NULL || self->stream_info.is_dummy || self->stream_info.sample_rate <= 0)
+    return;
 
   const gsize queued = oe_audio_output_queued_frames (self->stream);
-  const gint64 consumed = MAX (self->audio_pushed_frames - (gint64) queued, 0);
-  const gint64 audio_pos = self->audio_base_position_us
-                           + consumed * G_GINT64_CONSTANT (1000000) / self->stream_info.sample_rate;
+  const gint64 consumed = self->audio_pushed_frames - (gint64) queued;
 
-  return apply_drift_correction (raw, MAX (audio_pos, 0));
+  if (consumed <= 0)
+    {
+      /* Audio not yet flowing (still decoding, or queued but before the
+       * device's first callback): hold the position here — a fresh time
+       * anchor each tick — for the grace period. */
+      if (now_us - self->anchor_time_us < AUDIO_START_GRACE_US)
+        self->anchor_time_us = now_us;
+      return;
+    }
+
+  const gint64 phase = (gint64) self->stream_info.buffer_frames / 2;
+  const gint64 audio_pos
+      = self->audio_base_position_us
+        + (consumed + phase) * G_GINT64_CONSTANT (1000000) / self->stream_info.sample_rate;
+  const gint64 wall_pos = compute_position (self, now_us);
+  const gint64 diff = audio_pos - wall_pos;
+  const gint64 snap = drift_snap_us (self);
+
+  if (diff > snap || diff < -snap)
+    {
+      self->anchor_position_us = MAX (audio_pos, 0);
+      self->anchor_time_us = now_us;
+    }
+  else if (diff > DRIFT_SLEW_US)
+    self->anchor_position_us += DRIFT_SLEW_US;
+  else if (diff < -DRIFT_SLEW_US)
+    self->anchor_position_us -= DRIFT_SLEW_US;
 }
 
 static gint64
@@ -902,9 +1055,11 @@ oe_playback_session_new (const OeProject *project)
   self->last_position_us = 0;
   self->anchor_time_us = session_now (self);
 
-  refresh_sequence (self);
-
+  self->render_worker = oe_render_worker_new (on_render_frame, self);
   self->worker = oe_media_playback_worker_new (on_worker_audio, self);
+  self->video_requested_index = -1;
+
+  refresh_sequence (self);
   return self;
 }
 
@@ -915,9 +1070,10 @@ oe_playback_session_free (OePlaybackSession *session)
     return;
 
   halt_streaming (session);
+  session->video_generation++; /* frames still in flight are dropped on delivery */
+  g_clear_pointer (&session->render_worker, oe_render_worker_free);
   g_clear_pointer (&session->stream, oe_audio_output_close_stream);
   g_clear_pointer (&session->worker, oe_media_playback_worker_free);
-  close_render_session (session);
 
   if (session->sequence_valid)
     oe_sequence_clear (&session->sequence);
@@ -1016,7 +1172,6 @@ oe_playback_session_play (OePlaybackSession *session, GError **error)
 
   ensure_stream (session);
   session->video_missing_reported = FALSE;
-  g_clear_pointer (&session->video_failed_path, g_free);
   restart_streaming (session, session->last_position_us);
   session->state = OE_PLAYBACK_PLAYING;
   fire_notify (session, session->last_position_us);
@@ -1069,6 +1224,13 @@ oe_playback_session_seek (OePlaybackSession *session, gint64 position_us)
        * the full seek discipline. */
       restart_streaming (session, clamped);
     }
+  else
+    {
+      /* Scrubbing: the monitor follows the playhead. Forced, because the
+       * frame index may not have moved but the snapshot did. */
+      session->video_missing_reported = FALSE;
+      update_video_full (session, clamped, TRUE);
+    }
 
   fire_notify (session, clamped);
 }
@@ -1082,6 +1244,8 @@ oe_playback_session_tick (OePlaybackSession *session)
 
   if (session->state != OE_PLAYBACK_PLAYING)
     return now;
+
+  sync_clock_to_audio (session, now);
 
   const gint64 position = compute_position (session, now);
 
@@ -1112,7 +1276,7 @@ oe_playback_session_get_position (const OePlaybackSession *session)
   if (session->state != OE_PLAYBACK_PLAYING)
     return session->last_position_us;
 
-  return compute_position ((OePlaybackSession *) session, session_now (session));
+  return compute_position (session, session_now (session));
 }
 
 OePlaybackState

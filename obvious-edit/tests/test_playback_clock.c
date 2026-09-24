@@ -489,11 +489,28 @@ test_missing_media_reports_once_and_transport_continues (ClockFixture *fx,
 
   g_assert_true (oe_playback_session_play (fx->session, &error));
 
-  /* Video open failures are synchronous in tick: the first tick reports
-   * the missing file once, and later ticks stay quiet. */
+  /* Frames render on the worker thread and their failures arrive on the
+   * main context: the first tick asks, the delivery reports the missing
+   * file once, and later ticks stay quiet. Pump until the report lands
+   * (bounded — a lost delivery fails the count below). */
   oe_playback_session_tick (fx->session);
-  fake_advance (&clock, 20000);
-  oe_playback_session_tick (fx->session);
+
+  for (int i = 0; i < 2000 && fx->event_count == 0; i++)
+    {
+      while (g_main_context_iteration (NULL, FALSE))
+        ;
+      g_usleep (1000);
+    }
+
+  for (int i = 0; i < 5; i++)
+    {
+      fake_advance (&clock, 20000);
+      oe_playback_session_tick (fx->session);
+
+      while (g_main_context_iteration (NULL, FALSE))
+        ;
+      g_usleep (1000);
+    }
 
   g_assert_cmpuint (fx->event_count, ==, 1);
   g_assert_cmpint (fx->last_event, ==, OE_PLAYBACK_EVENT_MISSING_MEDIA_SKIPPED);

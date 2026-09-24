@@ -34,8 +34,10 @@ Eleven phases are complete. The editor currently:
   and pan, track volume and pan, mute and solo. Peak meters run live.
 - **Generates content** with title and solid-color clips, and applies a
   chroma key to media clips on video tracks.
-- **Plays back** with a wall-clock-anchored session clock, decode-ahead
-  multi-track audio through SDL3, and frame-at-time video in the monitor.
+- **Plays back** with a wall-clock-anchored session clock corrected
+  against the audio device, decode-ahead multi-track audio through SDL3
+  queued contiguously from the playhead, and frame-at-time video
+  rendered off the main thread into the monitor.
 - **Exports** the timeline to an H.264/AAC MP4 through the same render seam
   the monitor uses, so preview and export cannot drift apart.
 - **Undoes and redoes** every edit through a strict-LIFO command-object

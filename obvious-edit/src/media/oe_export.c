@@ -755,8 +755,17 @@ export_encode_frame (AVCodecContext *ctx, AVStream *stream, AVFormatContext *fmt
 /* Custom AVIO over the temp fd (write_atomic parity)                  */
 /* ------------------------------------------------------------------ */
 
+/* libavformat 61 (FFmpeg 7) made the write callback's buffer const;
+ * the floor is libavformat 60, whose prototype still takes a mutable
+ * pointer. One alias keeps the body identical on both. */
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
+#define OE_AVIO_WRITE_BUF const uint8_t *
+#else
+#define OE_AVIO_WRITE_BUF uint8_t *
+#endif
+
 static int
-avio_write_fn (void *opaque, const uint8_t *buf, int buf_size)
+avio_write_fn (void *opaque, OE_AVIO_WRITE_BUF buf, int buf_size)
 {
   const int fd = GPOINTER_TO_INT (opaque);
   int written = 0;

@@ -229,16 +229,40 @@ here": topmost video track wins, spans are half-open, source µs is
 clamped into the clip's source range. The session uses it per tick;
 headless tests use it directly — the same function, no GTK.
 
-**Decode-ahead audio, frame-at-time video.** `src/media/
-oe_media_playback.[ch]` adds full-resolution decode: a worker thread
-(GThread + GAsyncQueue) decodes interleaved f32 chunks ahead of the
-transport and delivers them with `g_main_context_invoke` — the same
-main-context discipline as the import worker, drained and joined
-before `oe_ffmpeg_shutdown` — while video decodes frame-at-time to
-packed BGRA at monitor resolution, sized so Cairo's ARGB32 surface
-blits it without a per-frame channel swap. Requests carry a
-generation token; a seek supersedes the in-flight request instead of
-queueing behind it.
+**Decode-ahead audio, frame-at-time video, both off the main
+thread.** `src/media/oe_media_playback.[ch]` adds full-resolution
+decode: a worker thread (GThread + GAsyncQueue) decodes interleaved
+f32 chunks ahead of the transport and delivers them as queued idle
+sources on the main context — the same discipline as the import
+worker, drained and joined before `oe_ffmpeg_shutdown`. (Never
+`g_main_context_invoke`: it runs the callback on the calling thread
+whenever no loop owns the default context, which is every headless
+test, and put the lock-free mixer on the decode thread.) Video renders
+through the shared seam on `src/media/oe_render_worker.[ch]`: one
+thread owning the render session and its own copy of the sequence
+snapshot, answering latest-wins frame requests and delivering packed
+BGRA at monitor resolution (sized so Cairo's ARGB32 surface blits it
+without a per-frame channel swap). The tick only asks; a slow decode
+can no longer stall the transport, the audio feed, or the window.
+Requests carry a generation token; a seek supersedes the in-flight
+request instead of queueing behind it, and frames from a superseded
+snapshot are dropped on delivery.
+
+**The queue is contiguous, and the device clock leads.** Every audio
+window starts exactly where the previous one ended — the first at the
+playhead — and spans with no audible clip queue silence, so the
+frames the device has consumed always map back to a sequence
+position: `base + consumed / rate`. The lookahead is real buffering
+(audio held beyond the playhead), not a content offset. Windows end at
+the next clip edge on any audio track, so a clip that begins mid-span
+gets its own window instead of losing its head. On a real device the
+tick corrects the wall-clock ANCHOR toward the consumed position —
+slewed 1 ms per tick, re-anchored past a snap bound of at least two
+device periods (queue depth moves in whole callbacks) — and holds the
+position at the anchor until the device has consumed its first period
+after a restart, so video waits for audio rather than racing ahead.
+Coverage that falls behind the playhead (a stalled decode) resumes
+contiguous from the playhead with the accounting rebased.
 
 **SDL3 push audio behind the adapter.** `oe_audio_output` grows the
 push-model device stream: open once on the default playback device,
@@ -255,7 +279,11 @@ the clock and pushes the playhead into the timeline, while the
 program monitor (`oe_program_monitor`) blits the newest owned frame.
 The widget never owns or computes time; dragging the playhead feeds a
 seek back into the session through the timeline's playhead-changed
-callback. Missing media is reported once per run (event + status
+callback, and a seek while paused or stopped asks the render worker
+for the frame at the new position, so scrubbing shows pictures. Seeks
+and paused repaints re-snapshot the sequence but rebind the render
+session in place (`oe_render_session_rebind`): decoders for unchanged
+media stay open instead of reopening every file per playhead move. Missing media is reported once per run (event + status
 bar) and hatched in the monitor while the transport continues; an
 empty sequence reports "nothing to play"; reaching the end stops
 with the playhead parked on the final position.
@@ -545,9 +573,10 @@ mute/lose-solo verdicts passed in) while the fade envelope keeps its
 per-sample cadence; the final clamp is the last word, exactly as in
 the mixdown. Stale deliveries from superseded decodes are dropped by
 generation, and the queue's progress gate tracks pushed coverage in
-sequence time (the first window begins LOOKAHEAD ahead of the
-playhead, so pushed frames do not measure coverage from the restart
-position). The session layer stays GTK-free: mixer consumers bind
+sequence time: windows abut (each begins where the previous ended,
+the first at the playhead) and a span with no contributing track is a
+zero-slot window whose silence is queued at once, so pushed frames DO
+measure coverage from the restart position. The session layer stays GTK-free: mixer consumers bind
 two observers — `set_mix_func` (the parity seam: called with the
 finished window) and `set_meter_func` (per-chunk channel peaks).
 

@@ -18,6 +18,7 @@ struct _OeAudioStream
   int channels;
   int sample_rate;
   gboolean is_dummy;
+  int buffer_frames;
 };
 
 GQuark
@@ -113,6 +114,7 @@ oe_audio_output_open_stream (OeAudioDeviceInfo *info, GError **error)
   stream->channels = device_spec.channels;
   stream->sample_rate = device_spec.freq;
   stream->is_dummy = g_strcmp0 (SDL_GetCurrentAudioDriver (), "dummy") == 0;
+  stream->buffer_frames = MAX (sample_frames, 0);
 
   /* Deterministic contract: the device stays paused until the first
    * oe_audio_output_set_running (TRUE). */
@@ -121,10 +123,11 @@ oe_audio_output_open_stream (OeAudioDeviceInfo *info, GError **error)
   info->sample_rate = stream->sample_rate;
   info->channels = stream->channels;
   info->is_dummy = stream->is_dummy;
+  info->buffer_frames = stream->buffer_frames;
 
-  oe_log (OE_LOG_LEVEL_INFO, "audio device open: %d Hz, %d ch, driver '%s'%s", stream->sample_rate,
-          stream->channels, SDL_GetCurrentAudioDriver (),
-          stream->is_dummy ? " (dummy — no audible output)" : "");
+  oe_log (OE_LOG_LEVEL_INFO, "audio device open: %d Hz, %d ch, %d-frame period, driver '%s'%s",
+          stream->sample_rate, stream->channels, stream->buffer_frames,
+          SDL_GetCurrentAudioDriver (), stream->is_dummy ? " (dummy — no audible output)" : "");
   return stream;
 }
 

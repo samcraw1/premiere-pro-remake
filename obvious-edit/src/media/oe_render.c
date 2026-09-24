@@ -213,6 +213,7 @@ typedef struct
   Decoder dec;
   gchar *path;
   gint64 cursor_tb;           /* stream time_base pts decoded through */
+  gboolean at_eof;            /* the pump hit end of stream: hold @held */
   AVFrame *held;              /* last delivered frame (past-end clamp) */
   struct SwsContext *fit_sws; /* cached native → box-fit scaler */
   guint8 *fitted;             /* box-fit BGRA staging buffer */
@@ -332,6 +333,42 @@ oe_render_session_free (OeRenderSession *session)
   g_clear_pointer (&session->sources, g_hash_table_unref);
   g_clear_pointer (&session->generators, oe_generator_cache_free);
   g_free (session);
+}
+
+void
+oe_render_session_rebind (OeRenderSession *session, const OeRenderSource *source)
+{
+  g_return_if_fail (session != NULL);
+  g_return_if_fail (source != NULL);
+  g_return_if_fail (source->sequence != NULL);
+  g_return_if_fail (source->resolve_path != NULL);
+
+  session->source = source;
+
+  /* Decoders key to a media reference AND its path: an entry whose
+   * reference still resolves to the same file keeps its open demuxer,
+   * decoder, and cursor (a seek or a paused repaint must not reopen
+   * every file); anything that moved or vanished is dropped. */
+  GHashTableIter iter;
+  gpointer key, value;
+
+  g_hash_table_iter_init (&iter, session->sources);
+
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      const VideoSource *vs = value;
+      gchar *path = source->resolve_path (GPOINTER_TO_UINT (key), source->resolve_data);
+
+      if (path == NULL || g_strcmp0 (path, vs->path) != 0)
+        g_hash_table_iter_remove (&iter);
+
+      g_free (path);
+    }
+
+  /* The generator cache keys on clip pointer identity inside the
+   * outgoing snapshot: it cannot survive a rebind. */
+  g_clear_pointer (&session->generators, oe_generator_cache_free);
+  session->generators = oe_generator_cache_new ();
 }
 
 /* Fetches (opening on first use) the decoder entry for @media_ref. */
@@ -667,50 +704,63 @@ compose_frame (VideoSource *vs, const AVFrame *frame, int out_w, int out_h, GErr
   return canvas;
 }
 
-/* Decode-to-frame for one source at a stream-time target: backward
- * requests seek + flush (decode-at discipline), forward requests ride
- * the sequential pump. Cursor and held frame advance exactly like
+/* Forward jumps longer than this seek instead of pumping every
+ * intermediate frame: a cut to a later point of the same source, or a
+ * transport that fell behind, would otherwise decode seconds of frames
+ * to reach the target. Within the threshold the sequential pump stays
+ * the hot path (the export loop's strictly increasing times). */
+#define FORWARD_SEEK_THRESHOLD_US G_GINT64_CONSTANT (1000000)
+
+/* Positions the demuxer at the keyframe at or before @target_tb and
+ * flushes the decoder; a failed seek restarts from the beginning. */
+static void
+source_seek (VideoSource *vs, gint64 target_tb)
+{
+  if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, target_tb, AVSEEK_FLAG_BACKWARD) >= 0)
+    avcodec_flush_buffers (vs->dec.ctx);
+  else if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, 0, AVSEEK_FLAG_BACKWARD) >= 0)
+    avcodec_flush_buffers (vs->dec.ctx);
+
+  vs->at_eof = FALSE;
+}
+
+/* Decode-to-frame for one source at a stream-time target. Backward
+ * requests and long forward jumps seek to the preceding keyframe and
+ * flush; every request then rides the sequential pump, dropping frames
+ * before the target, so the delivered frame is the frame AT the target
+ * (not the keyframe the seek landed on — the pre-fix behaviour, which
+ * showed a stale keyframe after every seek and then decoded the whole
+ * GOP on the next request). Cursor and held frame advance exactly like
  * deliver() minus compositing, so the fast path and the layered path
  * share one decode story. Returns @vs's held frame on success, NULL
  * with @error set on failure. */
 static const AVFrame *
 source_frame_at (VideoSource *vs, gint64 target_tb, GError **error)
 {
+  const gboolean have_held = vs->held != NULL && vs->held->width > 0;
+
   if (target_tb < vs->cursor_tb)
     {
-      /* Backward request: the decode-at discipline — seek backward,
-       * flush, deliver the first decoded frame (preview parity). */
-      if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, target_tb, AVSEEK_FLAG_BACKWARD) >= 0)
-        avcodec_flush_buffers (vs->dec.ctx);
-      else if (av_seek_frame (vs->dec.fmt, vs->dec.stream_index, 0, AVSEEK_FLAG_BACKWARD) >= 0)
-        avcodec_flush_buffers (vs->dec.ctx);
+      source_seek (vs, target_tb);
+    }
+  else if (have_held && vs->at_eof)
+    {
+      /* Past the source's last frame and the stream is exhausted: hold
+       * it without touching the demuxer (stills render at every covered
+       * sequence time this way, matching the monitor's clamped decode). */
+      return vs->held;
+    }
+  else if (have_held)
+    {
+      const gint64 threshold_tb
+          = av_rescale_q (FORWARD_SEEK_THRESHOLD_US, AV_TIME_BASE_Q, vs->dec.stream->time_base);
 
-      AVFrame *frame = av_frame_alloc ();
-
-      g_assert_nonnull (frame);
-
-      gboolean end_of_stream = FALSE;
-
-      if (read_next_frame (&vs->dec, frame, &end_of_stream, error))
-        {
-          av_frame_unref (vs->held);
-          av_frame_ref (vs->held, frame);
-          vs->cursor_tb = frame_pts (frame);
-          av_frame_free (&frame);
-          return vs->held;
-        }
-
-      av_frame_free (&frame);
-
-      if (end_of_stream && vs->held != NULL && vs->held->width > 0)
-        return vs->held;
-
-      g_prefix_error (error, "'%s': ", vs->path);
-      return NULL;
+      if (target_tb > vs->cursor_tb + MAX (threshold_tb, 1))
+        source_seek (vs, target_tb);
     }
 
-  /* Forward request: read packets sequentially — no seek, the export
-   * loop's hot path — dropping frames before the target. */
+  /* Sequential pump: read packets forward — no seek — dropping frames
+   * before the target. */
   for (;;)
     {
       AVFrame *frame = av_frame_alloc ();
@@ -721,16 +771,24 @@ source_frame_at (VideoSource *vs, gint64 target_tb, GError **error)
 
       if (read_next_frame (&vs->dec, frame, &end_of_stream, error))
         {
-          if (frame_pts (frame) >= target_tb)
+          const gint64 pts = frame_pts (frame);
+
+          if (pts >= target_tb)
             {
               av_frame_unref (vs->held);
               av_frame_ref (vs->held, frame);
-              vs->cursor_tb = frame_pts (frame);
+              vs->cursor_tb = pts;
               av_frame_free (&frame);
               return vs->held;
             }
 
-          av_frame_free (&frame); /* still before the target */
+          /* Still before the target: remember it so a target between
+           * this frame and the next resolves to the nearest earlier
+           * frame at end of stream (the hold rule). */
+          av_frame_unref (vs->held);
+          av_frame_ref (vs->held, frame);
+          vs->cursor_tb = pts;
+          av_frame_free (&frame);
           continue;
         }
 
@@ -738,9 +796,8 @@ source_frame_at (VideoSource *vs, gint64 target_tb, GError **error)
 
       if (end_of_stream)
         {
-          /* Past the source's last frame: hold it (stills render at
-           * every covered sequence time this way, matching the
-           * monitor's clamped decode). */
+          vs->at_eof = TRUE;
+
           if (vs->held != NULL && vs->held->width > 0)
             return vs->held;
 

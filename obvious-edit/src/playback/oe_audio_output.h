@@ -43,12 +43,18 @@ typedef enum
  * @is_dummy: TRUE when the driver is SDL's dummy output — no real device
  *     consumes the queue, so the stream verifies the adapter contract but
  *     never produces sound or trustworthy pacing
+ * @buffer_frames: the device's callback period in sample frames — the
+ *     granularity at which the queue depth reported by
+ *     oe_audio_output_queued_frames() moves. A clock that corrects
+ *     itself against consumed audio must tolerate steps this large.
+ *     0 when the device does not report one.
  */
 typedef struct
 {
   int sample_rate;
   int channels;
   gboolean is_dummy;
+  int buffer_frames;
 } OeAudioDeviceInfo;
 
 /**

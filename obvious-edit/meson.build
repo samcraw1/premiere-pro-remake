@@ -44,6 +44,7 @@ math_dep = meson.get_compiler('c').find_library('m')
 oe_render_sources = [
   'src/media/oe_generator_raster.c',
   'src/media/oe_render.c',
+  'src/media/oe_render_worker.c',
 ]
 
 

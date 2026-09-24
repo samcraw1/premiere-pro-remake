@@ -134,6 +134,21 @@ guint8 *oe_render_session_frame_at (OeRenderSession *session, gint64 t_us, int o
                                     GError **error);
 
 /**
+ * oe_render_session_rebind:
+ * @session: a session
+ * @source: the replacement render source (a fresh sequence snapshot)
+ *
+ * Points the session at a new snapshot without closing every decoder:
+ * a cached source whose media reference still resolves to the same
+ * path keeps its demuxer, decoder, and read cursor, so a seek or a
+ * paused repaint after an edit does not reopen and re-probe every
+ * file. Sources whose reference moved or vanished are dropped, and the
+ * generator cache (keyed on clip identity inside the old snapshot) is
+ * cleared. The previous source must stay valid until this returns.
+ */
+void oe_render_session_rebind (OeRenderSession *session, const OeRenderSource *source);
+
+/**
  * oe_render_session_free: closes every cached decoder.
  */
 void oe_render_session_free (OeRenderSession *session);

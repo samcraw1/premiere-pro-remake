@@ -1,8 +1,8 @@
 /* oe_media_playback.c — playback decode capability implementation (Phase 5).
  *
  * Audio decode-ahead worker: one GThread fed by a GAsyncQueue, delivering
- * owned interleaved-f32 chunks onto the main context via
- * g_main_context_invoke — the same threading pattern as oe_import_worker.c.
+ * owned interleaved-f32 chunks onto the main context as queued idle
+ * sources — the same threading pattern as oe_import_worker.c.
  * Video decode: seek + flush, decode the frame at or after the requested
  * time, swscale it into an owned box-fit buffer in B8G8R8A8 byte order
  * (the packed-RGBA layout cairo surfaces consume directly).
@@ -231,7 +231,13 @@ deliver_on_main (gpointer data)
  * stale END-OF-RANGE or failure signal exactly like a stale chunk —
  * Phase 10 Wave B: the mixer chains decode requests per window, so a
  * late signal from a superseded decode must never advance the new
- * chain. A chunk's own generation wins; a signal carries @generation. */
+ * chain. A chunk's own generation wins; a signal carries @generation.
+ *
+ * Always QUEUED (g_idle_add_full), never g_main_context_invoke: invoke
+ * runs the function on the calling thread whenever nobody owns the
+ * default context — true in every headless test — which put the
+ * session's lock-free mixer on this worker thread, racing the main
+ * thread's teardown. */
 static void
 deliver (OeMediaPlaybackWorker *worker, OePlaybackAudioChunk *chunk, GError *error,
          guint generation)
@@ -242,7 +248,7 @@ deliver (OeMediaPlaybackWorker *worker, OePlaybackAudioChunk *chunk, GError *err
   d->chunk = chunk;
   d->error = error;
   d->generation = chunk != NULL ? chunk->generation : generation;
-  g_main_context_invoke (NULL, deliver_on_main, d);
+  g_idle_add_full (G_PRIORITY_DEFAULT, deliver_on_main, d, NULL);
 }
 
 /* Any queued message (newer request, cancel, quit) supersedes the decode

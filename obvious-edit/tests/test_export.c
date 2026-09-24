@@ -2188,8 +2188,6 @@ capture_mean_abs (const MixCapture *cap, gint64 start_us, gint64 end_us, int cha
  * pre-Wave-B topmost-track-wins mapping) captures only track B, so
  * every channel level lands far outside the tolerance — this test
  * fails by construction until D1 lands. */
-static gboolean audio_ready = FALSE;
-
 /* Virtual clock for the parity transport: every tick advances the
  * clock by hand, so no timing depends on wall time — only the
  * worker's decode speed does. */
@@ -2202,6 +2200,119 @@ static gint64
 parity_fake_time (gpointer data)
 {
   return ((ParityClock *) data)->now_us;
+}
+
+static gboolean audio_ready = FALSE;
+
+/* Drives a playing session on a virtual clock until the mix capture
+ * covers @target_us of sequence time (or playback stops), pumping the
+ * worker's deliveries between ticks. */
+static void
+drive_capture (OePlaybackSession *session, gint64 *now_us, MixCapture *cap, gint64 target_us)
+{
+  gint64 last_frames = 0;
+  int stall = 0;
+
+  for (int i = 0; i < 20000; i++)
+    {
+      const gint64 have_us
+          = cap->start_us + cap->frames * G_GINT64_CONSTANT (1000000) / MAX (cap->rate, 1);
+
+      if ((cap->frames > 0 && have_us >= target_us)
+          || oe_playback_session_get_state (session) != OE_PLAYBACK_PLAYING)
+        break;
+
+      *now_us += 40000;
+      oe_playback_session_tick (session);
+
+      while (g_main_context_iteration (NULL, FALSE))
+        ;
+
+      g_usleep (2000); /* the worker decodes off-thread; yield to it */
+
+      if (cap->frames == last_frames)
+        stall++;
+      else
+        stall = 0;
+      last_frames = cap->frames;
+
+      g_assert_cmpint (stall, <, 3000); /* ~6 s of no progress: broken */
+    }
+}
+
+/* /export/playback-queue-contiguous-from-playhead: the audio feed
+ * contract behind A/V sync. The device queue must (a) begin at the
+ * playhead — not lookahead-many milliseconds past it, which played
+ * audio early and left the queue with no real buffer; (b) stay
+ * contiguous across window boundaries and clip edges (collect_mix
+ * asserts every span abuts the last); and (c) carry silence over a gap
+ * between clips, so the frames the device consumes always map back to
+ * a sequence position. A second run seeks first: the queue then begins
+ * at the seek target. */
+static void
+test_playback_queue_contiguous_from_playhead (OeFixtures *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  g_assert_true (audio_ready);
+
+  write_sine_wav (fx, "long.wav", 8192, 440.0, 1600000);
+
+  gchar *wav = g_build_filename (fx->dir, "long.wav", NULL);
+  OeProject *project = new_project_25fps ();
+  const guint track = oe_project_add_track (project, OE_TRACK_AUDIO);
+  const guint ref = add_media (project, wav);
+
+  /* Clip A [0, 1.5 s) spans one window boundary at 1 s; a 300 ms gap;
+   * clip B [1.8, 2.1 s). */
+  insert_clip (project, track, ref, 0, 1500000);
+  insert_clip (project, track, ref, 1800000, 300000);
+
+  /* ---- Run 1: play from the start. ---- */
+  OePlaybackSession *session = oe_playback_session_new ((const OeProject *) project);
+  ParityClock clock = { G_GINT64_CONSTANT (1000000) };
+  MixCapture cap = { 0 };
+  GError *error = NULL;
+
+  oe_playback_session_set_time_source (session, parity_fake_time, &clock);
+  oe_playback_session_set_mix_func (session, collect_mix, &cap);
+  g_assert_true (oe_playback_session_play (session, &error));
+  g_assert_no_error (error);
+
+  drive_capture (session, &clock.now_us, &cap, 2050000);
+
+  g_assert_cmpint (cap.start_us, ==, 0); /* (a): the queue begins at the playhead */
+
+  const gint64 have_us = cap.frames * G_GINT64_CONSTANT (1000000) / MAX (cap.rate, 1);
+
+  g_assert_cmpint ((int) have_us, >=, 2050000); /* (b): no window was lost at an edge */
+
+  g_assert_cmpfloat (capture_mean_abs (&cap, 200000, 900000, 0), >, 0.02);   /* clip A */
+  g_assert_cmpfloat (capture_mean_abs (&cap, 1100000, 1400000, 0), >, 0.02); /* past 1 s */
+  g_assert_cmpfloat (capture_mean_abs (&cap, 1550000, 1750000, 0), ==, 0.0); /* (c): gap */
+  g_assert_cmpfloat (capture_mean_abs (&cap, 1850000, 2050000, 0), >, 0.02); /* clip B */
+
+  oe_playback_session_stop (session);
+  g_clear_pointer (&session, oe_playback_session_free);
+  mix_capture_clear (&cap);
+
+  /* ---- Run 2: seek, then play — the queue begins at the target. ---- */
+  session = oe_playback_session_new ((const OeProject *) project);
+  clock.now_us = G_GINT64_CONSTANT (5000000);
+  oe_playback_session_set_time_source (session, parity_fake_time, &clock);
+  oe_playback_session_set_mix_func (session, collect_mix, &cap);
+  oe_playback_session_seek (session, 500000);
+  g_assert_true (oe_playback_session_play (session, &error));
+  g_assert_no_error (error);
+
+  drive_capture (session, &clock.now_us, &cap, 900000);
+
+  g_assert_cmpint (cap.start_us, ==, 500000);
+  g_assert_cmpfloat (capture_mean_abs (&cap, 600000, 850000, 0), >, 0.02);
+
+  oe_playback_session_stop (session);
+  g_clear_pointer (&session, oe_playback_session_free);
+  mix_capture_clear (&cap);
+  g_object_unref (project);
+  g_free (wav);
 }
 
 static void
@@ -2265,8 +2376,8 @@ test_parity_audio_mix_two_tracks (OeFixtures *fx, gconstpointer user_data G_GNUC
 
   /* Drive the transport across the sequence; pump the main context so
    * the worker's decoded deliveries (g_main_context_invoke) reach the
-   * mixer. The session feeds position + 250 ms lookahead, so the first
-   * mixed window starts near 250 ms and the capture runs to the clip
+   * mixer. The session queues contiguously from the playhead, so the
+   * first mixed window starts at 0 and the capture runs to the clip
    * end at 600 ms. Bounded loop + progress guard: a stalled capture
    * fails with the window actually captured. */
   const gint64 target_us = 550000;
@@ -2376,6 +2487,8 @@ main (int argc, char *argv[])
   OE_ADD ("/export/mixdown-fade-ratio", test_mixdown_fade_ratio);
   OE_ADD ("/export/parity-transition-fade", test_parity_transition_fade);
   OE_ADD ("/export/parity-audio-mix-two-tracks", test_parity_audio_mix_two_tracks);
+  OE_ADD ("/export/playback-queue-contiguous-from-playhead",
+          test_playback_queue_contiguous_from_playhead);
   OE_ADD ("/export/container-truth", test_container_truth);
   OE_ADD ("/export/content-round-trip", test_content_round_trip);
   OE_ADD ("/export/mixdown-sums", test_mixdown_sums);
