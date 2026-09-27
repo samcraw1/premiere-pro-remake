@@ -2774,6 +2774,67 @@ edit_snap_toggle_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_da
   set_status_message (self, oe_timeline_get_snapping (timeline) ? "Snapping on" : "Snapping off");
 }
 
+/* Fulfills the Phase 1 registry promises for tool.select and
+ * tool.razor (Phase 12): both flip the timeline's session pointer tool;
+ * the razor's click-to-split lives in the widget. */
+static void
+set_tool (OeTimelineTool tool, const gchar *message)
+{
+  if (command_owner == NULL)
+    return;
+
+  oe_timeline_set_tool (OE_TIMELINE (command_owner->timeline), tool);
+  set_status_message (command_owner, message);
+}
+
+static void
+tool_select_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  set_tool (OE_TIMELINE_TOOL_SELECT, "Select tool");
+}
+
+static void
+tool_razor_command_handler (OeCommandId id G_GNUC_UNUSED, gpointer user_data G_GNUC_UNUSED)
+{
+  set_tool (OE_TIMELINE_TOOL_RAZOR, "Razor tool: click a clip to split it");
+}
+
+/* edit.split-at-playhead (Phase 12): the razor's keyboard twin — cuts
+ * the selected clip at the playhead through the recorded split. */
+static void
+edit_split_at_playhead_command_handler (OeCommandId id G_GNUC_UNUSED,
+                                        gpointer user_data G_GNUC_UNUSED)
+{
+  if (command_owner == NULL)
+    return;
+
+  OeMainWindow *self = command_owner;
+  OeTimeline *timeline = OE_TIMELINE (self->timeline);
+  guint track_index = 0;
+  guint clip_index = 0;
+
+  if (!oe_timeline_get_selection (timeline, &track_index, &clip_index))
+    {
+      set_status_message (self, "Split: no clip selected");
+      return;
+    }
+
+  GError *error = NULL;
+
+  if (!oe_edit_split_clip (self->project, self->undo_stack, track_index, clip_index,
+                           oe_timeline_get_playhead (timeline), &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Split rejected: %s", error->message);
+
+      set_status_message (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  oe_timeline_clear_selection (timeline);
+  set_status_message (self, "Split clip at playhead");
+}
+
 /* Fulfills the Phase 1 registry promise for selection.delete, routed
  * through the Phase 7 ripple helper: the deletion closes the gap on
  * its own track in the same user action, recorded as one composite
@@ -3443,6 +3504,8 @@ build_menu_bar (void)
   menu_add_command (edit, "Insert Title", "media.insert-title");
   menu_add_command (edit, "Insert Solid Color", "media.insert-solid");
   menu_add_command (edit, "Delete Selection", "selection.delete");
+  menu_add_command (edit, "Split at Playhead (" OE_COMMAND_PRIMARY_LABEL "+K)",
+                    "edit.split-at-playhead");
   menu_add_command (edit, "Snapping (S)", "edit.snap-toggle");
   menu_add_command (edit, "Select Tool (V)", "tool.select");
   menu_add_command (edit, "Razor Tool (C)", "tool.razor");
@@ -3676,6 +3739,9 @@ oe_main_window_dispose (GObject *object)
   oe_command_set_handler (OE_CMD_UNDO, NULL);
   oe_command_set_handler (OE_CMD_REDO, NULL);
   oe_command_set_handler (OE_CMD_SNAP_TOGGLE, NULL);
+  oe_command_set_handler (OE_CMD_TOOL_SELECT, NULL);
+  oe_command_set_handler (OE_CMD_TOOL_RAZOR, NULL);
+  oe_command_set_handler (OE_CMD_SPLIT_AT_PLAYHEAD, NULL);
   oe_command_set_handler (OE_CMD_EXPORT, NULL);
 
   /* Phase 8: cancel a running export. Its completion callback drops
@@ -3893,6 +3959,9 @@ oe_main_window_constructed (GObject *object)
   oe_command_set_handler (OE_CMD_UNDO, edit_undo_command_handler);
   oe_command_set_handler (OE_CMD_REDO, edit_redo_command_handler);
   oe_command_set_handler (OE_CMD_SNAP_TOGGLE, edit_snap_toggle_command_handler);
+  oe_command_set_handler (OE_CMD_TOOL_SELECT, tool_select_command_handler);
+  oe_command_set_handler (OE_CMD_TOOL_RAZOR, tool_razor_command_handler);
+  oe_command_set_handler (OE_CMD_SPLIT_AT_PLAYHEAD, edit_split_at_playhead_command_handler);
 
   g_signal_connect (self, "map", G_CALLBACK (on_map_apply_positions), NULL);
   g_signal_connect (self, "close-request", G_CALLBACK (on_close_request), NULL);

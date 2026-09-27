@@ -157,6 +157,15 @@ gboolean oe_timeline_transition_edges (const OeTransitionWindow *window, gint64 
 void oe_timeline_trim_bounds (const OeClip *clip, gint64 max_source_us, gint64 *min_in,
                               gint64 *max_in, gint64 *min_out, gint64 *max_out);
 
+/* Phase 12: the razor's cut time for a pointer candidate over @clip.
+ * The candidate (already snapped by the caller when snapping is on)
+ * rounds to the nearest multiple of @frame_interval_us (<= 0 leaves it
+ * raw) so both halves start on the frame grid. Returns TRUE with
+ * *cut_us set when the cut lands strictly inside the clip; FALSE when
+ * it would fall on or outside an edge (nothing to split). */
+gboolean oe_timeline_razor_cut (const OeClip *clip, gint64 candidate_us, gint64 frame_interval_us,
+                                gint64 *cut_us);
+
 /* Phase 11 Wave B: the model-side label a timeline clip draws — GTK-free
  * so tests pin it at the model seam. Generated clips label from their
  * own payload (the title's text, or the solid's packed color); media

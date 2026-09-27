@@ -900,6 +900,55 @@ gboolean oe_project_trim_clip (OeProject *project, guint track_index, guint clip
                                gint64 new_source_in, gint64 new_source_out, GError **error);
 
 /**
+ * oe_project_split_clip:
+ * @track_index: track holding the clip
+ * @clip_index: clip within the track
+ * @cut_us: sequence time of the cut, strictly inside the clip
+ * @error: failure domain #OE_PROJECT_ERROR
+ *
+ * The razor (Phase 12): cuts one clip into two adjacent clips in a
+ * single mutation. The clip at @clip_index becomes the left half
+ * ending at @cut_us; a new clip at @clip_index + 1 starts at @cut_us
+ * and continues the source where the left half stopped (generated
+ * clips keep their [0, duration) range). Both halves carry the
+ * original's kind, media, generator, key, audio, and static visual;
+ * keyframes are partitioned by oe_keyframes_split() so the animation
+ * stays continuous; the fade-in stays on the left half and the
+ * fade-out on the right (each clamped to its half), since the cut is
+ * a hard edit.
+ *
+ * Needs no media lookup, so titles and solids split like media clips.
+ * A cut on or outside either clip edge is #OE_PROJECT_ERROR_BAD_RANGE;
+ * a cut strictly inside an active transition window on the same
+ * track is #OE_PROJECT_ERROR_BAD_TRANSITION (splitting there would
+ * silently degrade the transition to a straight cut).
+ *
+ * Fires the observer exactly once on success.
+ *
+ * Returns: TRUE on success, FALSE with @error set on rejection.
+ */
+gboolean oe_project_split_clip (OeProject *project, guint track_index, guint clip_index,
+                                gint64 cut_us, GError **error);
+
+/**
+ * oe_project_insert_clip_value:
+ * @track_index: destination track
+ * @clip: the complete clip to place (deep-copied; the caller keeps it)
+ * @error: failure domain #OE_PROJECT_ERROR
+ *
+ * Inserts a clip carrying ALL of its state — kind, media reference,
+ * generator payload, key, audio, visual and keyframes — where
+ * oe_project_insert_clip() always makes an identity media clip. Undo
+ * replay uses it to restore a clip exactly (Phase 12: split undo).
+ * Placement follows oe_project_insert_clip() (track, range, overlap);
+ * the member values must be in their documented domains.
+ *
+ * Returns: TRUE on success, FALSE with @error set on rejection.
+ */
+gboolean oe_project_insert_clip_value (OeProject *project, guint track_index, const OeClip *clip,
+                                       GError **error);
+
+/**
  * oe_project_add_media:
  * @path: file path to reference (copied).
  *

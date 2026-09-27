@@ -187,6 +187,9 @@ test_table_integrity (void)
    * conventional Ctrl+I (deliberate pin change, noted in the PR body). */
   assert_entry (OE_CMD_IMPORT_MEDIA, "media.import", "<Control>i");
 
+  /* Phase 12: the razor's keyboard twin, Premiere's Ctrl+K. */
+  assert_entry (OE_CMD_SPLIT_AT_PLAYHEAD, "edit.split-at-playhead", "<Control>k");
+
   /* Menu-only commands carry no accelerator by contract. */
   g_assert_null (oe_command_entry (OE_CMD_NEW_PROJECT)->accelerator);
   g_assert_null (oe_command_entry (OE_CMD_OPEN_PROJECT)->accelerator);

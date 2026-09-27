@@ -44,6 +44,13 @@
  *   /undo/track-audio-stroke-one-record  previews collapse to one record.
  *   /undo/track-audio-zero-delta zero-delta strokes leave no entry.
  *   /undo/track-audio-plain-baseline  one-shot entry undo/redo round trip.
+ *   /undo/split-inverse          razor split: one undo restores the whole
+ *                                original byte-identically, one redo
+ *                                cuts again; the split document
+ *                                round-trips through the v1 format.
+ *   /undo/split-generator        a split solid undoes back to a solid.
+ *   /undo/split-rejection        refused cuts record nothing; a NULL
+ *                                stack splits unrecorded.
  *
  * Links only the modules under test (core model, persistence, undo
  * stack, playback session) — no GTK. The playback test runs on SDL's
@@ -1146,6 +1153,162 @@ test_undo_auto_pause (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
 /* Suite.                                                              */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Phase 12: razor split — undo restores the WHOLE original clip       */
+/* (visual, keyframes, audio, key, kind) byte-identically, redo cuts   */
+/* again, and a split project round-trips through the v1 format.       */
+/* ------------------------------------------------------------------ */
+
+/* Saves @project to @dir/@name and returns the file's contents. */
+static gchar *
+save_to_string (OeProject *project, const gchar *dir, const gchar *name)
+{
+  g_autofree gchar *path = g_build_filename (dir, name, NULL);
+  GError *error = NULL;
+
+  g_assert_true (oe_project_format_save (project, path, &error));
+  g_assert_no_error (error);
+
+  gchar *contents = read_file_or_fail (path);
+
+  g_unlink (path);
+  return contents;
+}
+
+static void
+test_undo_split_inverse (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("oe-undo-split-XXXXXX", NULL);
+  GError *error = NULL;
+
+  oe_project_set_media_source_duration (fx->project, fx->ref_m0, 30 * US);
+  insert_ok (fx, fx->ref_m0, 1 * US, 2 * US, 6 * US);
+  insert_ok (fx, fx->ref_m1, 10 * US, 0, 2 * US); /* a downstream neighbour */
+
+  /* Dress the clip in every piece of state a split touches. */
+  OeClipVisual visual = oe_clip_visual_identity ();
+  OeClipAudio audio = oe_clip_audio_identity ();
+  OeClipKey key = oe_clip_key_identity ();
+
+  visual.opacity = 200;
+  visual.fade_in_us = US / 2;
+  visual.fade_out_us = US;
+  audio.gain = 700;
+  key.enabled = 1;
+  key.tolerance = 300;
+  g_assert_true (oe_project_set_clip_visual (fx->project, fx->track, 0, &visual, NULL));
+  g_assert_true (oe_project_set_clip_audio (fx->project, fx->track, 0, &audio, NULL));
+  g_assert_true (oe_project_set_clip_key (fx->project, fx->track, 0, &key, NULL));
+  g_assert_true (
+      oe_project_set_clip_keyframe (fx->project, fx->track, 0, OE_KEYFRAME_POS_X, 0, -50, NULL));
+  g_assert_true (oe_project_set_clip_keyframe (fx->project, fx->track, 0, OE_KEYFRAME_POS_X, 4 * US,
+                                               50, NULL));
+
+  g_autofree gchar *before = save_to_string (fx->project, dir, "before.oe");
+
+  g_assert_true (oe_edit_split_clip (fx->project, fx->stack, fx->track, 0, 3 * US, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_project_get_clip_count (fx->project, fx->track), ==, 3);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 3);
+
+  g_autofree gchar *after = save_to_string (fx->project, dir, "after.oe");
+
+  g_assert_cmpstr (before, !=, after);
+
+  /* One undo: exactly the pre-split document. */
+  const OeUndoRecord *record = NULL;
+
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (record->kind, ==, OE_UNDO_OP_SPLIT);
+  g_assert_cmpstr (record->label, ==, "Split clip 0 on track 0");
+  g_assert_cmpuint (oe_project_get_clip_count (fx->project, fx->track), ==, 2);
+
+  g_autofree gchar *undone = save_to_string (fx->project, dir, "undone.oe");
+
+  g_assert_cmpstr (undone, ==, before);
+
+  /* One redo: exactly the post-split document. */
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, &record, &error));
+  g_assert_no_error (error);
+
+  g_autofree gchar *redone = save_to_string (fx->project, dir, "redone.oe");
+
+  g_assert_cmpstr (redone, ==, after);
+
+  /* The split document loads back and re-saves byte-identically. */
+  g_autofree gchar *after_path = g_build_filename (dir, "reload.oe", NULL);
+
+  g_assert_true (oe_project_format_save (fx->project, after_path, &error));
+  g_assert_no_error (error);
+
+  OeProject *loaded = oe_project_format_load (after_path, &error);
+
+  g_assert_no_error (error);
+  g_assert_nonnull (loaded);
+
+  g_autofree gchar *reloaded = save_to_string (loaded, dir, "resaved.oe");
+
+  g_assert_cmpstr (reloaded, ==, after);
+  g_object_unref (loaded);
+  g_unlink (after_path);
+  g_rmdir (dir);
+}
+
+static void
+test_undo_split_generator (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  OeClipGenerator generator = oe_clip_generator_identity ();
+  GError *error = NULL;
+
+  generator.color_rgb = 0x336699;
+  g_assert_true (oe_project_insert_generator_clip (fx->project, fx->track, OE_CLIP_SOLID, 0, 4 * US,
+                                                   &generator, NULL));
+
+  g_assert_true (oe_edit_split_clip (fx->project, fx->stack, fx->track, 0, 1 * US, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_project_get_clip_count (fx->project, fx->track), ==, 2);
+
+  /* Undo re-inserts a SOLID, not an identity media clip: the bare
+   * insert path could never restore a generated clip. */
+  g_assert_true (oe_undo_stack_undo (fx->stack, fx->project, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_project_get_clip_count (fx->project, fx->track), ==, 1);
+
+  const OeClip restored = clip_at (fx, 0);
+
+  g_assert_cmpint (restored.kind, ==, OE_CLIP_SOLID);
+  g_assert_cmpint (restored.generator.color_rgb, ==, 0x336699);
+  g_assert_cmpint (restored.source_in_us, ==, 0);
+  g_assert_cmpint (restored.source_out_us, ==, 4 * US);
+
+  g_assert_true (oe_undo_stack_redo (fx->stack, fx->project, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_project_get_clip_count (fx->project, fx->track), ==, 2);
+  g_assert_cmpint (clip_at (fx, 1).position_us, ==, 1 * US);
+}
+
+static void
+test_undo_split_rejection (UndoFixture *fx, gconstpointer user_data G_GNUC_UNUSED)
+{
+  GError *error = NULL;
+
+  insert_ok (fx, fx->ref_m0, 0, 0, 2 * US);
+
+  /* A refused cut records nothing and leaves the model alone. */
+  g_assert_false (oe_edit_split_clip (fx->project, fx->stack, fx->track, 0, 2 * US, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE);
+  g_clear_error (&error);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1);
+  g_assert_cmpuint (oe_project_get_clip_count (fx->project, fx->track), ==, 1);
+
+  /* Without a stack the split still happens, unrecorded. */
+  g_assert_true (oe_edit_split_clip (fx->project, NULL, fx->track, 0, 1 * US, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (oe_project_get_clip_count (fx->project, fx->track), ==, 2);
+  g_assert_cmpuint (oe_undo_stack_get_size (fx->stack), ==, 1);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1191,6 +1354,9 @@ main (int argc, char *argv[])
   ADD_UNDO_TEST ("/undo/clear-on-replace", test_undo_clear_on_replace);
   ADD_UNDO_TEST ("/undo/changed-sequence", test_undo_changed_sequence);
   ADD_UNDO_TEST ("/undo/auto-pause", test_undo_auto_pause);
+  ADD_UNDO_TEST ("/undo/split-inverse", test_undo_split_inverse);
+  ADD_UNDO_TEST ("/undo/split-generator", test_undo_split_generator);
+  ADD_UNDO_TEST ("/undo/split-rejection", test_undo_split_rejection);
 
 #undef ADD_UNDO_TEST
 

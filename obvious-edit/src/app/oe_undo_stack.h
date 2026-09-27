@@ -137,6 +137,12 @@ typedef enum
  *     (Phase 11 Wave A); undo restores the pre-stroke #OeClipKey,
  *     redo re-applies the post-stroke one. Memory-free payload (the
  *     audio precedent).
+ * @OE_UNDO_OP_SPLIT: a clip was cut in two by the razor (Phase 12);
+ *     @clip holds the owned deep copy of the whole original and
+ *     @new_a_us the sequence cut time. Undo removes both halves (right
+ *     first) and re-inserts the original with ALL of its state through
+ *     oe_project_insert_clip_value(); redo re-runs
+ *     oe_project_split_clip() at the same cut.
  */
 typedef enum
 {
@@ -150,6 +156,7 @@ typedef enum
   OE_UNDO_OP_TRACK_AUDIO,
   OE_UNDO_OP_GENERATOR,
   OE_UNDO_OP_CLIP_KEY,
+  OE_UNDO_OP_SPLIT,
 } OeUndoOpKind;
 
 /**
@@ -317,6 +324,17 @@ gboolean oe_edit_move_clip (OeProject *project, OeUndoStack *stack, guint track_
 gboolean oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index,
                             guint clip_index, gint64 source_in_us, gint64 source_out_us,
                             GError **error);
+
+/**
+ * oe_edit_split_clip: razor cut (Phase 12).
+ *
+ * Splits through oe_project_split_clip() and records ONE
+ * #OE_UNDO_OP_SPLIT record labelled "Split clip N on track T". The
+ * left half keeps (@track_index, @clip_index); the right half lands at
+ * @clip_index + 1. @stack may be NULL to edit without recording.
+ */
+gboolean oe_edit_split_clip (OeProject *project, OeUndoStack *stack, guint track_index,
+                             guint clip_index, gint64 cut_us, GError **error);
 
 /**
  * oe_edit_set_clip_visual: visual edit (Phase 9 Wave A).

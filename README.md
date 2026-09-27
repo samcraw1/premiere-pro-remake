@@ -9,7 +9,7 @@ gates, and a guided walkthrough for new contributors.
 
 ## What works today
 
-Eleven phases are complete. The editor currently:
+Twelve phases are complete. The editor currently:
 
 - **Opens a themed editor shell** with a media bin, program monitor,
   inspector, timeline, transport, audio mixer, and status bar. Panel sizes
@@ -24,7 +24,10 @@ Eleven phases are complete. The editor currently:
   atomically. Newer members backfill to identity values, so older files
   always load unchanged.
 - **Edits on a timeline** with move and trim drags, snapping to clip edges,
-  the playhead, and frame boundaries, plus ripple delete. The model stays
+  the playhead, and frame boundaries, plus ripple delete. The razor tool
+  (`C`) splits a clip where you click, and `Ctrl+K` splits the selected
+  clip at the playhead; keyframes, fades, and every other clip setting
+  carry across the cut. The model stays
   authoritative: illegal edits are rejected with typed errors and the
   preview snaps back.
 - **Composites layers** with per-clip crop, scale, rotation, position, and
@@ -51,6 +54,7 @@ Eleven phases are complete. The editor currently:
 | Mark in / out | `I` / `O` |
 | Select tool / razor tool | `V` / `C` |
 | Toggle snapping | `S` |
+| Split selected clip at playhead | `Ctrl+K` |
 | Delete selection | `Delete` |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Import media | `Ctrl+I` |

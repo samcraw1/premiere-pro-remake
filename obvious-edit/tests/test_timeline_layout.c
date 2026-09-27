@@ -17,6 +17,9 @@
  *   /timeline-layout/clip-label    kind-aware labels (Wave B): title
  *                                  text, solid hex, media basename;
  *                                  plus the hex parse/format pair.
+ *   /timeline-layout/razor-cut     Phase 12: razor cuts round to the
+ *                                  frame grid and must land strictly
+ *                                  inside the clip.
  */
 
 #include <glib.h>
@@ -293,6 +296,40 @@ test_clip_color_hex (void)
   g_assert_cmpint (color, ==, 0x123456);
 }
 
+/* Phase 12: the razor's cut — frame-aligned, strictly inside. */
+static void
+test_razor_cut (void)
+{
+  OeClip clip = { 0 };
+  gint64 cut = -1;
+
+  /* A clip over [1 s, 2 s) on a 25 fps grid (40 ms frames). */
+  clip.position_us = 1000000;
+  clip.source_in_us = 500000;
+  clip.source_out_us = 1500000;
+
+  /* Rounds to the nearest frame: 1.519 s → 1.52 s, 1.521 s → 1.52 s. */
+  g_assert_true (oe_timeline_razor_cut (&clip, 1519000, 40000, &cut));
+  g_assert_cmpint (cut, ==, 1520000);
+  g_assert_true (oe_timeline_razor_cut (&clip, 1521000, 40000, &cut));
+  g_assert_cmpint (cut, ==, 1520000);
+
+  /* No grid: the raw candidate passes through. */
+  g_assert_true (oe_timeline_razor_cut (&clip, 1234567, 0, &cut));
+  g_assert_cmpint (cut, ==, 1234567);
+
+  /* Cuts that round onto an edge — or fall outside — split nothing,
+   * and leave the out value untouched. */
+  cut = -1;
+  g_assert_false (oe_timeline_razor_cut (&clip, 1010000, 40000, &cut));
+  g_assert_false (oe_timeline_razor_cut (&clip, 1990000, 40000, &cut));
+  g_assert_false (oe_timeline_razor_cut (&clip, 1000000, 0, &cut));
+  g_assert_false (oe_timeline_razor_cut (&clip, 2000000, 0, &cut));
+  g_assert_false (oe_timeline_razor_cut (&clip, 500000, 0, &cut));
+  g_assert_false (oe_timeline_razor_cut (&clip, 2500000, 0, &cut));
+  g_assert_cmpint (cut, ==, -1);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -305,6 +342,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/timeline-layout/trim-bounds", test_trim_bounds);
   g_test_add_func ("/timeline-layout/clip-label", test_clip_label);
   g_test_add_func ("/timeline-layout/clip-color-hex", test_clip_color_hex);
+  g_test_add_func ("/timeline-layout/razor-cut", test_razor_cut);
 
   return g_test_run ();
 }

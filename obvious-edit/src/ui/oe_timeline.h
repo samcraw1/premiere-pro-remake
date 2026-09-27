@@ -143,6 +143,21 @@ void oe_timeline_zoom_out (OeTimeline *timeline);
 void oe_timeline_set_snapping (OeTimeline *timeline, gboolean enabled);
 gboolean oe_timeline_get_snapping (OeTimeline *timeline);
 
+/**
+ * OeTimelineTool: the pointer tool (Phase 12). SELECT is the Phase 4
+ * behavior (select, move, trim); RAZOR turns a click on a clip into a
+ * split at the (snapped, frame-aligned) pointer time. Session-only;
+ * never persisted.
+ */
+typedef enum
+{
+  OE_TIMELINE_TOOL_SELECT,
+  OE_TIMELINE_TOOL_RAZOR,
+} OeTimelineTool;
+
+void oe_timeline_set_tool (OeTimeline *timeline, OeTimelineTool tool);
+OeTimelineTool oe_timeline_get_tool (OeTimeline *timeline);
+
 /** Session playhead in microseconds (ruler click / insert advance;
  * never persisted — Phase 5 owns the clock). */
 gint64 oe_timeline_get_playhead (OeTimeline *timeline);

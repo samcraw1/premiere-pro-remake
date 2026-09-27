@@ -30,6 +30,21 @@
  *                                 neighbour.
  *   /project/trim-observer        a successful trim notifies exactly
  *                                 once; failures never notify.
+ *   /project/split                 the razor tiles the original footprint
+ *                                  and source; state rides both halves;
+ *                                  fade-in stays left, fade-out right.
+ *   /project/split-rejections      edge/outside cuts and bad indices
+ *                                  fail typed and silent; one split
+ *                                  notifies once.
+ *   /project/split-generator       titles split (no media lookup) and
+ *                                  keep the [0, duration) range.
+ *   /project/split-keyframes       animated runs stay continuous across
+ *                                  the cut; a static-sampling run
+ *                                  rides left verbatim.
+ *   /project/split-transition      cuts inside a live transition window
+ *                                  are refused; its edges are fine.
+ *   /project/insert-clip-value     full-state insert round-trips and
+ *                                  keeps insert's placement rules.
  *   /project/destruction-order     observer cleared before teardown.
  */
 
@@ -817,6 +832,316 @@ test_visual_deep_copy (void)
   g_clear_object (&project);
 }
 
+/* --- Phase 12: razor split ------------------------------------------------ */
+
+#define SEC 1000000LL
+
+/* One video track, one audio track, one media ref (ref 1, 30 s probed)
+ * and one clip at 1 s playing source [2 s, 6 s). */
+static OeProject *
+build_split_fixture (void)
+{
+  OeProject *project = build_populated ();
+
+  oe_project_set_media_source_duration (project, 1, 30 * SEC);
+  g_assert_true (oe_project_insert_clip (project, 0, 1, 1 * SEC, 2 * SEC, 6 * SEC, NULL));
+  return project;
+}
+
+/* Borrowed view of a live clip: valid until the next mutation. */
+static OeClip
+peek_clip (OeProject *project, guint track, guint clip)
+{
+  OeClip out = { 0 };
+
+  g_assert_true (oe_project_get_clip (project, track, clip, &out));
+  return out;
+}
+
+static void
+test_split (void)
+{
+  OeProject *project = build_split_fixture ();
+  OeClipVisual visual = oe_clip_visual_identity ();
+  OeClipAudio audio = oe_clip_audio_identity ();
+
+  visual.opacity = 128;
+  visual.pos_x = 40;
+  visual.fade_in_us = SEC / 2;
+  visual.fade_out_us = 3 * SEC;
+  audio.gain = 512;
+  g_assert_true (oe_project_set_clip_visual (project, 0, 0, &visual, NULL));
+  g_assert_true (oe_project_set_clip_audio (project, 0, 0, &audio, NULL));
+
+  /* Cut 1.5 s into the clip. */
+  g_assert_true (oe_project_split_clip (project, 0, 0, 2500000, NULL));
+  g_assert_cmpuint (oe_project_get_clip_count (project, 0), ==, 2);
+
+  OeClip left = peek_clip (project, 0, 0);
+  OeClip right = peek_clip (project, 0, 1);
+
+  /* The halves tile the original footprint and source range. */
+  g_assert_cmpint (left.position_us, ==, 1 * SEC);
+  g_assert_cmpint (left.source_in_us, ==, 2 * SEC);
+  g_assert_cmpint (left.source_out_us, ==, 3500000);
+  g_assert_cmpint (right.position_us, ==, 2500000);
+  g_assert_cmpint (right.source_in_us, ==, 3500000);
+  g_assert_cmpint (right.source_out_us, ==, 6 * SEC);
+  g_assert_cmpuint (right.media_ref, ==, 1);
+  g_assert_cmpint (right.kind, ==, OE_CLIP_MEDIA);
+
+  /* Static state rides with both halves. */
+  g_assert_cmpuint (left.visual.opacity, ==, 128);
+  g_assert_cmpuint (right.visual.opacity, ==, 128);
+  g_assert_cmpint (right.visual.pos_x, ==, 40);
+  g_assert_cmpint (left.audio.gain, ==, 512);
+  g_assert_cmpint (right.audio.gain, ==, 512);
+
+  /* The cut is a hard edit: fade-in stays left, fade-out goes right,
+   * clamped to the 2.5 s right half. */
+  g_assert_cmpuint (left.visual.fade_in_us, ==, SEC / 2);
+  g_assert_cmpuint (left.visual.fade_out_us, ==, 0);
+  g_assert_cmpuint (right.visual.fade_in_us, ==, 0);
+  g_assert_cmpuint (right.visual.fade_out_us, ==, 2500000);
+
+  g_clear_object (&project);
+}
+
+static void
+test_split_rejections (void)
+{
+  OeProject *project = build_split_fixture ();
+  Observer *observer = observer_new ();
+  GError *error = NULL;
+
+  oe_project_set_observer (project, observer_count, observer);
+
+  /* The clip spans [1 s, 5 s): edges and outside cuts are rejected. */
+  const gint64 bad_cuts[] = { 0, 1 * SEC, 5 * SEC, 6 * SEC, -1 };
+
+  for (guint i = 0; i < G_N_ELEMENTS (bad_cuts); i++)
+    {
+      g_assert_false (oe_project_split_clip (project, 0, 0, bad_cuts[i], &error));
+      g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE);
+      g_clear_error (&error);
+    }
+
+  g_assert_false (oe_project_split_clip (project, 9, 0, 2 * SEC, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK);
+  g_clear_error (&error);
+
+  g_assert_false (oe_project_split_clip (project, 0, 1, 2 * SEC, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP);
+  g_clear_error (&error);
+
+  /* Rejections never notify; one split notifies exactly once. */
+  g_assert_cmpuint (observer->count, ==, 0);
+  g_assert_cmpuint (oe_project_get_clip_count (project, 0), ==, 1);
+  g_assert_true (oe_project_split_clip (project, 0, 0, 2 * SEC, NULL));
+  g_assert_cmpuint (observer->count, ==, 1);
+
+  /* The halves split again like any clip. */
+  g_assert_true (oe_project_split_clip (project, 0, 1, 3 * SEC, NULL));
+  g_assert_cmpuint (oe_project_get_clip_count (project, 0), ==, 3);
+  g_assert_cmpint (peek_clip (project, 0, 2).position_us, ==, 3 * SEC);
+
+  oe_project_set_observer (project, NULL, NULL);
+  g_clear_object (&project);
+  g_free (observer);
+}
+
+static void
+test_split_generator (void)
+{
+  OeProject *project = build_populated ();
+  OeClipGenerator generator = oe_clip_generator_identity ();
+
+  generator.text = g_strdup ("Hello");
+  generator.size_permille = 100;
+  g_assert_true (
+      oe_project_insert_generator_clip (project, 0, OE_CLIP_TITLE, 0, 4 * SEC, &generator, NULL));
+  oe_clip_generator_clear (&generator);
+
+  /* No media lookup: titles split where they could never trim. */
+  g_assert_true (oe_project_split_clip (project, 0, 0, 1 * SEC, NULL));
+
+  OeClip left = peek_clip (project, 0, 0);
+  OeClip right = peek_clip (project, 0, 1);
+
+  /* Generated clips keep the [0, duration) source convention (D3). */
+  g_assert_cmpint (left.source_in_us, ==, 0);
+  g_assert_cmpint (left.source_out_us, ==, 1 * SEC);
+  g_assert_cmpint (right.position_us, ==, 1 * SEC);
+  g_assert_cmpint (right.source_in_us, ==, 0);
+  g_assert_cmpint (right.source_out_us, ==, 3 * SEC);
+  g_assert_cmpint (right.kind, ==, OE_CLIP_TITLE);
+  g_assert_cmpstr (right.generator.text, ==, "Hello");
+  g_assert_true (left.generator.text != right.generator.text); /* deep copy */
+
+  g_clear_object (&project);
+}
+
+static gint32
+sample (const OeClip *clip, OeKeyframeProperty property, gint64 t)
+{
+  return oe_keyframes_sample (clip->visual.keyframes, property, t, -1);
+}
+
+static void
+test_split_keyframes (void)
+{
+  OeProject *project = build_populated ();
+
+  /* A 4 s clip at 0: opacity ramps 0 → 255 over the whole clip, scale
+   * animates only after the cut, and pos-x carries a lone key (a run
+   * that samples as static). */
+  g_assert_true (oe_project_insert_clip (project, 0, 1, 0, 0, 4 * SEC, NULL));
+  g_assert_true (oe_project_set_clip_keyframe (project, 0, 0, OE_KEYFRAME_OPACITY, 0, 0, NULL));
+  g_assert_true (
+      oe_project_set_clip_keyframe (project, 0, 0, OE_KEYFRAME_OPACITY, 4 * SEC, 255, NULL));
+  g_assert_true (oe_project_set_clip_keyframe (project, 0, 0, OE_KEYFRAME_SCALE_PERMILLE, 2 * SEC,
+                                               1000, NULL));
+  g_assert_true (oe_project_set_clip_keyframe (project, 0, 0, OE_KEYFRAME_SCALE_PERMILLE, 3 * SEC,
+                                               2000, NULL));
+  g_assert_true (
+      oe_project_set_clip_keyframe (project, 0, 0, OE_KEYFRAME_POS_X, 3 * SEC, 99, NULL));
+
+  g_assert_true (oe_project_split_clip (project, 0, 0, 1 * SEC, NULL));
+
+  OeClip left = peek_clip (project, 0, 0);
+  OeClip right = peek_clip (project, 0, 1);
+
+  /* Opacity: continuous across the cut (255 / 4 = 63.75 → 64). */
+  g_assert_cmpuint (oe_keyframes_count_for_property (left.visual.keyframes, OE_KEYFRAME_OPACITY),
+                    ==, 2);
+  g_assert_cmpint (sample (&left, OE_KEYFRAME_OPACITY, 0), ==, 0);
+  g_assert_cmpint (sample (&left, OE_KEYFRAME_OPACITY, 1 * SEC), ==, 64);
+  g_assert_cmpint (sample (&right, OE_KEYFRAME_OPACITY, 0), ==, 64);
+  g_assert_cmpint (sample (&right, OE_KEYFRAME_OPACITY, 3 * SEC), ==, 255);
+  g_assert_cmpint (sample (&right, OE_KEYFRAME_OPACITY, 1 * SEC), ==, 128);
+
+  /* Scale: the left half holds the pre-animation value (two keys, so
+   * the run animates instead of degrading to the static field); the
+   * right half keeps the ramp rebased by the cut. */
+  g_assert_cmpuint (
+      oe_keyframes_count_for_property (left.visual.keyframes, OE_KEYFRAME_SCALE_PERMILLE), ==, 2);
+  g_assert_cmpint (sample (&left, OE_KEYFRAME_SCALE_PERMILLE, SEC / 2), ==, 1000);
+  g_assert_cmpint (sample (&right, OE_KEYFRAME_SCALE_PERMILLE, 1 * SEC), ==, 1000);
+  g_assert_cmpint (sample (&right, OE_KEYFRAME_SCALE_PERMILLE, 3 * SEC / 2), ==, 1500);
+  g_assert_cmpint (sample (&right, OE_KEYFRAME_SCALE_PERMILLE, 2 * SEC), ==, 2000);
+
+  /* The lone pos-x key never animated: it rides left verbatim, and
+   * both halves keep sampling the static field. */
+  g_assert_cmpuint (oe_keyframes_count_for_property (left.visual.keyframes, OE_KEYFRAME_POS_X), ==,
+                    1);
+  g_assert_cmpuint (oe_keyframes_count_for_property (right.visual.keyframes, OE_KEYFRAME_POS_X), ==,
+                    0);
+  g_assert_cmpint (sample (&left, OE_KEYFRAME_POS_X, 0), ==, -1);
+  g_assert_cmpint (sample (&right, OE_KEYFRAME_POS_X, 0), ==, -1);
+
+  /* Every stored key lies inside its half — the keyframe mutator's
+   * [0, length] contract holds for both. */
+  const OeClip *halves[] = { &left, &right };
+
+  for (guint h = 0; h < 2; h++)
+    {
+      const GArray *keys = halves[h]->visual.keyframes;
+      const gint64 length = halves[h]->source_out_us - halves[h]->source_in_us;
+
+      for (guint i = 0; i < keys->len; i++)
+        {
+          const OeKeyframe *kf = &g_array_index (keys, OeKeyframe, i);
+
+          if (kf->property != OE_KEYFRAME_POS_X)
+            g_assert_cmpint (kf->time_us, <=, length);
+        }
+    }
+
+  g_clear_object (&project);
+}
+
+static void
+test_split_transition (void)
+{
+  OeProject *project = build_populated ();
+  GError *error = NULL;
+
+  g_assert_true (oe_project_insert_clip (project, 0, 1, 0, 0, 2 * SEC, NULL));
+  g_assert_true (oe_project_insert_clip (project, 0, 1, 2 * SEC, 0, 2 * SEC, NULL));
+
+  const OeTransition t = { 0, 2 * SEC, 1 * SEC, OE_TRANSITION_CROSS_DISSOLVE };
+
+  /* Window [1.5 s, 2.5 s). */
+  g_assert_true (oe_project_add_transition (project, &t, NULL));
+
+  /* Inside the window on either side of the boundary: refused. */
+  g_assert_false (oe_project_split_clip (project, 0, 0, 1600000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION);
+  g_clear_error (&error);
+  g_assert_false (oe_project_split_clip (project, 0, 1, 2400000, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION);
+  g_clear_error (&error);
+
+  /* On the window's edges: allowed, and the transition stays live. */
+  g_assert_true (oe_project_split_clip (project, 0, 0, 1500000, NULL));
+  g_assert_true (oe_project_split_clip (project, 0, 2, 2500000, NULL));
+
+  OeSequence sequence;
+
+  oe_project_get_sequence (project, &sequence);
+  g_assert_cmpuint (sequence.transitions->len, ==, 1);
+  g_assert_true (
+      oe_transition_window (&sequence, g_ptr_array_index (sequence.transitions, 0)).active);
+  oe_sequence_clear (&sequence);
+
+  g_clear_object (&project);
+}
+
+static void
+test_insert_clip_value (void)
+{
+  OeProject *project = build_split_fixture ();
+  GError *error = NULL;
+
+  g_assert_true (oe_project_set_clip_keyframe (project, 0, 0, OE_KEYFRAME_OPACITY, 0, 10, NULL));
+  g_assert_true (
+      oe_project_set_clip_keyframe (project, 0, 0, OE_KEYFRAME_OPACITY, 2 * SEC, 200, NULL));
+
+  OeClip value = peek_clip (project, 0, 0);
+
+  /* Stage a private copy, then clear the track and restore it. */
+  value.visual.keyframes = oe_keyframes_copy_array (value.visual.keyframes);
+  value.audio.pan = 100;
+  g_assert_true (oe_project_remove_clip (project, 0, 0, NULL));
+  g_assert_true (oe_project_insert_clip_value (project, 0, &value, NULL));
+
+  OeClip back = peek_clip (project, 0, 0);
+
+  g_assert_cmpint (back.position_us, ==, value.position_us);
+  g_assert_cmpint (back.source_in_us, ==, value.source_in_us);
+  g_assert_cmpint (back.audio.pan, ==, 100);
+  g_assert_true (oe_clip_visual_equal (&back.visual, &value.visual));
+  g_assert_true (back.visual.keyframes != value.visual.keyframes); /* deep copy */
+
+  /* Placement rules match oe_project_insert_clip. */
+  g_assert_false (oe_project_insert_clip_value (project, 0, &value, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_OVERLAP);
+  g_clear_error (&error);
+
+  /* Generated clips must carry the [0, duration) range. */
+  OeClip solid = value;
+
+  solid.kind = OE_CLIP_SOLID;
+  solid.media_ref = 0;
+  solid.position_us = 20 * SEC;
+  g_assert_false (oe_project_insert_clip_value (project, 0, &solid, &error));
+  g_assert_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE);
+  g_clear_error (&error);
+
+  g_clear_pointer (&value.visual.keyframes, g_array_unref);
+  g_clear_object (&project);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -841,6 +1166,12 @@ main (int argc, char *argv[])
   g_test_add_func ("/project/visual-identity-defaults", test_visual_identity_defaults);
   g_test_add_func ("/project/visual-mutator", test_visual_mutator);
   g_test_add_func ("/project/visual-deep-copy", test_visual_deep_copy);
+  g_test_add_func ("/project/split", test_split);
+  g_test_add_func ("/project/split-rejections", test_split_rejections);
+  g_test_add_func ("/project/split-generator", test_split_generator);
+  g_test_add_func ("/project/split-keyframes", test_split_keyframes);
+  g_test_add_func ("/project/split-transition", test_split_transition);
+  g_test_add_func ("/project/insert-clip-value", test_insert_clip_value);
   g_test_add_func ("/project/destruction-order", test_destruction_order);
 
   return g_test_run ();

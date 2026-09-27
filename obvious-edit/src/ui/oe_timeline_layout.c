@@ -468,3 +468,24 @@ oe_timeline_clip_label (const OeClip *clip, const gchar *media_path)
     return NULL;
   return g_path_get_basename (media_path);
 }
+
+gboolean
+oe_timeline_razor_cut (const OeClip *clip, gint64 candidate_us, gint64 frame_interval_us,
+                       gint64 *cut_us)
+{
+  g_return_val_if_fail (clip != NULL, FALSE);
+  g_return_val_if_fail (cut_us != NULL, FALSE);
+
+  gint64 cut = candidate_us;
+
+  if (frame_interval_us > 0)
+    cut = oe_time_round_ratio (candidate_us, frame_interval_us) * frame_interval_us;
+
+  const gint64 end = clip_end_us (clip);
+
+  if (cut <= clip->position_us || cut >= end)
+    return FALSE;
+
+  *cut_us = cut;
+  return TRUE;
+}

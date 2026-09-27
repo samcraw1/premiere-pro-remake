@@ -522,6 +522,50 @@ oe_edit_trim_clip (OeProject *project, OeUndoStack *stack, guint track_index, gu
   return TRUE;
 }
 
+gboolean
+oe_edit_split_clip (OeProject *project, OeUndoStack *stack, guint track_index, guint clip_index,
+                    gint64 cut_us, GError **error)
+{
+  OeClip before = { 0 };
+
+  const gboolean have_clip
+      = stack != NULL && oe_project_get_clip (project, track_index, clip_index, &before);
+
+  /* The split replaces the live keyframe store: capture a private copy
+   * of the whole original first — undo re-inserts it verbatim. */
+  if (have_clip)
+    clip_capture (&before);
+
+  if (!oe_project_split_clip (project, track_index, clip_index, cut_us, error))
+    {
+      if (have_clip)
+        clip_capture_clear (&before);
+      return FALSE;
+    }
+
+  if (stack != NULL)
+    {
+      if (!have_clip)
+        {
+          oe_log (OE_LOG_LEVEL_WARNING,
+                  "undo: split clip %u on track %u could not be captured; "
+                  "edit not recorded",
+                  clip_index, track_index);
+          return TRUE;
+        }
+
+      OeUndoRecord *rec = record_new (
+          OE_UNDO_OP_SPLIT, g_strdup_printf ("Split clip %u on track %u", clip_index, track_index),
+          track_index, clip_index);
+
+      rec->clip = before; /* the whole original moves with the record */
+      rec->new_a_us = cut_us;
+      stack_push (stack, rec);
+    }
+
+  return TRUE;
+}
+
 /* The visual recorders share the stroke assembly: mutate through the
  * validated mutator, then record ONE VISUAL record restoring the
  * stroke baseline. A zero-delta stroke mutates the model (idempotent)
@@ -1179,6 +1223,20 @@ apply_ripple_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
   return TRUE;
 }
 
+/* Split undo: drop the right half, then the left, then restore the
+ * original with every member intact. Removing right-first keeps the
+ * left half's index valid; the freed footprint is exactly the
+ * original's, so the re-insert cannot overlap. */
+static gboolean
+apply_split_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
+{
+  if (!oe_project_remove_clip (project, rec->track_index, rec->clip_index + 1, error))
+    return FALSE;
+  if (!oe_project_remove_clip (project, rec->track_index, rec->clip_index, error))
+    return FALSE;
+  return oe_project_insert_clip_value (project, rec->track_index, &rec->clip, error);
+}
+
 static gboolean
 apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
 {
@@ -1212,6 +1270,8 @@ apply_undo (OeProject *project, const OeUndoRecord *rec, GError **error)
                                       error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_undo (project, rec, error);
+    case OE_UNDO_OP_SPLIT:
+      return apply_split_undo (project, rec, error);
     }
 
   g_assert_not_reached ();
@@ -1250,6 +1310,9 @@ apply_redo (OeProject *project, const OeUndoRecord *rec, GError **error)
                                       error);
     case OE_UNDO_OP_RIPPLE_DELETE:
       return apply_ripple_redo (project, rec, error);
+    case OE_UNDO_OP_SPLIT:
+      return oe_project_split_clip (project, rec->track_index, rec->clip_index, rec->new_a_us,
+                                    error);
     }
 
   g_assert_not_reached ();

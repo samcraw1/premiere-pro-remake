@@ -41,6 +41,8 @@ static OeCommandEntry command_table[OE_CMD_COUNT] = {
    * generator mutator and records nothing (media.import precedent). */
   { OE_CMD_INSERT_TITLE, "media.insert-title", NULL, TRUE },
   { OE_CMD_INSERT_SOLID, "media.insert-solid", NULL, TRUE },
+  /* Phase 12: the razor's keyboard twin (Premiere's Ctrl+K). */
+  { OE_CMD_SPLIT_AT_PLAYHEAD, "edit.split-at-playhead", "<Control>k", TRUE },
 };
 
 static OeCommandHandler handlers[OE_CMD_COUNT];

@@ -34,8 +34,10 @@ G_BEGIN_DECLS
  * @OE_CMD_MARK_OUT: mark out point (O) — deferred: range playback
  *   between in/out points arrives in a later phase; Phase 5 leaves the
  *   command registered but unwired.
- * @OE_CMD_TOOL_SELECT: select tool (V).
- * @OE_CMD_TOOL_RAZOR: razor tool (C).
+ * @OE_CMD_TOOL_SELECT: select tool (V) — wired in Phase 12; switches
+ *     the timeline back to select/move/trim.
+ * @OE_CMD_TOOL_RAZOR: razor tool (C) — wired in Phase 12; a click on a
+ *     timeline clip splits it at the pointer (one undo record).
  * @OE_CMD_DELETE_SELECTION: delete the current selection (Delete).
  * @OE_CMD_UNDO: undo the last edit (Ctrl+Z) — wired in Phase 6; the
  *   enabled state tracks the session history stack.
@@ -64,6 +66,8 @@ G_BEGIN_DECLS
  *     playhead on the first video track of the default sequence
  *     (wired in Phase 11 Wave B); media.import precedent — no undo
  *     record.
+ * @OE_CMD_SPLIT_AT_PLAYHEAD: split the selected clip at the playhead
+ *     (Ctrl+K) — Phase 12; recorded through oe_edit_split_clip().
  * @OE_CMD_COUNT: sentinel — number of commands, not a valid ID.
  *
  * Enum order is permanent API: IDs must never be renumbered or removed.
@@ -94,6 +98,7 @@ typedef enum
   OE_CMD_EXPORT,
   OE_CMD_INSERT_TITLE,
   OE_CMD_INSERT_SOLID,
+  OE_CMD_SPLIT_AT_PLAYHEAD,
   OE_CMD_COUNT
 } OeCommandId;
 

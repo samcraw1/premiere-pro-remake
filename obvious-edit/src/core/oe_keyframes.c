@@ -329,3 +329,95 @@ oe_keyframes_sample (const GArray *keyframes, OeKeyframeProperty property, gint6
 
   return ramp (left->value, right->value, time_us - left->time_us, right->time_us - left->time_us);
 }
+
+void
+oe_keyframes_split (const GArray *keyframes, gint64 at_us, gint64 length_us, GArray **left,
+                    GArray **right)
+{
+  g_return_if_fail (left != NULL);
+  g_return_if_fail (right != NULL);
+
+  *left = NULL;
+  *right = NULL;
+
+  if (keyframes == NULL)
+    return;
+
+  g_return_if_fail (at_us > 0 && at_us < length_us);
+
+  GArray *l = g_array_new (FALSE, FALSE, sizeof (OeKeyframe));
+  GArray *r = g_array_new (FALSE, FALSE, sizeof (OeKeyframe));
+
+  /* Appends only, walking the source in order: a sorted store yields
+   * sorted halves, and no entry is ever re-sorted into a shape the
+   * source did not have. */
+  for (guint i = 0; i < keyframes->len; i++)
+    {
+      const OeKeyframe *kf = &g_array_index (keyframes, OeKeyframe, i);
+      guint start = 0;
+      guint len = 0;
+
+      if (!find_run (keyframes, kf->property, &start, &len))
+        {
+          /* A degraded run samples as static. Re-partitioning it could
+           * hand a half a run that suddenly animates, so it rides with
+           * the left half verbatim and the right half samples static —
+           * exactly what the whole clip rendered. */
+          g_array_append_val (l, *kf);
+          continue;
+        }
+
+      if (i != start)
+        continue; /* each animated run is handled once, from its head */
+
+      const OeKeyframeProperty property = kf->property;
+      const OeKeyframe at_key
+          = { property, at_us, oe_keyframes_sample (keyframes, property, at_us, 0) };
+      const OeKeyframe zero_key = { property, 0, at_key.value };
+      guint left_keys = 0;
+
+      for (guint j = start; j < start + len; j++)
+        {
+          if (g_array_index (keyframes, OeKeyframe, j).time_us < at_us)
+            left_keys++;
+        }
+
+      /* Left: its own keys (or a held key at 0), then the cut value. */
+      if (left_keys == 0)
+        g_array_append_val (l, zero_key);
+      for (guint j = start; j < start + len; j++)
+        {
+          const OeKeyframe *k = &g_array_index (keyframes, OeKeyframe, j);
+
+          if (k->time_us < at_us)
+            g_array_append_val (l, *k);
+        }
+      g_array_append_val (l, at_key);
+
+      /* Right: the cut value at 0, its own keys rebased (or a held key
+       * at its end). */
+      gboolean right_has_key = FALSE;
+
+      g_array_append_val (r, zero_key);
+      for (guint j = start; j < start + len; j++)
+        {
+          OeKeyframe k = g_array_index (keyframes, OeKeyframe, j);
+
+          if (k.time_us > at_us)
+            {
+              k.time_us -= at_us;
+              g_array_append_val (r, k);
+              right_has_key = TRUE;
+            }
+        }
+      if (!right_has_key)
+        {
+          const OeKeyframe end_key = { property, length_us - at_us, at_key.value };
+
+          g_array_append_val (r, end_key);
+        }
+    }
+
+  *left = l;
+  *right = r;
+}

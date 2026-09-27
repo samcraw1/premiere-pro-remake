@@ -215,4 +215,28 @@ gboolean oe_keyframes_remove (GArray *keyframes, OeKeyframeProperty property, gi
 gint32 oe_keyframes_sample (const GArray *keyframes, OeKeyframeProperty property, gint64 time_us,
                             gint32 static_value);
 
+/**
+ * oe_keyframes_split:
+ * @keyframes: keyframe array (or NULL), sorted by oe_keyframe_cmp
+ * @at_us: clip-relative cut time, 0 < @at_us < @length_us
+ * @length_us: the clip's length before the cut
+ * @left: (out) (transfer full): the store for [0, @at_us)
+ * @right: (out) (transfer full): the store for [@at_us, @length_us),
+ *     rebased so the cut is its time 0
+ *
+ * The razor's keyframe partition (Phase 12). For every run that
+ * animates (see oe_keyframes_sample) the curve stays continuous across
+ * the cut: each half keeps the keys on its side and gains a boundary
+ * key sampled at @at_us, plus a held endpoint key when the half would
+ * otherwise carry a single entry (which would degrade to the static
+ * value). Inside a bracket straddling the cut the two halves resample
+ * through the rounded boundary value — at most one unit off the
+ * original ramp. A run that does not animate (it samples as static)
+ * rides with @left verbatim and @right samples static — re-partitioning
+ * it could make a half animate where the whole clip never did. NULL
+ * passes through as NULL for both halves.
+ */
+void oe_keyframes_split (const GArray *keyframes, gint64 at_us, gint64 length_us, GArray **left,
+                         GArray **right);
+
 G_END_DECLS

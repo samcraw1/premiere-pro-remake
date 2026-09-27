@@ -83,6 +83,14 @@ struct _OeTimeline
    * model field, no serialization. Gates the preview path only. */
   gboolean snapping_enabled;
 
+  /* Phase 12: the pointer tool, and the razor's hover preview — the
+   * cut line drawn where a click would split (valid only while the
+   * pointer is over a clip in razor mode). */
+  OeTimelineTool tool;
+  gboolean razor_hover_valid;
+  guint razor_hover_track;
+  gint64 razor_hover_us;
+
   OeTimelineResolveFunc resolve_func;
   gpointer resolve_data;
   OeTimelineReportFunc report_func;
@@ -130,6 +138,7 @@ static const OeRgba COLOR_HATCH = { 0.541, 0.227, 0.227 };
 static const OeRgba COLOR_MISSING_BODY = { 0.200, 0.140, 0.140 };
 static const OeRgba COLOR_SELECTION = { 1.000, 0.820, 0.360 };
 static const OeRgba COLOR_PLAYHEAD = { 0.949, 0.298, 0.298 };
+static const OeRgba COLOR_RAZOR = { 0.980, 0.980, 0.980 };
 static const OeRgba COLOR_TICK = { 0.361, 0.361, 0.384 };
 static const OeRgba COLOR_TEXT = { 0.816, 0.816, 0.827 };
 static const OeRgba COLOR_EMPTY_TEXT = { 0.549, 0.549, 0.569 };
@@ -338,6 +347,29 @@ oe_timeline_get_snapping (OeTimeline *self)
   g_return_val_if_fail (OE_IS_TIMELINE (self), FALSE);
 
   return self->snapping_enabled;
+}
+
+void
+oe_timeline_set_tool (OeTimeline *self, OeTimelineTool tool)
+{
+  g_return_if_fail (OE_IS_TIMELINE (self));
+
+  if (self->tool == tool)
+    return;
+
+  self->tool = tool;
+  self->razor_hover_valid = FALSE;
+  gtk_widget_set_cursor_from_name (GTK_WIDGET (self),
+                                   tool == OE_TIMELINE_TOOL_RAZOR ? "crosshair" : NULL);
+  gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+OeTimelineTool
+oe_timeline_get_tool (OeTimeline *self)
+{
+  g_return_val_if_fail (OE_IS_TIMELINE (self), OE_TIMELINE_TOOL_SELECT);
+
+  return self->tool;
 }
 
 static void
@@ -683,6 +715,24 @@ paint_transition_bands (cairo_t *cr, OeTimeline *self)
     }
 }
 
+/* Phase 12: the razor's cut preview — a line across the hovered
+ * clip's lane at the time a click would split. */
+static void
+paint_razor_hover (cairo_t *cr, OeTimeline *self)
+{
+  if (self->tool != OE_TIMELINE_TOOL_RAZOR || !self->razor_hover_valid)
+    return;
+
+  gdouble x = oe_timeline_x_for_us (&self->geometry, self->razor_hover_us);
+  gdouble y = oe_timeline_y_for_track (&self->geometry, self->razor_hover_track);
+
+  set_source (cr, &COLOR_RAZOR);
+  cairo_set_line_width (cr, 1.0);
+  cairo_move_to (cr, floor (x) + 0.5, y);
+  cairo_line_to (cr, floor (x) + 0.5, y + OE_TIMELINE_TRACK_HEIGHT);
+  cairo_stroke (cr);
+}
+
 static void
 paint_playhead (cairo_t *cr, OeTimeline *self, gdouble height)
 {
@@ -730,6 +780,7 @@ draw_frame (GtkDrawingArea *area G_GNUC_UNUSED, cairo_t *cr, int width, int heig
   paint_lanes (cr, self, width, height);
   paint_clips (cr, self, width);
   paint_transition_bands (cr, self);
+  paint_razor_hover (cr, self);
   paint_ruler (cr, self, width);
   paint_playhead (cr, self, height);
 }
@@ -761,6 +812,61 @@ find_clip_bounds (OeTimeline *self, guint track_index, guint clip_index, OeClip 
   return TRUE;
 }
 
+static OeSnapContext build_snap_context (OeTimeline *self, guint track_index, guint skip_clip_index,
+                                         GArray *edges);
+static gint64 frame_interval_us (const OeSequence *sequence);
+
+/* Phase 12: the razor's cut for pointer @x over a clip — snapped like
+ * a drag (the clip's own edges excluded: they are never a cut), then
+ * frame-aligned. FALSE when the cut lands on or outside an edge. */
+static gboolean
+razor_cut_for_x (OeTimeline *self, guint track_index, guint clip_index, gdouble x, gint64 *cut_us)
+{
+  OeClip clip;
+
+  if (!find_clip_bounds (self, track_index, clip_index, &clip))
+    return FALSE;
+
+  g_autoptr (GArray) edges = g_array_sized_new (FALSE, FALSE, sizeof (gint64), 8);
+  OeSnapContext snap = build_snap_context (self, track_index, clip_index, edges);
+  gint64 wanted = oe_timeline_snap_time (&snap, oe_timeline_us_for_x (&self->geometry, x));
+
+  return oe_timeline_razor_cut (&clip, wanted, frame_interval_us (&self->sequence), cut_us);
+}
+
+/* Phase 12: a razor click splits the clip under the pointer through
+ * the recorded edit. The split renumbers the track's clips, so the
+ * selection is dropped rather than left pointing at a stale index. */
+static void
+razor_click (OeTimeline *self, guint track_index, guint clip_index, gdouble x)
+{
+  gint64 cut_us = 0;
+  GError *error = NULL;
+
+  if (self->project == NULL)
+    return;
+
+  if (!razor_cut_for_x (self, track_index, clip_index, x, &cut_us))
+    {
+      report (self, "Split rejected: the cut must fall inside the clip");
+      return;
+    }
+
+  self->razor_hover_valid = FALSE;
+
+  if (!oe_edit_split_clip (self->project, self->undo_stack, track_index, clip_index, cut_us,
+                           &error))
+    {
+      g_autofree gchar *msg = g_strdup_printf ("Split rejected: %s", error->message);
+
+      report (self, msg);
+      g_error_free (error);
+      return;
+    }
+
+  oe_timeline_clear_selection (self);
+}
+
 /* Press: hit-test and arm the drag. Returns TRUE when armed. */
 static void
 arm_drag (OeTimeline *self, gdouble x, gdouble y)
@@ -788,6 +894,13 @@ arm_drag (OeTimeline *self, gdouble x, gdouble y)
 
         if (!find_clip_bounds (self, hit.track_index, hit.clip_index, &clip))
           return;
+
+        /* Razor mode: the press IS the edit — no drag arms. */
+        if (self->tool == OE_TIMELINE_TOOL_RAZOR)
+          {
+            razor_click (self, hit.track_index, hit.clip_index, x);
+            return;
+          }
 
         /* Select whatever clip the press landed on. */
         self->selected_track = (gint) hit.track_index;
@@ -1137,6 +1250,51 @@ on_drag_end (GtkGestureDrag *gesture G_GNUC_UNUSED, gdouble offset_x, gdouble of
   commit_drag (self, offset_x, offset_y);
 }
 
+/* Phase 12: pointer hover drives the razor's cut preview. */
+static void
+update_razor_hover (OeTimeline *self, gdouble x, gdouble y)
+{
+  gboolean was_valid = self->razor_hover_valid;
+  gint64 was_us = self->razor_hover_us;
+
+  self->razor_hover_valid = FALSE;
+
+  if (self->tool == OE_TIMELINE_TOOL_RAZOR && self->drag.kind == DRAG_NONE)
+    {
+      OeTimelineHit hit = oe_timeline_hit_test (&self->geometry, &self->sequence, x, y);
+
+      if (hit.kind == OE_TIMELINE_HIT_MOVE || hit.kind == OE_TIMELINE_HIT_TRIM_IN
+          || hit.kind == OE_TIMELINE_HIT_TRIM_OUT)
+        {
+          self->razor_hover_valid
+              = razor_cut_for_x (self, hit.track_index, hit.clip_index, x, &self->razor_hover_us);
+          self->razor_hover_track = hit.track_index;
+        }
+    }
+
+  if (was_valid != self->razor_hover_valid || was_us != self->razor_hover_us)
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+static void
+on_motion (GtkEventControllerMotion *controller G_GNUC_UNUSED, gdouble x, gdouble y,
+           gpointer user_data)
+{
+  update_razor_hover (OE_TIMELINE (user_data), x, y);
+}
+
+static void
+on_leave (GtkEventControllerMotion *controller G_GNUC_UNUSED, gpointer user_data)
+{
+  OeTimeline *self = OE_TIMELINE (user_data);
+
+  if (self->razor_hover_valid)
+    {
+      self->razor_hover_valid = FALSE;
+      gtk_widget_queue_draw (GTK_WIDGET (self));
+    }
+}
+
 static gboolean
 on_scroll (GtkEventControllerScroll *controller, gdouble dx, gdouble dy, gpointer user_data)
 {
@@ -1235,6 +1393,13 @@ oe_timeline_init (OeTimeline *self)
 
   g_signal_connect (scroll, "scroll", G_CALLBACK (on_scroll), self);
   gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (scroll));
+
+  /* Phase 12: hover feeds the razor's cut preview. */
+  GtkEventController *motion = gtk_event_controller_motion_new ();
+
+  g_signal_connect (motion, "motion", G_CALLBACK (on_motion), self);
+  g_signal_connect (motion, "leave", G_CALLBACK (on_leave), self);
+  gtk_widget_add_controller (GTK_WIDGET (self), motion);
 }
 
 OeTimeline *

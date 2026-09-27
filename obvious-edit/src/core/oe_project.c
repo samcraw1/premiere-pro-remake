@@ -1716,6 +1716,184 @@ oe_project_trim_clip (OeProject *self, guint track_index, guint clip_index, gint
 }
 
 /* ------------------------------------------------------------------ */
+/* Mutations: clips (cont.) — razor split and full-value insert        */
+/* (Phase 12).                                                         */
+/* ------------------------------------------------------------------ */
+
+/* Deep clone of every clip member: the recipe oe_track_copy uses. */
+static OeClip *
+clip_clone (const OeClip *src)
+{
+  OeClip *copy = clip_new (src->position_us, src->source_in_us, src->source_out_us, src->media_ref);
+
+  copy->kind = src->kind;
+  oe_clip_visual_copy (&copy->visual, &src->visual);
+  oe_clip_generator_copy (&copy->generator, &src->generator);
+  copy->audio = src->audio;
+  copy->key = src->key;
+  return copy;
+}
+
+gboolean
+oe_project_split_clip (OeProject *self, guint track_index, guint clip_index, gint64 cut_us,
+                       GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+
+  OeTrack *track = track_at (self, track_index);
+
+  if (track == NULL)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRACK,
+                   "track %u does not exist (the project has %u)", track_index,
+                   self->sequence.tracks->len);
+      return FALSE;
+    }
+
+  if (clip_index >= track->clips->len)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_CLIP,
+                   "clip %u does not exist on track %u (it has %u)", clip_index, track_index,
+                   track->clips->len);
+      return FALSE;
+    }
+
+  OeClip *clip = g_ptr_array_index (track->clips, clip_index);
+  const gint64 length = clip_length (clip);
+
+  /* Strictly inside: a cut on either edge would leave an empty half. */
+  if (cut_us <= clip->position_us || cut_us - clip->position_us >= length)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE,
+                   "split at %lld is not strictly inside the clip [%lld, %lld)", (long long) cut_us,
+                   (long long) clip->position_us, (long long) (clip->position_us + length));
+      return FALSE;
+    }
+
+  /* A cut inside a live transition window would shrink a neighbour
+   * below the stored window and silently degrade the transition to a
+   * straight cut — refuse instead, the user moves the cut or the
+   * transition. */
+  for (guint i = 0; i < self->sequence.transitions->len; i++)
+    {
+      const OeTransition *t = g_ptr_array_index (self->sequence.transitions, i);
+
+      if (t->track_index != track_index)
+        continue;
+
+      const OeTransitionWindow w = oe_transition_window (&self->sequence, t);
+
+      if (w.active && w.start_us < cut_us && cut_us < w.end_us)
+        {
+          g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_TRANSITION,
+                       "split at %lld falls inside the %s transition window [%lld, %lld)",
+                       (long long) cut_us, oe_transition_kind_get_name (t->kind),
+                       (long long) w.start_us, (long long) w.end_us);
+          return FALSE;
+        }
+    }
+
+  /* Stage both halves completely before touching the model. */
+  const gint64 rel = cut_us - clip->position_us;
+  GArray *left_keys = NULL;
+  GArray *right_keys = NULL;
+
+  oe_keyframes_split (clip->visual.keyframes, rel, length, &left_keys, &right_keys);
+
+  OeClip *right = clip_clone (clip);
+
+  right->position_us = cut_us;
+  if (clip->kind == OE_CLIP_MEDIA)
+    right->source_in_us = clip->source_in_us + rel;
+  else
+    {
+      /* Generated clips keep the [0, duration) convention (D3): their
+       * source range is screen duration, not a source offset. */
+      right->source_in_us = 0;
+      right->source_out_us = length - rel;
+    }
+  g_clear_pointer (&right->visual.keyframes, g_array_unref);
+  right->visual.keyframes = right_keys;
+  right->visual.fade_in_us = 0; /* the cut is a hard edit on both sides */
+  right->visual.fade_out_us = MIN (clip->visual.fade_out_us, (guint64) (length - rel));
+
+  clip->source_out_us = clip->source_in_us + rel;
+  g_clear_pointer (&clip->visual.keyframes, g_array_unref);
+  clip->visual.keyframes = left_keys;
+  clip->visual.fade_in_us = MIN (clip->visual.fade_in_us, (guint64) rel);
+  clip->visual.fade_out_us = 0;
+
+  /* The right half starts where the left now ends and before the next
+   * clip's start: index order is already position order. */
+  g_ptr_array_insert (track->clips, (gint) clip_index + 1, right);
+  notify (self);
+
+  return TRUE;
+}
+
+gboolean
+oe_project_insert_clip_value (OeProject *self, guint track_index, const OeClip *clip,
+                              GError **error)
+{
+  g_return_val_if_fail (OE_IS_PROJECT (self), FALSE);
+  g_return_val_if_fail (clip != NULL, FALSE);
+
+  OeTrack *track = NULL;
+
+  if (!validate_placement (self, track_index, clip->kind, clip->media_ref, clip->position_us,
+                           clip->source_in_us, clip->source_out_us, &track, error))
+    return FALSE;
+
+  if (clip->kind != OE_CLIP_MEDIA && clip->source_in_us != 0)
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_RANGE,
+                   "generated clips carry the source range [0, duration) (D3); got source-in %lld",
+                   (long long) clip->source_in_us);
+      return FALSE;
+    }
+
+  if (!oe_clip_visual_is_valid (&clip->visual))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_VISUAL,
+                   "clip visual out of domain");
+      return FALSE;
+    }
+
+  if (!oe_clip_audio_is_valid (&clip->audio))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_AUDIO,
+                   "clip audio out of domain (gain %d, pan %d)", clip->audio.gain, clip->audio.pan);
+      return FALSE;
+    }
+
+  if (!oe_clip_generator_is_valid_for (clip->kind, &clip->generator)
+      || !oe_clip_key_is_valid (&clip->key))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_BAD_GENERATOR,
+                   "generator payload or key out of domain for %s clips",
+                   oe_clip_kind_get_name (clip->kind));
+      return FALSE;
+    }
+
+  gint64 duration = clip->source_out_us - clip->source_in_us;
+
+  if (placement_overlaps (track, clip->position_us, duration, NULL))
+    {
+      g_set_error (error, OE_PROJECT_ERROR, OE_PROJECT_ERROR_OVERLAP,
+                   "clip [%lld, %lld) overlaps an existing clip on %s track %u",
+                   (long long) clip->position_us, (long long) (clip->position_us + duration),
+                   oe_track_kind_get_name (track->kind), track_index);
+      return FALSE;
+    }
+
+  g_ptr_array_add (track->clips, clip_clone (clip));
+  g_ptr_array_sort (track->clips, clip_compare);
+  notify (self);
+
+  return TRUE;
+}
+
+/* ------------------------------------------------------------------ */
 /* Mutations: media references.                                        */
 /* ------------------------------------------------------------------ */
 
